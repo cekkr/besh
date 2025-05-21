@@ -154,6 +154,7 @@ int main(int argc, char *argv[]) {
                 else if (top_block->type == BLOCK_TYPE_ELSE) block_type_str = "else";
                 else if (top_block->type == BLOCK_TYPE_WHILE) block_type_str = "while";
                 else if (top_block->type == BLOCK_TYPE_FUNCTION_DEF) block_type_str = "defunc";
+                //todo: else if "import" for external scripts
 
                 if (current_exec_state == STATE_BLOCK_SKIP) {
                     snprintf(state_indicator, sizeof(state_indicator), "(skip %s %d)", block_type_str, block_stack_top + 1);
