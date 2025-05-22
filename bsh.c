@@ -748,22 +748,52 @@ void expand_variables_in_string_advanced(const char *input_str, char *expanded_s
             } else { // Simple variable
                 strncpy(base_var_name, var_name_buffer, MAX_VAR_NAME_LEN -1); base_var_name[MAX_VAR_NAME_LEN -1] = '\0';
             }
-
+            
             char *value_to_insert = NULL;
-            if (is_array_access) {
-                value_to_insert = get_array_element_scoped(base_var_name, index_str_raw);
-            } else {
+            if (is_array_access) { // Se la sintassi è $name[index]
+                value_to_insert = get_array_element_scoped(base_var_name, expanded_index_val); // Prova prima come array BSH
+
+                if (!value_to_insert) { // Non trovato come array BSH, prova come accesso a carattere di stringa
+                    char* simple_var_val = get_variable_scoped(base_var_name);
+                    if (simple_var_val) { // Trovata una variabile semplice con quel nome base
+                        // Esegui l'accesso al carattere
+                        char temp_char_buffer[2]; // Buffer per 1 carattere + null terminator
+                        long index_num = -1;
+                        char *endptr;
+                        errno = 0;
+                        index_num = strtol(expanded_index_val, &endptr, 10);
+
+                        if (errno == 0 && *expanded_index_val != '\0' && *endptr == '\0' && index_num >= 0 && (size_t)index_num < strlen(simple_var_val)) {
+                            temp_char_buffer[0] = simple_var_val[index_num];
+                            temp_char_buffer[1] = '\0';
+                            value_to_insert = temp_char_buffer; // value_to_insert ora punta a temp_char_buffer
+                                                                // La stringa verrà copiata nel buffer di output p_out
+                        } else {
+                            // Index non valido, fuori range, o non numerico: espande a stringa vuota
+                            temp_char_buffer[0] = '\0';
+                            value_to_insert = temp_char_buffer;
+                        }
+                    }
+                    // Se simple_var_val non esiste, value_to_insert rimane NULL (o stringa vuota se preferito)
+                    // e si espanderà a stringa vuota come per variabili non definite.
+                }
+            } else { // Variabile semplice (es. $varname)
                 value_to_insert = get_variable_scoped(base_var_name);
             }
 
             if (value_to_insert) {
                 size_t val_len = strlen(value_to_insert);
                 if (val_len < remaining_size) {
-                    strcpy(p_out, value_to_insert); p_out += val_len; remaining_size -= val_len;
-                } else { // Not enough space in output buffer
-                    strncpy(p_out, value_to_insert, remaining_size); p_out += remaining_size; remaining_size = 0;
+                    strcpy(p_out, value_to_insert);
+                    p_out += val_len;
+                    remaining_size -= val_len;
+                } else {
+                    strncpy(p_out, value_to_insert, remaining_size);
+                    p_out += remaining_size;
+                    remaining_size = 0;
                 }
-            } // If variable not found, it expands to nothing (empty string)
+            }
+
         } else if (*p_in == '\\' && *(p_in+1) == '$') { // Escaped dollar sign \$
             p_in++; // Skip '\'
             if (remaining_size > 0) { *p_out++ = *p_in++; remaining_size--; } // Copy '$'
