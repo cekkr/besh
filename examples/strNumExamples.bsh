@@ -1,4 +1,4 @@
-# example_script.bsh
+# strNumExamples.bsh
 # Example script to demonstrate the number.bsh and string.bsh libraries
 
 echo "--- Start of Example Script ---"
