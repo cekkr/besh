@@ -1,0 +1,112 @@
+# BSH String Framework (string.bsh)
+# Provides functions for string operations.
+# Assumes a C library (e.g., bshmath or a dedicated bshstring lib) is loaded,
+# typically with an alias like $BSH_STRING_LIB_ALIAS.
+
+echo "Loading String Framework (string.bsh)..."
+
+# --- Configuration ---
+# The alias used when loading the C string library functions.
+# This could be the same as BSH_MATH_LIB_ALIAS if functions are bundled.
+$BSH_STRING_LIB_ALIAS = "bshstringlib" # Example, adjust as needed
+
+# --- Helper: Check if the string library seems loaded ---
+function is_string_lib_loaded (result_var) {
+    # Placeholder, similar to is_math_lib_loaded
+    echo "is_string_lib_loaded: Assuming '$BSH_STRING_LIB_ALIAS' is loaded if used."
+    $($result_var) = "true"
+}
+
+# --- String Comparison Operations ---
+# These functions set result_var to "1" (true) or "0" (false).
+# They call C functions that perform the actual comparison and output "1" or "0".
+# Assumed C functions: bsh_string_is_equal, bsh_string_is_not_equal
+
+function _string_compare_op (op_display_name c_func_name arg1_str arg2_str result_var_name) {
+    echo "STRING COMPARE $op_display_name: '$arg1_str', '$arg2_str'"
+    is_string_lib_loaded string_lib_ready
+    if $string_lib_ready != "true" {
+        echo "Error: String library '$BSH_STRING_LIB_ALIAS' not loaded. Cannot perform $op_display_name."
+        $($result_var_name) = "0" # Default to false on library error
+        return
+    }
+
+    calllib $BSH_STRING_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str"
+    if $LAST_LIB_CALL_STATUS == "0" {
+        $($result_var_name) = $LAST_LIB_CALL_OUTPUT # Expected "1" or "0" from C
+        echo "STRING COMPARE $op_display_name result: $($result_var_name)"
+    } else {
+        echo "Error during $op_display_name operation with $BSH_STRING_LIB_ALIAS.$c_func_name."
+        echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
+        $($result_var_name) = "0" # Default to false on operation error
+    }
+}
+
+function string_eq (str1 str2 result_var) {
+    _string_compare_op "equal" "bsh_string_is_equal" "$str1" "$str2" $result_var
+}
+
+function string_ne (str1 str2 result_var) {
+    _string_compare_op "not_equal" "bsh_string_is_not_equal" "$str1" "$str2" $result_var
+}
+
+# --- Other String Functions ---
+
+# Usage: string_len STR_VAL RESULT_VAR_NAME
+# Assumed C function: bsh_string_length(argc=1, argv={"str"}, obuf, obuf_size)
+function string_len (str_val result_var) {
+    echo "STRING LEN: Getting length of '$str_val'"
+    is_string_lib_loaded string_lib_ready
+    if $string_lib_ready != "true" {
+        echo "Error: String library '$BSH_STRING_LIB_ALIAS' not loaded for string_len."
+        $($result_var) = "-1" # Error indicator for length
+        return
+    }
+
+    calllib $BSH_STRING_LIB_ALIAS "bsh_string_length" "$str_val"
+    if $LAST_LIB_CALL_STATUS == "0" {
+        $($result_var) = $LAST_LIB_CALL_OUTPUT # Expected length as a string from C
+        echo "STRING LEN of '$str_val' result: $($result_var)"
+    } else {
+        echo "Error during string_len operation with $BSH_STRING_LIB_ALIAS.bsh_string_length."
+        echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
+        $($result_var) = "-1" # Error indicator
+    }
+}
+
+echo "String Framework loaded."
+echo "Use string_eq, string_ne for comparisons, and string_len for length."
+
+# --- Example Usage (commented out) ---
+# $s1 = "hello"
+# $s2 = "world"
+# $s3 = "hello"
+# $empty_str = ""
+# $res = ""
+#
+# string_eq "$s1" "$s2" res
+# echo "'$s1' == '$s2' ? $res" # Expected: 0
+#
+# string_eq "$s1" "$s3" res
+# echo "'$s1' == '$s3' ? $res" # Expected: 1
+#
+# string_ne "$s1" "$s2" res
+# echo "'$s1' != '$s2' ? $res" # Expected: 1
+#
+# string_len "$s1" res
+# echo "Length of '$s1': $res" # Expected: 5
+#
+# string_len "$empty_str" res
+# echo "Length of empty string: $res" # Expected: 0
+#
+# $cond_str = ""
+# string_eq "test" "test" cond_str
+# if $cond_str {
+#  echo "String 'test' == 'test' is true"
+# }
+#
+# if ! $cond_str { # this is error if cond_str is 1
+#  echo "This should not print for 'test'=='test'"
+# } else {
+#  echo "Else for ! cond_str (cond_str is $cond_str)"
+# }

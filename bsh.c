@@ -1079,22 +1079,143 @@ bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, T
 }
 
 void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
-    if (num_tokens < 4) {
-        fprintf(stderr, "Syntax error for 'if'. Expected: if <op1> <op> <op2> [{]\n");
+    // Expect: if [!] <VALUE_TOKEN> [{]
+    // VALUE_TOKEN should be a variable $var, or a string "0" or "1" after expansion
+    if (num_tokens < 2) { // At least 'if condition_token'
+        fprintf(stderr, "Syntax error for 'if'. Expected: if [!] <condition_value_or_variable> [{]\n");
         if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
            push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
         } return;
     }
+
     bool condition_result = false;
+    bool negate_result = false;
+    int condition_token_idx = 1;
+
     if (current_exec_state != STATE_BLOCK_SKIP) {
-         condition_result = evaluate_condition_advanced(&tokens[1], &tokens[2], &tokens[3]);
-    }
+        if (tokens[1].type == TOKEN_OPERATOR && strcmp(tokens[1].text, "!") == 0) {
+            if (num_tokens < 3) { // 'if ! condition_token'
+                fprintf(stderr, "Syntax error for 'if !'. Expected: if ! <condition_value_or_variable> [{]\n");
+                if (block_stack_top_bf < MAX_NESTING_DEPTH -1) { // Ensure not already skipping before pushing new skip
+                    push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+                }
+                return;
+            }
+            negate_result = true;
+            condition_token_idx = 2;
+        }
+
+        char condition_value_expanded[INPUT_BUFFER_SIZE];
+        // Expand the token that represents the condition's result
+        if (tokens[condition_token_idx].type == TOKEN_STRING) {
+            char unescaped[INPUT_BUFFER_SIZE];
+            unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+            expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+        } else {
+            expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+        }
+
+        if (strcmp(condition_value_expanded, "1") == 0) {
+            condition_result = true;
+        } else {
+            condition_result = false; // Any other value including "0" is false.
+        }
+
+        if (negate_result) {
+            condition_result = !condition_result;
+        }
+    } // else, if current_exec_state == STATE_BLOCK_SKIP, condition_result remains false
+
     push_block_bf(BLOCK_TYPE_IF, condition_result, 0, current_line_no);
-    if (condition_result && current_exec_state != STATE_BLOCK_SKIP) current_exec_state = STATE_BLOCK_EXECUTE;
-    else current_exec_state = STATE_BLOCK_SKIP;
+    if (condition_result && current_exec_state != STATE_BLOCK_SKIP) { // Check current_exec_state again in case it changed during condition eval
+        current_exec_state = STATE_BLOCK_EXECUTE;
+    } else {
+        current_exec_state = STATE_BLOCK_SKIP;
+    }
+
     // Check for '{' on same line or expect on next
-    if (! (num_tokens > 4 && tokens[num_tokens-1].type == TOKEN_LBRACE) && !(num_tokens == 4) ) {
-        fprintf(stderr, "Syntax error for 'if': '{' expected after condition or on next line, or unexpected tokens.\n");
+    // tokens[0] = if, tokens[condition_token_idx] = condition value
+    int expected_brace_idx_after_condition = condition_token_idx + 1;
+    if (num_tokens > expected_brace_idx_after_condition && tokens[num_tokens-1].type == TOKEN_LBRACE) {
+        // '{' is present on the same line
+    } else if (num_tokens == expected_brace_idx_after_condition) {
+        // Only 'if [!] $var', expect '{' on next line
+    } else if (num_tokens > expected_brace_idx_after_condition && tokens[expected_brace_idx_after_condition].type == TOKEN_LBRACE ) {
+        // Handles 'if [!] $var {' correctly where num_tokens-1 is not the brace due to potential comment
+    }
+     else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == expected_brace_idx_after_condition){
+        // if $var # comment, brace on next line
+    }
+    else if (num_tokens > expected_brace_idx_after_condition) { // Unexpected tokens after condition and no brace
+         fprintf(stderr, "Syntax error for 'if': Unexpected tokens after condition value. '{' expected.\n");
+    }
+    // If no brace on the same line, it's expected on the next. No error if only condition is present.
+}
+
+void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
+    // Expect: while [!] <VALUE_TOKEN> [{]
+    if (num_tokens < 2) {
+        fprintf(stderr, "Syntax error for 'while'. Expected: while [!] <condition_value_or_variable> [{]\n");
+        if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
+           push_block_bf(BLOCK_TYPE_WHILE, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+        } return;
+    }
+
+    bool condition_result = false;
+    bool negate_result = false;
+    int condition_token_idx = 1;
+    long loop_fpos_at_while_line = -1; // Placeholder, see notes in thought process
+
+    // TODO: Capture file position for fseek based loops correctly if input_source is a file.
+    // The current_line_no is used as a fallback or for non-file sources.
+    // loop_fpos_at_while_line = get_file_pos_before_line_was_read(input_source); // Conceptual
+
+    if (current_exec_state != STATE_BLOCK_SKIP) {
+        if (tokens[1].type == TOKEN_OPERATOR && strcmp(tokens[1].text, "!") == 0) {
+            if (num_tokens < 3) {
+                fprintf(stderr, "Syntax error for 'while !'. Expected: while ! <condition_value_or_variable> [{]\n");
+                 if (block_stack_top_bf < MAX_NESTING_DEPTH -1) {
+                    push_block_bf(BLOCK_TYPE_WHILE, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+                }
+                return;
+            }
+            negate_result = true;
+            condition_token_idx = 2;
+        }
+
+        char condition_value_expanded[INPUT_BUFFER_SIZE];
+        if (tokens[condition_token_idx].type == TOKEN_STRING) {
+            char unescaped[INPUT_BUFFER_SIZE];
+            unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+            expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+        } else {
+            expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+        }
+
+        if (strcmp(condition_value_expanded, "1") == 0) {
+            condition_result = true;
+        } else {
+            condition_result = false;
+        }
+
+        if (negate_result) {
+            condition_result = !condition_result;
+        }
+    }
+
+    push_block_bf(BLOCK_TYPE_WHILE, condition_result, loop_fpos_at_while_line, current_line_no);
+    if (condition_result && current_exec_state != STATE_BLOCK_SKIP) {
+        current_exec_state = STATE_BLOCK_EXECUTE;
+    } else {
+        current_exec_state = STATE_BLOCK_SKIP;
+    }
+
+    int expected_brace_idx_after_condition = condition_token_idx + 1;
+    if (num_tokens > expected_brace_idx_after_condition && tokens[num_tokens-1].type == TOKEN_LBRACE) {}
+    else if (num_tokens == expected_brace_idx_after_condition) {}
+    else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == expected_brace_idx_after_condition){}
+    else if (num_tokens > expected_brace_idx_after_condition) {
+         fprintf(stderr, "Syntax error for 'while': Unexpected tokens after condition. '{' expected.\n");
     }
 }
 
@@ -1102,53 +1223,90 @@ void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_s
     BlockFrame* prev_block_frame = peek_block_bf();
     if (!prev_block_frame || (prev_block_frame->type != BLOCK_TYPE_IF && prev_block_frame->type != BLOCK_TYPE_ELSE)) {
         fprintf(stderr, "Error: 'else' without a preceding 'if' or 'else if' block.\n");
-        if (current_exec_state != STATE_BLOCK_SKIP) {
+        if (current_exec_state != STATE_BLOCK_SKIP) { // Avoid pushing skip if already skipping
             current_exec_state = STATE_BLOCK_SKIP; push_block_bf(BLOCK_TYPE_ELSE, false, 0, current_line_no);
         } return;
     }
-    BlockFrame closed_if_or_else_if = *pop_block_bf(); bool execute_this_else_branch = false;
-    if (closed_if_or_else_if.condition_true) execute_this_else_branch = false;
-    else {
-        if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { // "else if"
-            if (num_tokens < 5) { fprintf(stderr, "Syntax error for 'else if'.\n"); execute_this_else_branch = false; }
-            else { if (current_exec_state != STATE_BLOCK_SKIP) execute_this_else_branch = evaluate_condition_advanced(&tokens[2], &tokens[3], &tokens[4]);
-                   else execute_this_else_branch = false;
+
+    BlockFrame closed_if_or_else_if = *pop_block_bf();
+    bool execute_this_else_branch = false;
+
+    if (closed_if_or_else_if.condition_true) {
+        execute_this_else_branch = false;
+    } else {
+        // tokens[0] is 'else'
+        if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { // "else if [!] <condition_value>"
+            // Minimum: else if $var (3 tokens) or else if ! $var (4 tokens)
+            if (num_tokens < 3) {
+                fprintf(stderr, "Syntax error for 'else if'. Expected: else if [!] <condition_value_or_variable> [{]\n");
+                execute_this_else_branch = false; // Fall through to push block with false condition
+            } else {
+                 bool negate_result = false;
+                 int condition_token_idx = 2; // After 'else if'
+
+                if (tokens[2].type == TOKEN_OPERATOR && strcmp(tokens[2].text, "!") == 0) { // else if ! $var
+                    if (num_tokens < 4) { // 'else if ! condition'
+                        fprintf(stderr, "Syntax error for 'else if !'. Expected: else if ! <condition_value_or_variable> [{]\n");
+                        execute_this_else_branch = false;
+                    } else {
+                        negate_result = true;
+                        condition_token_idx = 3;
+                    }
+                }
+                // Check if we should even evaluate or if execute_this_else_branch is already decided false
+                if (execute_this_else_branch == false && !(negate_result && num_tokens <4) && !(num_tokens <3) ) { // if not error already
+                    if (current_exec_state != STATE_BLOCK_SKIP) {
+                        char condition_value_expanded[INPUT_BUFFER_SIZE];
+                        if (tokens[condition_token_idx].type == TOKEN_STRING) {
+                            char unescaped[INPUT_BUFFER_SIZE];
+                            unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+                            expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+                        } else {
+                            expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+                        }
+
+                        bool current_cond_val = false;
+                        if (strcmp(condition_value_expanded, "1") == 0) {
+                            current_cond_val = true;
+                        }
+
+                        if (negate_result) {
+                            execute_this_else_branch = !current_cond_val;
+                        } else {
+                            execute_this_else_branch = current_cond_val;
+                        }
+                    } else { // Already skipping from outer scope
+                        execute_this_else_branch = false;
+                    }
+                }
             }
-        } else execute_this_else_branch = true; // Simple "else"
+        } else { // Simple "else"
+            execute_this_else_branch = true;
+        }
     }
+
     push_block_bf(BLOCK_TYPE_ELSE, execute_this_else_branch, 0, current_line_no);
-    if (execute_this_else_branch && current_exec_state != STATE_BLOCK_SKIP) current_exec_state = STATE_BLOCK_EXECUTE;
-    else current_exec_state = STATE_BLOCK_SKIP;
-    // Check for '{' on same line or expect on next
-    int expected_brace_token_idx = (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) ? 5 : 1;
-    if (! (num_tokens > expected_brace_token_idx && tokens[num_tokens-1].type == TOKEN_LBRACE) && !(num_tokens == expected_brace_token_idx) ) {
-         if (num_tokens > expected_brace_token_idx || (num_tokens == expected_brace_token_idx && tokens[num_tokens-1].type != TOKEN_LBRACE && tokens[0].type != TOKEN_EOF) )
-            fprintf(stderr, "Syntax error for 'else'/'else if': '{' expected or unexpected tokens.\n");
+    if (execute_this_else_branch && current_exec_state != STATE_BLOCK_SKIP) {
+        current_exec_state = STATE_BLOCK_EXECUTE;
+    } else {
+        current_exec_state = STATE_BLOCK_SKIP;
     }
-}
 
-void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
-    if (num_tokens < 4) {
-        fprintf(stderr, "Syntax error for 'while'. Expected: while <op1> <op> <op2> [{]\n");
-        if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
-           push_block_bf(BLOCK_TYPE_WHILE, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
-        } return;
+    // Syntax check for '{'
+    int base_token_count = 1; // For 'else'
+    if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { // else if ...
+        base_token_count = 2; // After 'else if'
+        if (num_tokens > 2 && tokens[2].type == TOKEN_OPERATOR && strcmp(tokens[2].text, "!") == 0) { // else if ! ...
+             base_token_count = 3; // After 'else if !'
+        }
+        base_token_count++; // For the condition token itself
     }
-    bool condition_result = false; long loop_fpos_at_while_line = -1;
-    // TODO: If input_source is a file, try to get ftell() *before* this line was read by execute_script
-    // and pass it here as an argument to process_line, then to push_block_bf.
-    // For now, loop_start_fpos in BlockFrame might not be accurately set for fseek-based looping.
-    // current_line_no is more reliable for conceptual looping or in-memory script parts.
 
-    if (current_exec_state != STATE_BLOCK_SKIP) {
-        condition_result = evaluate_condition_advanced(&tokens[1], &tokens[2], &tokens[3]);
-    }
-    push_block_bf(BLOCK_TYPE_WHILE, condition_result, loop_fpos_at_while_line, current_line_no);
-    if (condition_result && current_exec_state != STATE_BLOCK_SKIP) current_exec_state = STATE_BLOCK_EXECUTE;
-    else current_exec_state = STATE_BLOCK_SKIP;
-
-    if (! (num_tokens > 4 && tokens[num_tokens-1].type == TOKEN_LBRACE) && !(num_tokens == 4) ) {
-         fprintf(stderr, "Syntax error for 'while': '{' expected after condition or on next line, or unexpected tokens.\n");
+    if (num_tokens > base_token_count && tokens[num_tokens-1].type == TOKEN_LBRACE) { /* ok */ }
+    else if (num_tokens == base_token_count) { /* ok, brace on next line */ }
+    else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == base_token_count){}
+    else if (num_tokens > base_token_count) {
+        fprintf(stderr, "Syntax error for 'else'/'else if': Unexpected tokens after condition. '{' expected.\n");
     }
 }
 
