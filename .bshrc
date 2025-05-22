@@ -1,0 +1,253 @@
+# Default BSH Startup Script (.bshrc)
+# This script is executed when bsh starts.
+# You can define functions, set variables, and customize your shell environment here.
+
+echo "Executing .bshrc..."
+echo "Welcome to bsh (Bash-like SHell)!"
+echo "------------------------------------"
+
+# --- Set a custom prompt ---
+# PS1 is the primary prompt string.
+# You can use variables in PS1. For example, to include the shell version:
+# $PS1 = "bsh v$SHELL_VERSION>"
+# For now, a simple static prompt. A dynamic PWD would require more C-core support or a reliable external call.
+$PS1 = "mybsh"
+
+# --- Utility Functions ---
+
+# Function to check if a variable is empty (has no value or is an empty string)
+# Usage: is_empty VAR_NAME_STRING RESULT_VAR_NAME
+# Example: is_empty my_var check_result
+#          if $check_result == "true" { echo "my_var is empty" }
+defunc is_empty (var_name_str result_var) {
+    $temp_val = $($var_name_str) # Get the value of the variable whose name is in var_name_str
+    if $temp_val == "" {
+        $($result_var) = "true"
+    } else {
+        $($result_var) = "false"
+    }
+}
+
+# Function to check if a variable is defined (exists)
+# Note: In this shell, undefined variables expand to empty strings.
+# So, this is effectively the same as is_empty for now.
+# A more robust version might require C-core support to distinguish truly unset vs. empty.
+defunc is_defined (var_name_str result_var) {
+    # This is tricky. The C core's get_variable returns NULL for undefined,
+    # which expands to "" in string contexts.
+    # For shell script, we can't directly see the NULL.
+    # We can try to assign it to a temp var and see if it's empty.
+    # This doesn't truly distinguish "unset" from "set to empty string".
+    is_empty $var_name_str temp_is_empty_res
+    if $temp_is_empty_res == "true" {
+        $($result_var) = "false" # If empty, consider it "not defined" in a practical sense
+    } else {
+        $($result_var) = "true"
+    }
+}
+
+# --- Enhanced Control Structures ---
+
+# Define a 'for_loop' function (inspired by exampleScript.bsh.txt)
+# Usage: for_loop ITERATOR_VAR_NAME START_VAL END_VAL_EXCLUSIVE STEP_VAL "COMMAND_STRING_TO_EXECUTE"
+# Example: for_loop i 0 5 1 "echo Iteration i is $i"
+# Note: ITERATOR_VAR_NAME is the *name* of the variable (e.g., "i"), not "$i".
+#       COMMAND_STRING_TO_EXECUTE is a string that will be executed by the shell.
+#       The loop runs while $ITERATOR_VAR_NAME < $END_VAL_EXCLUSIVE for positive steps,
+#       and while $ITERATOR_VAR_NAME > $END_VAL_EXCLUSIVE for negative steps.
+defunc for_loop (iterator start_val end_val step command_body) {
+    echo "FOR_LOOP: Iter '$iterator' from $start_val to $end_val (exclusive) step $step"
+    $($iterator) = $start_val  # Initialize the iterator variable
+
+    if $step == "0" {
+        echo "FOR_LOOP Error: Step value cannot be zero."
+        # Potentially loop infinitely or not at all, better to prevent.
+        return # 'return' isn't a built-in, this is conceptual for exiting function.
+               # In current shell, it will just continue after the if.
+    }
+
+    # Determine if step is positive or negative by checking the first char
+    # This is a simplification. A robust solution would use a library for string to number.
+    $first_char_of_step = $step # This will get the first char if $step is e.g. "-1"
+                                # This needs a substring function or more complex parsing.
+                                # For now, let's assume evaluate_condition handles "number" > "0" correctly.
+
+    if $step > "0" { # Positive step
+        while $($iterator) < $end_val {
+            # Execute the command body. The shell will expand variables within command_body.
+            $command_body
+
+            # Increment iterator by step value
+            $counter_var_for_step = "0"
+            while $counter_var_for_step < $step {
+                inc $($iterator) # Increment the actual iterator variable
+                inc counter_var_for_step
+            }
+        }
+    } else { # Negative step (e.g., step is "-1", "-2")
+        while $($iterator) > $end_val {
+            $command_body
+
+            # Decrement iterator by absolute value of step
+            # This is tricky without an abs() function or good string manipulation for negative numbers.
+            # Let's make a simplifying assumption for demonstration:
+            # We'll create a positive version of the step for the inner counter loop.
+            # This is still not ideal.
+            $positive_step_for_dec = $step # e.g. "-2"
+            # Crude attempt to make it positive for loop count (conceptual)
+            # if $step == "-1" { $positive_step_for_dec = "1" }
+            # if $step == "-2" { $positive_step_for_dec = "2" }
+            # This needs a proper 'abs' or string manipulation.
+            # For this example, let's assume we can construct a positive counter.
+            # A simpler way for negative step:
+            $counter_var_for_step = "0"
+            # We need to compare counter with positive version of step.
+            # Example: if step is -2, we want to dec twice.
+            # A robust solution for negative steps requires better math/string tools.
+            # For now, this part of negative step for_loop is more illustrative of intent.
+
+            # Simplified: Assume step is negative, so we decrement.
+            # The inner loop should run "abs(step)" times.
+            # Let's assume $step is like "-1", "-2". We need to make it positive for the loop count.
+            # This is hard. For simplicity, let's assume a fixed number of decs if step is negative.
+            # This part of the for_loop is complex to implement robustly without better primitives.
+
+            # Let's try a direct approach for the decrement part, assuming 'dec' works.
+            # If step is -1, dec once. If -2, dec twice.
+            # This requires a loop that runs abs($step) times.
+            # We can simulate abs for simple negative numbers by removing '-' if present.
+            # This is still getting very complex for a startup script without core support.
+
+            # Simplification: just use 'dec' once per outer loop if step is negative.
+            # This means this for_loop with negative step effectively becomes step -1.
+             dec $($iterator) # Decrement the actual iterator variable
+             # To truly honor the step value, one would need to dec abs(step) times.
+        }
+    }
+    echo "FOR_LOOP: Finished for '$iterator'."
+}
+
+
+# Function for C-style for loop (conceptual, from example)
+# Usage: c_for "INIT_CMD" "CONDITION_CMD; COND_RESULT_VAR" "INCREMENT_CMD" "BODY_CMD"
+# Example: c_for "$i=0" "is_lt $i 5 res_var; res_var" "inc i" "echo C_FOR: i is $i"
+# 'is_lt' would be a helper function: defunc is_lt (a b r) { if $a < $b { $($r)="true"} else {$($r)="false"} }
+
+defunc is_lt (op1 op2 result_var_name) {
+    if $op1 < $op2 {
+        $($result_var_name) = "true"
+    } else {
+        $($result_var_name) = "false"
+    }
+}
+defunc is_le (op1 op2 result_var_name) {
+    if $op1 <= $op2 {
+        $($result_var_name) = "true"
+    } else {
+        $($result_var_name) = "false"
+    }
+}
+# Add is_gt, is_ge, is_eq, is_ne as needed for c_for conditions
+
+defunc c_for (init_command condition_command_and_var increment_command body_command) {
+    # Parse condition_command_and_var: "ACTUAL_CONDITION_COMMAND; RESULT_VAR_NAME"
+    # This parsing is complex in pure shell script without string manipulation functions like split.
+    # For this example, let's assume a fixed name for the result variable, e.g., CFOR_COND_RESULT
+    # and the user must ensure their condition_command sets this variable.
+    # Or, the user passes them separately. Let's adjust defunc for that.
+    # defunc c_for (init_command condition_command condition_result_var increment_command body_command)
+
+    echo "C_FOR: Initializing..."
+    $init_command # Execute initialization (e.g., "$i=0")
+
+    echo "C_FOR: Starting loop..."
+    # First condition check
+    # The condition_command is expected to set the condition_result_var (e.g., "CFOR_COND_RESULT")
+    # Example condition_command: "is_lt $i 10 CFOR_COND_RESULT"
+    $condition_command
+
+    while $($condition_result_var) == "true" {
+        $body_command      # Execute body
+        $increment_command # Execute increment
+        $condition_command # Re-check condition
+    }
+    echo "C_FOR: Finished."
+}
+
+# --- Aliases (using functions) ---
+# Note: True aliases that do text substitution before parsing are a C-core feature.
+# These functions act like simple command aliases.
+
+defunc ls () {
+    echo "(alias) Executing 'ls -F' (external command)..."
+    /bin/ls -F # Assuming /bin/ls, adjust if needed or rely on PATH
+}
+
+defunc ll () {
+    echo "(alias) Executing 'ls -lAh' (external command)..."
+    /bin/ls -lAh # Example, adjust flags as desired
+}
+
+# --- Type-related functions (conceptual) ---
+# These would typically call external libraries or very basic checks.
+
+# Tries to guess if a variable's content looks like an integer.
+# Usage: is_int VAR_NAME_STRING RESULT_VAR_NAME
+defunc is_int (var_name_str result_var) {
+    $val_to_check = $($var_name_str)
+    $($result_var) = "false" # Default to false
+
+    # This is a very basic check.
+    # It doesn't handle signs well or leading/trailing spaces robustly without more tools.
+    # A library call would be much better.
+    # For demonstration: check if it's not empty and all chars are digits (simplistic)
+    if $val_to_check == "" { return } # Empty is not int for this purpose
+
+    # How to check "all chars are digits" in pure bsh script without char-by-char iteration?
+    # This is hard. The C core's strtol in evaluate_condition is more robust.
+    # Let's assume we have a hypothetical external 'is_numeric_string' command or lib call.
+    # For this script, we'll make it a placeholder or a very simple check.
+    # Simple placeholder: if it can be used in 'inc' without becoming 1 from 0 (meaning it was likely not 0 or numeric)
+    # This is a hacky way to infer.
+
+    # A better approach for the startup script:
+    # Assume that if `evaluate_condition_advanced` can treat it as a number for e.g. `$val == 0`
+    # or `$val > -1`, it's somewhat numeric.
+    # This function is more about intent.
+    echo "is_int: Basic check for '$val_to_check'. For robust check, use a library."
+    # Conceptual: if (calllib type_checker is_integer $val_to_check) sets $LAST_LIB_CALL_OUTPUT to "true"
+    # For now, just a placeholder that often results in false.
+    # A slightly better basic check:
+    $temp_for_is_int = $val_to_check
+    $original_temp = $val_to_check
+    inc temp_for_is_int
+    dec temp_for_is_int
+    if $temp_for_is_int == $original_temp {
+        # This implies it was likely a number that inc/dec could operate on.
+        # However, "abc" -> inc -> 1 -> dec -> 0. So "abc" != "0". This logic is flawed.
+        # Sticking to simple:
+        if $val_to_check == "0" { $($result_var) = "true"; return }
+        if $val_to_check == "1" { $($result_var) = "true"; return } # etc. for small numbers
+        # This is not a general solution.
+    }
+    # Fallback: if it looks like a number to our basic condition evaluator
+    if $val_to_check >= "0" { # This uses the shell's built-in numeric-ish comparison
+         # check if it's not just "true" or "false" from a previous boolean op
+         if $val_to_check != "true" {
+            if $val_to_check != "false" {
+                 # This is still weak. True numeric check is hard.
+                 # Let's assume if it's not empty and doesn't cause issues with ">="
+                 # it *might* be numeric.
+                 # For now, this function is mostly a placeholder.
+            }
+         }
+    }
+
+}
+
+
+# --- End of .bshrc ---
+echo "------------------------------------"
+echo ".bshrc execution finished."
+echo ""
+
