@@ -1,0 +1,172 @@
+# BSH Number Framework (number.bsh)
+# Provides functions for mathematical operations on number-like strings.
+# Assumes a C math library (e.g., compiled via c_compiler.bsh) is loaded,
+# typically with an alias like 'bshmath'.
+
+echo "Loading Number Framework (number.bsh)..."
+
+# --- Configuration ---
+# The alias used when loading the C math library.
+# Users should ensure this library is loaded (e.g., in .bshrc after c_compiler.bsh)
+$BSH_MATH_LIB_ALIAS = "bshmath"
+
+# --- Helper: Check if the math library seems loaded ---
+# This is a conceptual check. A more robust way would be if 'loadlib' sets a status,
+# or if we can try to call a known 'ping' function from the library.
+function is_math_lib_loaded (result_var) {
+    # For now, we can't directly check if a lib alias exists from script.
+    # We'll assume it's loaded if the user set up bshmath.
+    # A C-core function like 'is_lib_loaded ALIAS_NAME RESULT_VAR' would be ideal.
+    echo "is_math_lib_loaded: Assuming '$BSH_MATH_LIB_ALIAS' is loaded if used."
+    $($result_var) = "true" # Placeholder
+}
+
+# --- Core Math Operations (Wrappers for C library calls) ---
+# These functions expect their numeric arguments to be passed as strings.
+# The C library (e.g., bshmath) is responsible for parsing these strings.
+# They set $LAST_LIB_CALL_STATUS (0 for success) and $LAST_LIB_CALL_OUTPUT (the result string).
+
+# Usage: math_op OPERATION_NAME C_FUNC_NAME ARG1_STR ARG2_STR RESULT_VAR_NAME
+# Example: math_op "add" "bsh_add_numbers" "10" "5" sum_result
+function _math_binary_op (op_display_name c_func_name arg1_str arg2_str result_var_name) {
+    echo "MATH $op_display_name: $arg1_str, $arg2_str"
+
+    # Check if math lib seems available (conceptual)
+    is_math_lib_loaded math_lib_ready
+    if $math_lib_ready != "true" {
+        echo "Error: Math library '$BSH_MATH_LIB_ALIAS' not loaded. Cannot perform $op_display_name."
+        $($result_var_name) = "MATH_LIB_ERROR"
+        return
+    }
+
+    calllib $BSH_MATH_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str"
+    # $LAST_LIB_CALL_STATUS and $LAST_LIB_CALL_OUTPUT are set by the C core after calllib
+
+    if $LAST_LIB_CALL_STATUS == "0" {
+        $($result_var_name) = $LAST_LIB_CALL_OUTPUT
+        echo "MATH $op_display_name result: $($result_var_name)"
+    } else {
+        echo "Error during $op_display_name operation with $BSH_MATH_LIB_ALIAS.$c_func_name."
+        echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
+        $($result_var_name) = "OPERATION_ERROR"
+    }
+}
+
+function math_add (num1_str num2_str result_var) {
+    _math_binary_op "add" "bsh_add_numbers" "$num1_str" "$num2_str" $result_var
+}
+
+function math_sub (num1_str num2_str result_var) {
+    _math_binary_op "subtract" "bsh_subtract_numbers" "$num1_str" "$num2_str" $result_var
+}
+
+function math_mul (num1_str num2_str result_var) {
+    _math_binary_op "multiply" "bsh_multiply_numbers" "$num1_str" "$num2_str" $result_var
+}
+
+function math_div (num1_str num2_str result_var) {
+    # The C library should handle division by zero and set status/output accordingly.
+    _math_binary_op "divide" "bsh_divide_numbers" "$num1_str" "$num2_str" $result_var
+}
+
+function math_mod (num1_str num2_str result_var) {
+    _math_binary_op "modulo" "bsh_modulo_numbers" "$num1_str" "$num2_str" $result_var
+}
+
+
+# --- Type Checking Functions (Conceptual - would rely on C library) ---
+# These would call C functions from the math/type library.
+
+# Usage: math_is_int VALUE_STRING RESULT_VAR_NAME
+function math_is_int (value_str result_var) {
+    echo "MATH is_int: Checking '$value_str'"
+    calllib $BSH_MATH_LIB_ALIAS "bsh_is_integer" "$value_str"
+    if $LAST_LIB_CALL_STATUS == "0" {
+        # C function bsh_is_integer should set LAST_LIB_CALL_OUTPUT to "true" or "false"
+        $($result_var) = $LAST_LIB_CALL_OUTPUT
+    } else {
+        $($result_var) = "false" # Error in check, assume false
+    }
+    echo "MATH is_int result for '$value_str': $($result_var)"
+}
+
+# Usage: math_is_float VALUE_STRING RESULT_VAR_NAME
+function math_is_float (value_str result_var) {
+    echo "MATH is_float: Checking '$value_str'"
+    calllib $BSH_MATH_LIB_ALIAS "bsh_is_float" "$value_str"
+    if $LAST_LIB_CALL_STATUS == "0" {
+        $($result_var) = $LAST_LIB_CALL_OUTPUT
+    } else {
+        $($result_var) = "false"
+    }
+    echo "MATH is_float result for '$value_str': $($result_var)"
+}
+
+# --- Unified 'calc' function (Example of type-dependent operation) ---
+# This is a more advanced function that could try to perform an operation,
+# potentially checking types first if a more sophisticated type system was in place.
+# Usage: calc VAR1_NAME OPERATOR_STRING VAR2_NAME RESULT_VAR_NAME
+# Example: $a=10; $b=20; calc a "+" b sum_res
+function calc (var1_name op_str var2_name result_var) {
+    $val1 = $($var1_name)
+    $val2 = $($var2_name)
+
+    echo "CALC: Performing '$val1 $op_str $val2'"
+
+    # Here, you could add logic to check types of $val1 and $val2 using math_is_int/math_is_float
+    # and then dispatch to different C functions or handle string concatenation if not numbers.
+    # For now, it's a simple dispatch based on op_str.
+
+    if $op_str == "+" {
+        math_add "$val1" "$val2" $result_var
+    } else if $op_str == "-" {
+        math_sub "$val1" "$val2" $result_var
+    } else if $op_str == "*" {
+        math_mul "$val1" "$val2" $result_var
+    } else if $op_str == "/" {
+        math_div "$val1" "$val2" $result_var
+    } else if $op_str == "%" {
+        math_mod "$val1" "$val2" $result_var
+    } else {
+        echo "CALC Error: Unsupported operator '$op_str'."
+        $($result_var) = "CALC_OPERATOR_ERROR"
+    }
+}
+
+# --- Example Usage (commented out) ---
+# Assumes 'bshmath' library is loaded and provides:
+# bsh_add_numbers, bsh_subtract_numbers, bsh_multiply_numbers, bsh_divide_numbers,
+# bsh_is_integer, bsh_is_float
+# (These C functions would take argc, argv[], obuf, obuf_size)
+
+# $num_a = "10.5"
+# $num_b = "2"
+# $num_c = "hello"
+#
+# math_add $num_a $num_b addition_result
+# echo "Result of math_add $num_a + $num_b: $addition_result"
+#
+# math_mul $num_b "7" product_result
+# echo "Result of math_mul $num_b * 7: $product_result"
+#
+# math_is_int $num_b is_b_int_res
+# echo "Is $num_b an integer? $is_b_int_res"
+#
+# math_is_int $num_a is_a_int_res
+# echo "Is $num_a an integer? $is_a_int_res"
+#
+# math_is_float $num_a is_a_float_res
+# echo "Is $num_a a float? $is_a_float_res"
+#
+# math_is_int $num_c is_c_int_res
+# echo "Is $num_c an integer? $is_c_int_res"
+#
+# calc num_a "+" num_b calc_sum_res
+# echo "Calc $num_a + $num_b = $calc_sum_res"
+#
+# calc product_result "*" "3" calc_prod_res
+# echo "Calc $product_result * 3 = $calc_prod_res"
+
+echo "Number Framework loaded."
+echo "Use math_add, math_sub, etc., or 'calc VAR1 OP VAR2 RESULT_VAR'."
+

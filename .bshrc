@@ -1,18 +1,25 @@
 # Default BSH Startup Script (.bshrc) - Enhanced
 # Executed when bsh starts. Defines core functions and aliases.
 
-echo "Executing .bshrc (v0.4 compatible)..."
+echo "Executing .bshrc (v0.5 compatible)..."
 echo "Welcome to bsh - The Extensible Shell!"
+echo "------------------------------------"
+
+# Import core framework modules
+# Assumes c_compiler.bsh and number.bsh are in a 'framework' directory
+# accessible via BSH_MODULE_PATH (e.g., ./framework/c_compiler.bsh)
+echo "Importing c_compiler module (framework.c_compiler)..."
+import framework.c_compiler
+echo "Importing number module (framework.number)..."
+import framework.number
 echo "------------------------------------"
 
 # --- Core Settings & Aliases ---
 $PS1 = "bsh-lex" # Prompt showing off lexical scope era!
 
 # Define some keyword aliases using the new 'defkeyword' C-level command
-# (Assuming 'defkeyword' is implemented in C as: defkeyword <original_keyword> <new_alias>)
 defkeyword defunc function  # Alias 'defunc' to 'function'
 defkeyword if     when    # Alias 'if' to 'when' (just an example)
-# defkeyword echo   print   # Example: alias 'echo' to 'print'
 
 echo "Defined keyword aliases: 'function' for 'defunc', 'when' for 'if'."
 
@@ -22,15 +29,11 @@ echo "Defined keyword aliases: 'function' for 'defunc', 'when' for 'if'."
 # Usage: is_empty VAR_NAME_STRING RESULT_VAR_NAME
 # RESULT_VAR_NAME will be set to "true" or "false" in the caller's scope.
 function is_empty (var_name_str result_var) {
-    # var_name_str holds the name of the variable to check, e.g., "my_var"
-    # result_var holds the name of the variable to store the result, e.g., "check_res"
-    # Lexical scope: temp_val is local to is_empty
-    $temp_val = $($var_name_str) # Dereference the variable name passed as string
-
+    $temp_val = $($var_name_str)
     if $temp_val == "" {
-        $($result_var) = "true"  # Set the result variable in the caller's scope
+        $($result_var) = "true"
     } else {
-        $($result_var) = "false" # Set the result variable in the caller's scope
+        $($result_var) = "false"
     }
 }
 
@@ -43,8 +46,6 @@ function scope_test (param1) {
 
     is_empty param1 param_empty_res
     echo "Is param1 empty? $param_empty_res"
-
-    # Try to access a global variable (if set outside)
     echo "Global_var (from scope_test): $global_var_example"
     echo "--- end scope_test ---"
 }
@@ -53,73 +54,53 @@ function scope_test (param1) {
 
 # Define a 'for_loop' function
 # Usage: for_loop ITERATOR_VAR_NAME START_VAL END_VAL_EXCLUSIVE STEP_VAL "COMMAND_STRING_TO_EXECUTE"
-# Example: for_loop i 0 5 1 "echo Iteration i is $i"
 function for_loop (iterator start_val end_val step command_body) {
-    # All variables declared here (counter_for_step, first_char_of_step) are local due to lexical scoping.
     echo "FOR_LOOP: Iter '$iterator' from $start_val to $end_val (exclusive) step $step"
-    $($iterator) = $start_val  # Initialize the iterator variable in the caller's scope
+    $($iterator) = $start_val
 
     if $step == "0" {
         echo "FOR_LOOP Error: Step value cannot be zero."
-        return # Conceptual return; in bsh, function just ends.
+        return
     }
 
-    # Basic check for step direction. A more robust solution would use a math lib.
-    $is_positive_step = "true" # Assume positive
-    # Crude check for negative sign.
-    # This is still basic. A proper string manipulation lib would be better.
-    # For example: calllib string_lib starts_with $step "-" step_is_negative_res
-    # if $step_is_negative_res == "true" { $is_positive_step = "false" }
-    # For now, rely on numeric comparison if possible:
-    if $step < "0" { # This uses the shell's string/numeric comparison logic
+    $is_positive_step = "true"
+    if $step < "0" { # Relies on shell's comparison logic
         $is_positive_step = "false"
     }
 
-
     if $is_positive_step == "true" {
         while $($iterator) < $end_val {
-            $command_body # Execute the command body in the caller's scope
-
-            $counter_for_step = "0" # Local to for_loop
+            $command_body
+            $counter_for_step = "0"
             while $counter_for_step < $step {
-                inc $($iterator) # Increment the iterator in the caller's scope
+                inc $($iterator)
                 inc counter_for_step
             }
         }
     } else { # Negative step
-        # For negative step, we need its absolute value for the inner counter.
-        # This is hard without an abs() function.
-        # Let's assume a simple workaround or that 'step' is like "-1", "-2".
-        # We want to run the 'dec' command abs(step) times.
-        # Example: if step is -2, we need to dec twice.
-        # A proper 'abs' function from a library would be: $abs_step = $(calllib math_lib abs $step)
-        # For now, a very crude way for simple negative numbers:
-        $abs_step_val = $step
-        if $is_positive_step == "false" { # e.g. step is "-N"
-            # This is a placeholder for making step positive for the loop.
-            # A real solution needs string manipulation (remove '-') or a math function.
-            # For this demo, if step is "-1", abs_step_val becomes "1" (conceptual)
-            if $step == "-1" { $abs_step_val = "1" }
-            if $step == "-2" { $abs_step_val = "2" }
-            # ... and so on. This is not scalable without better tools.
-            # A better placeholder:
-            # if $step < "0" { $abs_step_val = $(some_command_to_get_abs $step) }
-            # For this example, we'll assume $abs_step_val is correctly positive if step was negative.
-            # If step was "-N", we hope abs_step_val is "N". This is a known limitation here.
+        # Simplified negative step: effectively step -1 for each iteration of the outer loop.
+        # A robust solution for arbitrary negative steps needs an 'abs' function or better string math.
+        # Example: if step is "-2", this loop will dec by 1 twice for each outer iteration.
+        # This part needs careful thought if arbitrary negative steps are critical.
+        # For now, we make abs_step_val positive.
+        $abs_step_val = $step # e.g. "-2"
+        if $is_positive_step == "false" {
+             # Crude way to get positive version for loop count
+             if $step == "-1" { $abs_step_val = "1" }
+             else if $step == "-2" { $abs_step_val = "2" }
+             else if $step == "-3" { $abs_step_val = "3" }
+             # Add more or use a string manipulation lib call if available:
+             # $(calllib string_lib remove_prefix $step "-" abs_step_val)
+             else { echo "FOR_LOOP: Warning - large negative steps might not work as expected without 'abs'."; $abs_step_val = "1"; } # Fallback
         }
 
-
         while $($iterator) > $end_val {
-            $command_body # Execute in caller's scope
-
-            $counter_for_step = "0" # Local
-            # This loop for decrementing by a negative step is still complex.
-            # If step is -2, abs_step_val should be 2. We dec twice.
-            # The current abs_step_val logic is weak.
-            # Let's simplify: if step is negative, we just dec once per outer loop iteration.
-            # This means the 'step' parameter for negative values is effectively -1.
-            # To fully support arbitrary negative steps, 'abs_step_val' needs to be robustly calculated.
-            dec $($iterator) # Decrement iterator in caller's scope
+            $command_body
+            $counter_for_step = "0"
+            while $counter_for_step < $abs_step_val {
+                 dec $($iterator)
+                 inc counter_for_step
+            }
         }
     }
     echo "FOR_LOOP: Finished for '$iterator'."
@@ -132,56 +113,38 @@ function is_lt (op1 op2 result_var_name) { # op1 < op2 ?
 function is_le (op1 op2 result_var_name) { # op1 <= op2 ?
     if $op1 <= $op2 { $($result_var_name) = "true" } else { $($result_var_name) = "false" }
 }
-# Add is_gt, is_ge, is_eq, is_ne as needed.
 
 # Function for C-style for loop.
 # Usage: c_for "INIT_CMD" "CONDITION_CMD" "COND_RESULT_VAR_NAME" "INCREMENT_CMD" "BODY_CMD"
-# Example: c_for "$i=0" "is_lt $i 5 cfor_res" "cfor_res" "inc i" "echo C_FOR: i is $i"
 function c_for (init_command condition_command condition_result_var increment_command body_command) {
     echo "C_FOR: Initializing..."
-    $init_command # Execute initialization (e.g., "$i=0") in caller's scope
-
+    $init_command
     echo "C_FOR: Starting loop..."
-    # First condition check. condition_command must set the variable named in condition_result_var.
     $condition_command
-
-    # Loop while the condition_result_var (dereferenced) is "true"
     while $($condition_result_var) == "true" {
-        $body_command      # Execute body
-        $increment_command # Execute increment
-        $condition_command # Re-check condition
+        $body_command
+        $increment_command
+        $condition_command
     }
     echo "C_FOR: Finished."
 }
 
-
-# --- JSON Handling (Conceptual Wrappers) ---
-# These functions would wrap calls to external tools (like jq) or loaded libraries.
-
-# Gets a value from a JSON string using a path.
-# Usage: json_get JSON_STRING_VAR_NAME JSON_PATH RESULT_VAR_NAME
-# Example: $my_json = "{\"name\":\"bsh\", \"version\":0.4}"
-#          json_get my_json ".name" name_val
-#          echo "Name from JSON: $name_val"
+# --- JSON Handling (Conceptual Wrappers - relies on number.bsh/c_compiler.bsh loaded libs) ---
 function json_get (json_var_name path_str result_var_name) {
     echo "JSON_GET: Attempting to get path '$path_str' from JSON in variable '$json_var_name'"
     $json_string_content = $($json_var_name)
 
-    # Conceptual call to jq (external tool)
-    # $temp_json_result = $(echo "$json_string_content" | jq -r "$path_str")
-    # The $(...) for command substitution needs to be implemented in C core if not already.
-    # Assuming it is, and it places output in LAST_COMMAND_OUTPUT or similar.
-    # Or, if jq is not available, this would call a loaded library function.
-    # Example: $temp_json_result = $(calllib json_parser get_value "$json_string_content" "$path_str")
-    # For this script, we'll simulate it.
-    if $json_var_name == "my_sample_json" { # Simulate for a known variable
-        if $path_str == ".name" {
-            $($result_var_name) = "SimulatedBSHName"
-        } else if $path_str == ".version" {
-            $($result_var_name) = "Simulated0.4"
-        } else {
-            $($result_var_name) = "PATH_NOT_FOUND_IN_SIMULATED_JSON"
-        }
+    # This would ideally call a function from a JSON library loaded via c_compiler.bsh
+    # For example, if 'jsonlib' was compiled and loaded, and has a 'get_path' function:
+    # calllib jsonlib get_path "$json_string_content" "$path_str"
+    # $($result_var_name) = $LAST_LIB_CALL_OUTPUT
+    # if $LAST_LIB_CALL_STATUS != "0" { $($result_var_name) = "JSON_ERROR" }
+
+    # Simulation for now:
+    if $json_var_name == "my_sample_json" {
+        if $path_str == ".name" { $($result_var_name) = "SimulatedBSHName" }
+        else if $path_str == ".version" { $($result_var_name) = "Simulated0.5" }
+        else { $($result_var_name) = "PATH_NOT_FOUND_IN_SIMULATED_JSON" }
     } else {
         echo "JSON_GET: (Conceptual) Would call external tool/library for JSON in '$json_var_name'."
         $($result_var_name) = "NOT_IMPLEMENTED_FOR_GENERAL_JSON"
@@ -189,42 +152,149 @@ function json_get (json_var_name path_str result_var_name) {
 }
 
 # --- Path Manipulation Example ---
-# Adds a directory to the shell's PATH variable, if not already present.
-# PATH is expected to be a colon-separated string.
 function add_to_path (new_dir_to_add) {
     echo "ADD_TO_PATH: Adding '$new_dir_to_add' to PATH if not present."
-    $current_path = $PATH # Get current PATH (assuming PATH is a global var)
-    $path_result_var = "false" # Temp var for checking
+    $current_path = $PATH # Get current PATH (shell variable)
 
-    # Check if new_dir_to_add is already in current_path
-    # This requires string searching capabilities.
-    # For example: calllib string_lib contains "$current_path" ":$new_dir_to_add:" path_result_var
-    # Or: calllib string_lib contains "$current_path" "$new_dir_to_add:" path_result_var (for start)
-    # Or: calllib string_lib contains "$current_path" ":$new_dir_to_add" path_result_var (for end)
-    # Or: if $current_path == $new_dir_to_add (single entry)
-    # This is complex without good string tools.
-    # For now, a simplified check (prone to partial matches):
-    # A better way in pure script would be to loop through parts of PATH.
+    # Basic check to avoid simple duplicates - a robust solution is harder in pure script
+    $temp_path_for_check = ":$current_path:"
+    $dir_to_check1 = ":$new_dir_to_add:"
+    $dir_to_check2 = "$new_dir_to_add:" # Start of path
+    $dir_to_check3 = ":$new_dir_to_add"  # End of path
 
-    # Simplistic: just prepend, duplicates might occur without better check.
-    # A real version would split PATH by ':', check each part, then rebuild.
+    # This string 'contains' check is conceptual without a built-in or lib function
+    # if $(string_contains "$temp_path_for_check" "$dir_to_check1") == "true" {
+    #    echo "'$new_dir_to_add' seems to be already in PATH."
+    #    return
+    # }
+    # A simple, less robust check:
+    if $current_path == $new_dir_to_add { # Only handles if PATH has one entry
+         echo "'$new_dir_to_add' is already the only entry in PATH."
+         return
+    }
+
+
     if $current_path == "" {
         $PATH = $new_dir_to_add
     } else {
-        # This simple concatenation can lead to duplicates.
-        # A robust version needs to check for existence.
-        $PATH = "$new_dir_to_add:$current_path"
+        $PATH = "$new_dir_to_add:$current_path" # Prepend
     }
-    echo "ADD_TO_PATH: New PATH (potentially with duplicates): $PATH"
-    # The C core's add_path_dir is for internal list, $PATH var is for user view/env.
+    echo "ADD_TO_PATH: New PATH: $PATH"
+    # Note: This updates the shell's $PATH variable.
+    # To affect external commands, the C core would need to re-parse this $PATH
+    # or the environment variable "PATH" would need to be updated via setenv (if bsh supports that).
 }
 
 
 # --- End of .bshrc ---
 echo "------------------------------------"
-echo ".bshrc execution finished. Type 'help' for a list of shell functions (if help is defined)."
+echo ".bshrc execution finished. Frameworks (c_compiler, number) imported."
 echo ""
 
 # Example of setting a global variable for scope_test
 $global_var_example = "I am a global variable set in .bshrc"
+
+# Example: Define some C code for the number.bsh framework to use
+# This should ideally be done *after* number.bsh is imported, if number.bsh
+# itself doesn't define a default C math lib.
+# For now, let's assume number.bsh expects 'bshmath' to be available.
+
+$bsh_math_c_code = "
+#include <stdio.h>
+#include <stdlib.h> // For strtod, strtol
+#include <string.h> // For snprintf
+#include <math.h>   // For fmod (if needed for modulo on doubles)
+
+// Expected signature: int func(int argc, char* argv[], char* obuf, int obuf_size)
+
+int bsh_add_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 numbers\"); return 1; }
+  char *endptr1, *endptr2;
+  double n1 = strtod(argv[0], &endptr1);
+  double n2 = strtod(argv[1], &endptr2);
+  if (*endptr1 != '\\0' || *endptr2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid number format\"); return 2; }
+  snprintf(obuf, obuf_size, \"%g\", n1 + n2); // %g for general float format
+  return 0;
+}
+
+int bsh_subtract_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 numbers\"); return 1; }
+  char *endptr1, *endptr2;
+  double n1 = strtod(argv[0], &endptr1);
+  double n2 = strtod(argv[1], &endptr2);
+  if (*endptr1 != '\\0' || *endptr2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid number format\"); return 2; }
+  snprintf(obuf, obuf_size, \"%g\", n1 - n2);
+  return 0;
+}
+
+int bsh_multiply_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 numbers\"); return 1; }
+  char *endptr1, *endptr2;
+  double n1 = strtod(argv[0], &endptr1);
+  double n2 = strtod(argv[1], &endptr2);
+  if (*endptr1 != '\\0' || *endptr2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid number format\"); return 2; }
+  snprintf(obuf, obuf_size, \"%g\", n1 * n2);
+  return 0;
+}
+
+int bsh_divide_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 numbers\"); return 1; }
+  char *endptr1, *endptr2;
+  double n1 = strtod(argv[0], &endptr1);
+  double n2 = strtod(argv[1], &endptr2);
+  if (*endptr1 != '\\0' || *endptr2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid number format\"); return 2; }
+  if (n2 == 0.0) { snprintf(obuf, obuf_size, \"Error: Division by zero\"); return 3; }
+  snprintf(obuf, obuf_size, \"%g\", n1 / n2);
+  return 0;
+}
+
+// For integer modulo with long
+int bsh_modulo_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 integers\"); return 1; }
+  char *endptr1, *endptr2;
+  long n1 = strtol(argv[0], &endptr1, 10);
+  long n2 = strtol(argv[1], &endptr2, 10);
+  if (*endptr1 != '\\0' || *endptr2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid integer format\"); return 2; }
+  if (n2 == 0) { snprintf(obuf, obuf_size, \"Error: Modulo by zero\"); return 3; }
+  snprintf(obuf, obuf_size, \"%ld\", n1 % n2);
+  return 0;
+}
+
+// Type checking functions
+int bsh_is_integer(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 1) { snprintf(obuf, obuf_size, \"false\"); return 1; }
+  char *endptr;
+  strtol(argv[0], &endptr, 10); // Attempt to convert
+  if (argv[0][0] != '\\0' && *endptr == '\\0') snprintf(obuf, obuf_size, \"true\"); // Non-empty and all chars consumed
+  else snprintf(obuf, obuf_size, \"false\");
+  return 0;
+}
+
+int bsh_is_float(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 1) { snprintf(obuf, obuf_size, \"false\"); return 1; }
+  char *endptr;
+  strtod(argv[0], &endptr); // Attempt to convert
+  if (argv[0][0] != '\\0' && *endptr == '\\0') snprintf(obuf, obuf_size, \"true\"); // Non-empty and all chars consumed
+  else snprintf(obuf, obuf_size, \"false\");
+  return 0;
+}
+"
+
+# Now, use the imported c_compiler framework to make 'bshmath' available
+# This assumes c_compiler.def_c_lib is available after import.
+# The import mechanism should make functions from imported scripts available,
+# possibly prefixed or directly. For now, assume direct availability if not namespaced.
+echo "Defining and compiling 'bshmath' C library for number framework..."
+def_c_lib bshmath bsh_math_c_code "" "" # No special CFLAGS or LDFLAGS for this example
+
+if $bshmath_COMPILE_STATUS == "success" {
+    if $bshmath_LOAD_STATUS == "success" {
+        echo "'bshmath' library compiled and loaded successfully for number operations."
+    } else {
+        echo "Warning: 'bshmath' compiled but failed to load. Math functions in number.bsh may not work."
+    }
+} else {
+    echo "Error: Failed to compile 'bshmath' library. Math functions in number.bsh will not work."
+}
+echo "------------------------------------"
 

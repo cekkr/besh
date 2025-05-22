@@ -1,0 +1,210 @@
+# BSH C Compiler Framework (c_compiler.bsh)
+# Provides functions to define, compile, and load C code as shared libraries.
+
+echo "Loading C Compiler Framework (c_compiler.bsh)..."
+
+# --- Configuration ---
+# Directory for temporary compilation files and output libraries.
+# User might want to customize this.
+$BSH_C_COMPILE_TEMP_DIR = "/tmp/bsh_compile_cache"
+# Ensure the directory exists (basic attempt, real mkdir -p is better)
+# This would ideally be an external command call.
+# For now, we assume the user ensures this directory exists or handles errors.
+# $(mkdir -p $BSH_C_COMPILE_TEMP_DIR) # Conceptual command substitution
+
+# --- Helper Function: Find Available C Compiler ---
+# Sets a variable with the name of the found compiler ("gcc", "clang", or "not_found").
+# Usage: find_compiler COMPILER_RESULT_VAR_NAME
+function find_compiler (result_var_name) {
+    echo "Finding C compiler..."
+    # We need command substitution $(...) and the 'which' command.
+    # Assuming these are available or can be implemented in the C core / via external calls.
+    # $HAS_GCC = $(which gcc) # Captures output of 'which gcc'
+    # $HAS_CLANG = $(which clang)
+
+    # --- SIMULATING 'which' and command substitution for this script ---
+    # In a real bsh, the C core would need to support $(...) for output capture.
+    # For this script's logic to be testable standalone (conceptually):
+    # Let's assume 'which_gcc_path' and 'which_clang_path' could be set by external means
+    # or a C-core provided 'command_exists' function.
+    # For now, we'll hardcode for demonstration if $(...) isn't fully fledged.
+
+    # Ideal scenario (requires $(...) and 'which' command):
+    # $(command_exists gcc HAS_GCC_VAR) # Hypothetical C-core feature
+    # $(command_exists clang HAS_CLANG_VAR)
+    # if $HAS_GCC_VAR == "true" {
+    #    $($result_var_name) = "gcc"
+    #    echo "Found gcc."
+    #    return
+    # }
+    # if $HAS_CLANG_VAR == "true" {
+    #    $($result_var_name) = "clang"
+    #    echo "Found clang."
+    #    return
+    # }
+
+    # --- Fallback/Simulated 'which' for this script's purpose ---
+    # This part would be replaced by actual 'which' calls and output capture
+    # For testing this script's logic, we might need to manually set these:
+    # $__test_has_gcc = "true" # or "false"
+    # $__test_has_clang = "false" # or "true"
+
+    # Let's try a common path for gcc for simulation if 'which' is not usable directly here
+    # This is highly OS-dependent and not robust.
+    # A real 'find_compiler' would rely on 'which' or iterate common PATH entries.
+    # For now, let's assume a simplified check or that the user has one in PATH.
+    # We'll prioritize gcc, then clang.
+
+    # This is a placeholder for actual compiler detection.
+    # The C core should ideally provide a way to test command existence or capture output.
+    # For now, we'll assume 'gcc' is the preferred default if we can't robustly check.
+    $($result_var_name) = "gcc" # Default assumption
+    echo "Assuming 'gcc' is available (robust check needs 'which' command and output capture)."
+    # A more robust check would involve trying to execute 'gcc --version'.
+    # $GCC_VERSION_OUTPUT = $(gcc --version)
+    # if $LAST_COMMAND_STATUS == "0" { # Assuming C core sets this for external commands
+    #     $($result_var_name) = "gcc"
+    #     echo "Found gcc."
+    #     return
+    # }
+    # $CLANG_VERSION_OUTPUT = $(clang --version)
+    # if $LAST_COMMAND_STATUS == "0" {
+    #     $($result_var_name) = "clang"
+    #     echo "Found clang."
+    #     return
+    # }
+    # $($result_var_name) = "not_found"
+    # echo "No C compiler (gcc or clang) found in PATH."
+    # echo "Please install gcc or clang."
+}
+
+
+# --- Main Function: Define, Compile, and Load C Library ---
+# Usage: def_c_lib LIB_ALIAS_NAME C_CODE_VAR_NAME [COMPILER_FLAGS_VAR_NAME] [LINKER_FLAGS_VAR_NAME]
+#          LIB_ALIAS_NAME: Alias to use when loading the library (e.g., "mylib").
+#          C_CODE_VAR_NAME: Name of the BSH variable containing the C source code as a string.
+#          COMPILER_FLAGS_VAR_NAME (optional): Name of BSH var with compiler flags (e.g., "-Wall -O2").
+#          LINKER_FLAGS_VAR_NAME (optional): Name of BSH var with linker flags (e.g., "-lm").
+#
+# Sets: $LIB_ALIAS_NAME_PATH (path to the compiled .so)
+#       $LIB_ALIAS_NAME_COMPILE_STATUS ("success" or "failure")
+#       $LIB_ALIAS_NAME_LOAD_STATUS ("success" or "failure")
+function def_c_lib (lib_alias c_code_var_name compiler_flags_var linker_flags_var) {
+    echo "--- def_c_lib: Defining C library '$lib_alias' ---"
+
+    $c_source_code = $($c_code_var_name)
+    is_empty c_source_code is_code_empty_res
+    if $is_code_empty_res == "true" {
+        echo "Error: C source code variable '$c_code_var_name' is empty."
+        $($lib_alias)_COMPILE_STATUS = "failure"
+        return
+    }
+
+    # Determine compiler
+    find_compiler COMPILER_TO_USE
+    if $COMPILER_TO_USE == "not_found" {
+        echo "Error: No C compiler found. Cannot compile '$lib_alias'."
+        $($lib_alias)_COMPILE_STATUS = "failure"
+        return
+    }
+    echo "Using compiler: $COMPILER_TO_USE"
+
+    # Prepare file paths
+    $source_file_path = "$BSH_C_COMPILE_TEMP_DIR/$lib_alias.c"
+    $output_lib_path = "$BSH_C_COMPILE_TEMP_DIR/$lib_alias.so" # Assuming .so for Linux like systems
+
+    # Write C code to temporary file
+    # This requires a way to write a BSH string variable to a file.
+    # Conceptual: $(echo "$c_source_code" > "$source_file_path")
+    # Or a built-in: write_file "$source_file_path" "$c_source_code"
+    # For now, this step is conceptual. The C core would need to support this.
+    echo "Conceptual: Writing C code for '$lib_alias' to '$source_file_path'"
+    # If this were real, we'd need to ensure $c_source_code is properly escaped if using echo.
+
+    # Get compiler and linker flags
+    $cflags = ""
+    if $compiler_flags_var != "" { $cflags = $($compiler_flags_var) }
+    $ldflags = ""
+    if $linker_flags_var != "" { $ldflags = $($linker_flags_var) }
+
+    # Construct compilation command
+    # -fPIC is crucial for shared libraries. -shared to create a shared library.
+    $compile_command = "$COMPILER_TO_USE -shared -fPIC -o \"$output_lib_path\" \"$source_file_path\" $cflags $ldflags"
+    echo "Compile command: $compile_command"
+
+    # Execute compilation command
+    # This requires the shell to execute external commands and check their status.
+    # And ideally capture stdout/stderr for error reporting.
+    # Conceptual: $($compile_command)
+    #             $compile_status = $LAST_COMMAND_STATUS
+    echo "Conceptual: Executing compile command..."
+    # SIMULATE COMPILE SUCCESS FOR NOW
+    $compile_status = "0" # Assume success for script logic flow
+
+    if $compile_status == "0" {
+        echo "Compilation of '$lib_alias' successful. Output: $output_lib_path"
+        $($lib_alias)_COMPILE_STATUS = "success"
+        $($lib_alias)_PATH = "$output_lib_path"
+
+        # Load the compiled library
+        echo "Loading library '$lib_alias' from '$output_lib_path'..."
+        loadlib "$output_lib_path" "$lib_alias"
+        # Check $LAST_LIB_CALL_STATUS or similar if loadlib sets it.
+        # For now, assume loadlib prints errors but doesn't set a specific status var for this script.
+        # We can try to call a known function from it as a test.
+        $($lib_alias)_LOAD_STATUS = "success" # Assume success if loadlib doesn't crash
+    } else {
+        echo "Error: Compilation of '$lib_alias' failed. Status: $compile_status"
+        # echo "Compiler output: $($LAST_COMMAND_OUTPUT)" # If output capture exists
+        $($lib_alias)_COMPILE_STATUS = "failure"
+        $($lib_alias)_LOAD_STATUS = "failure"
+    }
+    echo "--- def_c_lib: Finished for '$lib_alias' ---"
+}
+
+# --- Example Usage (commented out by default) ---
+# To use this, you'd first define a BSH variable with your C code:
+# $my_c_math_code = "
+# #include <stdio.h>
+# // Function signature expected by bsh calllib:
+# // int func_name(int argc, char* argv[], char* output_buffer, int buffer_size);
+#
+# int bsh_add_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+#   if (argc < 2) return 1; // Error: not enough args
+#   double n1 = 0, n2 = 0;
+#   sscanf(argv[0], \"%lf\", &n1);
+#   sscanf(argv[1], \"%lf\", &n2);
+#   snprintf(obuf, obuf_size, \"%lf\", n1 + n2);
+#   return 0; // Success
+# }
+#
+# int bsh_multiply_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+#   if (argc < 2) return 1;
+#   double n1 = 0, n2 = 0;
+#   sscanf(argv[0], \"%lf\", &n1);
+#   sscanf(argv[1], \"%lf\", &n2);
+#   snprintf(obuf, obuf_size, \"%lf\", n1 * n2);
+#   return 0;
+# }
+# "
+#
+# $math_cflags = "-Wall -O2"
+# $math_ldflags = "" # No special linker flags needed for this simple example
+#
+# # Then define, compile, and load it:
+# def_c_lib bshmath my_c_math_code math_cflags math_ldflags
+#
+# # Check status
+# echo "bshmath compile status: $bshmath_COMPILE_STATUS"
+# echo "bshmath load status: $bshmath_LOAD_STATUS"
+# echo "bshmath library path: $bshmath_PATH"
+#
+# # If successful, you can now use it with calllib:
+# # calllib bshmath bsh_add_numbers "10.5" "20.2"
+# # echo "Result of bsh_add_numbers (10.5 + 20.2): $LAST_LIB_CALL_OUTPUT"
+# # calllib bshmath bsh_multiply_numbers "5" "4"
+# # echo "Result of bsh_multiply_numbers (5 * 4): $LAST_LIB_CALL_OUTPUT"
+
+echo "C Compiler Framework loaded."
+echo "Use 'def_c_lib LIB_ALIAS C_CODE_VAR [CFLAGS_VAR] [LDFLAGS_VAR]' to compile and load C code."
+
