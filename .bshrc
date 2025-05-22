@@ -5,15 +5,6 @@ echo "Executing .bshrc (v0.5 compatible)..."
 echo "Welcome to bsh - The Extensible Shell!"
 echo "------------------------------------"
 
-# Import core framework modules
-# Assumes c_compiler.bsh and number.bsh are in a 'framework' directory
-# accessible via BSH_MODULE_PATH (e.g., ./framework/c_compiler.bsh)
-echo "Importing c_compiler module (framework.c_compiler)..."
-import framework.c_compiler
-echo "Importing number module (framework.number)..."
-import framework.number
-echo "------------------------------------"
-
 # --- Core Settings & Aliases ---
 $PS1 = "bsh-lex" # Prompt showing off lexical scope era!
 
@@ -22,6 +13,15 @@ defkeyword defunc function  # Alias 'defunc' to 'function'
 defkeyword if     when    # Alias 'if' to 'when' (just an example)
 
 echo "Defined keyword aliases: 'function' for 'defunc', 'when' for 'if'."
+
+# Import core framework modules
+# Assumes c_compiler.bsh and number.bsh are in a 'framework' directory
+# accessible via BSH_MODULE_PATH (e.g., ./framework/c_compiler.bsh)
+echo "Importing c_compiler module (framework.c_compiler)..."
+import framework.c_compiler
+echo "Importing number module (framework.number)..."
+import framework.number
+echo "------------------------------------"
 
 # --- Utility Functions (Leveraging Lexical Scoping) ---
 
