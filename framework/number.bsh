@@ -5,41 +5,24 @@
 echo "Loading Number Framework (number.bsh)..."
 
 # --- Configuration ---
-# The alias used when loading the C math library.
-# Users should ensure this library is loaded (e.g., in .bshrc after c_compiler.bsh)
 $BSH_MATH_LIB_ALIAS = "bshmath"
 
 # --- Helper: Check if the math library seems loaded ---
-# This is a conceptual check.
-# A more robust way would be if 'loadlib' sets a status,
-# or if we can try to call a known 'ping' function from the library.
 function is_math_lib_loaded (result_var) {
-    # For now, we can't directly check if a lib alias exists from script.
-    # We'll assume it's loaded if the user set up bshmath.
-    # A C-core function like 'is_lib_loaded ALIAS_NAME RESULT_VAR' would be ideal.
     echo "is_math_lib_loaded: Assuming '$BSH_MATH_LIB_ALIAS' is loaded if used."
     $($result_var) = "true" # Placeholder
 }
 
 # --- Core Math Operations (Wrappers for C library calls) ---
-# These functions expect their numeric arguments to be passed as strings.
-# The C library (e.g., bshmath) is responsible for parsing these strings.
-# They set $LAST_LIB_CALL_STATUS (0 for success) and $LAST_LIB_CALL_OUTPUT (the result string).
-# Usage: math_op OPERATION_NAME C_FUNC_NAME ARG1_STR ARG2_STR RESULT_VAR_NAME
-# Example: math_op "add" "bsh_add_numbers" "10" "5" sum_result
 function _math_binary_op (op_display_name c_func_name arg1_str arg2_str result_var_name) {
     echo "MATH $op_display_name: $arg1_str, $arg2_str"
-
     is_math_lib_loaded math_lib_ready
     if $math_lib_ready != "true" {
         echo "Error: Math library '$BSH_MATH_LIB_ALIAS' not loaded. Cannot perform $op_display_name."
         $($result_var_name) = "MATH_LIB_ERROR"
         return
     }
-
     calllib $BSH_MATH_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str"
-    # $LAST_LIB_CALL_STATUS and $LAST_LIB_CALL_OUTPUT are set by the C core after calllib
-
     if $LAST_LIB_CALL_STATUS == "0" {
         $($result_var_name) = $LAST_LIB_CALL_OUTPUT
         echo "MATH $op_display_name result: $($result_var_name)"
@@ -63,7 +46,6 @@ function math_mul (num1_str num2_str result_var) {
 }
 
 function math_div (num1_str num2_str result_var) {
-    # The C library should handle division by zero and set status/output accordingly.
     _math_binary_op "divide" "bsh_divide_numbers" "$num1_str" "$num2_str" $result_var
 }
 
@@ -72,122 +54,95 @@ function math_mod (num1_str num2_str result_var) {
 }
 
 # --- Helper for Comparison Operations ---
-# Assumes C function sets LAST_LIB_CALL_OUTPUT to "1" (true) or "0" (false)
 function _math_compare_op (op_display_name c_func_name arg1_str arg2_str result_var_name) {
     echo "MATH COMPARE $op_display_name: $arg1_str, $arg2_str"
     is_math_lib_loaded math_lib_ready
     if $math_lib_ready != "true" {
         echo "Error: Math library '$BSH_MATH_LIB_ALIAS' not loaded. Cannot perform $op_display_name."
-        $($result_var_name) = "0" # Default to false on library error for comparisons
+        $($result_var_name) = "0" 
         return
     }
-
     calllib $BSH_MATH_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str"
     if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var_name) = $LAST_LIB_CALL_OUTPUT # Should be "1" or "0" from C
+        $($result_var_name) = $LAST_LIB_CALL_OUTPUT 
         echo "MATH COMPARE $op_display_name result: $($result_var_name)"
     } else {
         echo "Error during $op_display_name operation with $BSH_MATH_LIB_ALIAS.$c_func_name."
         echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
-        $($result_var_name) = "0" # Default to false on operation error for comparisons
+        $($result_var_name) = "0" 
     }
 }
 
 # --- Comparison Functions ---
-# These set result_var to "1" (true) or "0" (false).
-# Assumed C functions: bsh_numbers_equal, bsh_numbers_not_equal, etc.
-
 function math_eq (num1_str num2_str result_var) {
     _math_compare_op "equal" "bsh_numbers_equal" "$num1_str" "$num2_str" $result_var
 }
-
 function math_ne (num1_str num2_str result_var) {
     _math_compare_op "not_equal" "bsh_numbers_not_equal" "$num1_str" "$num2_str" $result_var
 }
-
 function math_gt (num1_str num2_str result_var) {
     _math_compare_op "greater_than" "bsh_numbers_greater_than" "$num1_str" "$num2_str" $result_var
 }
-
 function math_lt (num1_str num2_str result_var) {
     _math_compare_op "less_than" "bsh_numbers_less_than" "$num1_str" "$num2_str" $result_var
 }
-
 function math_ge (num1_str num2_str result_var) {
     _math_compare_op "greater_equal" "bsh_numbers_greater_equal" "$num1_str" "$num2_str" $result_var
 }
-
 function math_le (num1_str num2_str result_var) {
     _math_compare_op "less_equal" "bsh_numbers_less_equal" "$num1_str" "$num2_str" $result_var
 }
 
 # --- Logical NOT for "0" or "1" ---
-# Usage: math_not VALUE_STR RESULT_VAR_NAME
-# VALUE_STR should be "0" or "1" (or a variable evaluating to that)
-# Assumed C function: bsh_logical_not(argc=1, argv={"val"}, obuf, obuf_size)
 function math_not (value_str result_var) {
     echo "MATH NOT: Inverting '$value_str'"
     is_math_lib_loaded math_lib_ready
     if $math_lib_ready != "true" {
         echo "Error: Math library '$BSH_MATH_LIB_ALIAS' not loaded for math_not."
-        $($result_var) = "0" # False on error
+        $($result_var) = "0" 
         return
     }
-
     calllib $BSH_MATH_LIB_ALIAS "bsh_logical_not" "$value_str"
     if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT # Should be "1" or "0"
+        $($result_var) = $LAST_LIB_CALL_OUTPUT 
     } else {
         echo "Error during math_not operation with $BSH_MATH_LIB_ALIAS.bsh_logical_not."
         echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
-        $($result_var) = "0" # Default to false on error
+        $($result_var) = "0" 
     }
     echo "MATH NOT result for '$value_str': $($result_var)"
 }
 
-
-# --- Type Checking Functions (Conceptual - would rely on C library) ---
-# These would call C functions from the math/type library.
-# Usage: math_is_int VALUE_STRING RESULT_VAR_NAME
+# --- Type Checking Functions ---
 function math_is_int (value_str result_var) {
     echo "MATH is_int: Checking '$value_str'"
     calllib $BSH_MATH_LIB_ALIAS "bsh_is_integer" "$value_str"
     if $LAST_LIB_CALL_STATUS == "0" {
-        # C function bsh_is_integer should set LAST_LIB_CALL_OUTPUT to "true" or "false" (or "1"/"0")
-        # For consistency with conditions, let's assume it returns "1" or "0"
         $($result_var) = $LAST_LIB_CALL_OUTPUT
     } else {
-        $($result_var) = "0" # Error in check, assume false
+        $($result_var) = "0" 
     }
     echo "MATH is_int result for '$value_str': $($result_var)"
 }
-
-# Usage: math_is_float VALUE_STRING RESULT_VAR_NAME
 function math_is_float (value_str result_var) {
     echo "MATH is_float: Checking '$value_str'"
     calllib $BSH_MATH_LIB_ALIAS "bsh_is_float" "$value_str"
     if $LAST_LIB_CALL_STATUS == "0" {
-        # C function bsh_is_float should set LAST_LIB_CALL_OUTPUT to "1" or "0"
         $($result_var) = $LAST_LIB_CALL_OUTPUT
     } else {
-        $($result_var) = "0" # Error in check, assume false
+        $($result_var) = "0"
     }
     echo "MATH is_float result for '$value_str': $($result_var)"
 }
 
 # --- Unified 'calc' function (Example of type-dependent operation) ---
-# This is a more advanced function that could try to perform an operation,
-# potentially checking types first if a more sophisticated type system was in place.
-# Usage: calc VAR1_NAME OPERATOR_STRING VAR2_NAME RESULT_VAR_NAME
-# Example: $a=10; $b=20; calc a "+" b sum_res
-# Note: This 'calc' remains for arithmetic. Boolean comparisons use math_eq, etc. directly.
+# Updated to handle '.' as a decimal construction operator.
 function calc (var1_name op_str var2_name result_var) {
     $val1 = $($var1_name)
     $val2 = $($var2_name)
 
     echo "CALC: Performing '$val1 $op_str $val2'"
 
-    # For now, it's a simple dispatch based on op_str.
     if $op_str == "+" {
         math_add "$val1" "$val2" $result_var
     } else if $op_str == "-" {
@@ -198,43 +153,43 @@ function calc (var1_name op_str var2_name result_var) {
         math_div "$val1" "$val2" $result_var
     } else if $op_str == "%" {
         math_mod "$val1" "$val2" $result_var
+    } else if $op_str == "." {
+        # Decimal construction operator: forms a string like "val1.val2"
+        # Assumes val1 is the integer part and val2 is the fractional part (digits only).
+        # Example: calc my_int_var "." my_frac_var combined_float_var
+        # If my_int_var=10 and my_frac_var=5, combined_float_var becomes "10.5"
+        # If my_int_var=0 and my_frac_var=75, combined_float_var becomes "0.75"
+        # If val1 is empty, it could be ".5" (though C functions might prefer "0.5")
+        if $val1 == "" { # Handle cases like ".5" -> "0.5" for robustness with C math libs
+            $($result_var) = "0.$val2"
+        } else {
+            $($result_var) = "$val1.$val2"
+        }
+        echo "CALC decimal construct '$val1.$val2' result: $($result_var)"
     } else {
-        echo "CALC Error: Unsupported arithmetic operator '$op_str'."
+        echo "CALC Error: Unsupported operator '$op_str'."
         $($result_var) = "CALC_OPERATOR_ERROR"
     }
 }
 
-# --- Example Usage (commented out) ---
-# Assumes 'bshmath' library is loaded and provides C functions.
-# $num_a = "10.5"
-# $num_b = "2"
-# $res = ""
+echo "Number Framework loaded. '-' before digits may now be tokenized as part of a number by bsh.c."
+echo "The '.' operator can be used in 'calc' for decimal construction (e.g., calc var1 \".\" var2 result)."
+# --- Example Usage Update ---
+# $my_neg_five = -5 # This should now work if bsh.c is updated
+# echo "My negative five: $my_neg_five"
 #
-# math_add $num_a $num_b res
-# echo "Result of math_add $num_a + $num_b: $res"
+# $integer_part = 10
+# $fractional_part = 75
+# $constructed_float = ""
+# calc integer_part "." fractional_part constructed_float
+# echo "Constructed float via '.': $constructed_float" # Expected: 10.75
 #
-# math_gt $num_a "10" res
-# echo "Is $num_a > 10? $res" # Expected: 1 (true)
+# $another_float = ""
+# $zero = 0
+# $frac = 5
+# calc zero "." frac another_float
+# echo "Another constructed float: $another_float" # Expected: 0.5
 #
-# math_eq $num_b "3" res
-# echo "Is $num_b == 3? $res" # Expected: 0 (false)
-#
-# math_not $res not_res
-# echo "Not of previous ($res) is $not_res" # Expected: 1 (true)
-#
-# $my_cond = ""
-# math_le "5" "5" my_cond
-# if $my_cond {
-#   echo "5 <= 5 is true (my_cond is $my_cond)"
-# }
-# if ! $my_cond { # This would be an error if $my_cond is 1
-#   echo "This should not print if 5 <= 5"
-# } else {
-#   echo "Else for ! my_cond (my_cond is $my_cond)"
-# }
-
-
-echo "Number Framework loaded."
-echo "Use math_add, math_sub, etc., or comparison functions like math_eq, math_gt."
-echo "Conditional statements 'if' and 'while' in BSH core now check for '1' (true) or other (false)."
-echo "You can use 'if ! \$var_name' for negation in conditions."
+# # Test it with a math function that expects a float string
+# math_add $constructed_float "1.25" total_sum
+# echo "$constructed_float + 1.25 = $total_sum" # Expected: 12.00 (or 12.0 depending on C lib)

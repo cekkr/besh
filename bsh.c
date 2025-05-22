@@ -39,7 +39,7 @@ typedef enum {
     TOKEN_EMPTY, TOKEN_WORD, TOKEN_STRING, TOKEN_VARIABLE, TOKEN_OPERATOR,
     TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_LBRACKET, TOKEN_RBRACKET,
     TOKEN_ASSIGN, TOKEN_SEMICOLON, TOKEN_PIPE, TOKEN_AMPERSAND, TOKEN_COMMENT,
-    TOKEN_EOF, TOKEN_ERROR
+    TOKEN_EOF, TOKEN_ERROR, TOKEN_NUMBER
 } TokenType;
 
 typedef struct {
@@ -386,6 +386,7 @@ void initialize_operators_dynamic() {
     add_operator_dynamic("}", TOKEN_RBRACE);  add_operator_dynamic("[", TOKEN_LBRACKET);
     add_operator_dynamic("]", TOKEN_RBRACKET);add_operator_dynamic(";", TOKEN_SEMICOLON);
     add_operator_dynamic("|", TOKEN_PIPE);    add_operator_dynamic("&", TOKEN_AMPERSAND);
+     add_operator_dynamic(".", TOKEN_OPERATOR);
 }
 
 void add_operator_dynamic(const char* op_str, TokenType type) {
@@ -470,6 +471,62 @@ int advanced_tokenize_line(const char *line, Token *tokens, int max_tokens, char
         while (isspace((unsigned char)*p)) p++; // Skip leading whitespace
         if (!*p) break; // End of line
         if (*p == '#') {tokens[token_count].type = TOKEN_COMMENT; tokens[token_count].text = p; tokens[token_count].len = strlen(p); token_count++; break;} // Comment consumes rest of line
+
+         const char *p_original = p; // Save current position in case this is not a number
+
+        // Try to parse an integer, possibly with a leading '-'
+        bool is_negative_candidate = false;
+        if (*p == '-') {
+            // Check if next char is a digit. If not, this '-' is not part of a number here.
+            if (isdigit((unsigned char)*(p + 1))) {
+                is_negative_candidate = true;
+                p++; // Tentatively consume '-'
+            }
+            // If not isdigit(*(p+1)), p remains at '-', will be handled by operator matching later.
+        }
+
+        if (isdigit((unsigned char)*p)) { // Current char is a digit (or was after a consumed '-')
+            const char *num_val_start = p; // Start of the digits themselves
+            while (isdigit((unsigned char)*p)) {
+                p++; // Consume all digits
+            }
+
+            // Check if any digits were actually consumed after the optional '-'
+            if (p > num_val_start) {
+                // Valid integer part found.
+                tokens[token_count].type = TOKEN_NUMBER;
+                tokens[token_count].text = storage_ptr;
+                // Calculate length from the original start (p_original) if negative, or num_val_start if positive
+                // However, p_original correctly captures the start of the whole token ("-5" or "5")
+                tokens[token_count].len = p - p_original;
+
+                if (remaining_storage > (size_t)tokens[token_count].len) {
+                    strncpy(storage_ptr, p_original, tokens[token_count].len);
+                    storage_ptr[tokens[token_count].len] = '\0';
+                    storage_ptr += (tokens[token_count].len + 1);
+                    remaining_storage -= (tokens[token_count].len + 1);
+                    token_count++;
+                    continue; // Successfully tokenized a number, restart loop for the next token
+                } else {
+                    tokens[token_count].type = TOKEN_ERROR; // Ran out of storage
+                    fprintf(stderr, "Tokenizer error: Out of token storage.\n");
+                    // p = p_original; // Reset p if breaking, or ensure loop terminates
+                    break; // Critical error, stop tokenizing line
+                }
+            } else if (is_negative_candidate) {
+                // We consumed a '-' (is_negative_candidate is true, p was advanced) but found no digits after it.
+                // This '-' should be treated as an operator. Backtrack p.
+                p = p_original;
+                // Fall through to operator matching.
+            }
+            // If it wasn't isdigit(*p) initially (and not is_negative_candidate),
+            // p is still p_original, fall through.
+        } else if (is_negative_candidate) {
+            // We tentatively consumed a '-' (p was advanced) but the char after it was not a digit.
+            // This '-' should be treated as an operator. Backtrack p.
+            p = p_original;
+            // Fall through to operator matching.
+        }
 
         tokens[token_count].text = storage_ptr; // Tentatively set text pointer
 
