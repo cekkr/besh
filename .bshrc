@@ -1,18 +1,150 @@
-# Default BSH Startup Script (.bshrc) - Rewritten for New Operator Handling
 # Executed when bsh starts. Defines core functions and aliases.
-# Default BSH Startup Script (.bshrc) - Enhanced
-# Executed when bsh starts. Defines core functions and aliases.
-echo "Executing .bshrc (new operator model)..." #
+# Default BSH Startup Script (.bshrc) - Emphasizing C Compilation & Type System
+echo "Executing .bshrc (v0.6 - dynamic ops, type system, C compilation)..."
 echo "Welcome to bsh - The Extensible Shell!"
 echo "------------------------------------"
 
 # --- Core Settings & Aliases ---
-$PS1 = "bsh-dyn" # Prompt reflecting dynamic operators
-# Define some keyword aliases using the 'defkeyword' C-level command
-defkeyword defunc function  # Alias 'defunc' to 'function' [cite: 4]
-# defkeyword if when # 'when' alias example [cite: 4]
+$PS1 = "bsh-ng" # New Generation!
+defkeyword defunc function
 
-echo "Defined keyword aliases: 'function' for 'defunc'." #
+# --- Essential Framework Imports ---
+echo "Importing essential BSH frameworks..."
+import c_compiler     # For def_c_lib to compile C code on the fly
+import type           # For get_type and type constants (e.g., TYPE_INT, TYPE_STRING)
+import core_operators # For defoperator calls & the central __dynamic_op_handler
+
+# number.bsh is imported AFTER bshmath C library is compiled and loaded,
+# as number.bsh might try to configure itself based on bshmath's availability.
+# OR, number.bsh defines functions, and their successful operation depends on bshmath.
+
+echo "------------------------------------"
+echo "Defining and Compiling 'bshmath' C Library via c_compiler.bsh..."
+
+# Define the C source code for the math library in a BSH variable
+# This C code provides the actual implementations for math operations.
+$BSH_MATH_C_LIB_SOURCE = "
+#include <stdio.h>
+#include <stdlib.h> // For strtod, strtol, etc.
+#include <string.h> // For snprintf
+#include <math.h>   // For fmod, etc.
+
+// Standard signature for BSH C library functions:
+// int func_name(int argc, char* argv[], char* output_buffer, int buffer_size);
+
+// Arithmetic operations
+int bsh_add_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 numbers for add\"); return 1; }
+  char *e1, *e2; double v1 = strtod(argv[0], &e1); double v2 = strtod(argv[1], &e2);
+  if (*e1 != '\\0' || *e2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid number format for add\"); return 2; }
+  snprintf(obuf, obuf_size, \"%g\", v1 + v2); return 0;
+}
+int bsh_subtract_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 numbers for sub\"); return 1; }
+  char *e1, *e2; double v1 = strtod(argv[0], &e1); double v2 = strtod(argv[1], &e2);
+  if (*e1 != '\\0' || *e2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid number format for sub\"); return 2; }
+  snprintf(obuf, obuf_size, \"%g\", v1 - v2); return 0;
+}
+int bsh_multiply_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 numbers for mul\"); return 1; }
+  char *e1, *e2; double v1 = strtod(argv[0], &e1); double v2 = strtod(argv[1], &e2);
+  if (*e1 != '\\0' || *e2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid number format for mul\"); return 2; }
+  snprintf(obuf, obuf_size, \"%g\", v1 * v2); return 0;
+}
+int bsh_divide_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 numbers for div\"); return 1; }
+  char *e1, *e2; double v1 = strtod(argv[0], &e1); double v2 = strtod(argv[1], &e2);
+  if (*e1 != '\\0' || *e2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid number format for div\"); return 2; }
+  if (v2 == 0.0) { snprintf(obuf, obuf_size, \"Error: Division by zero\"); return 3; }
+  snprintf(obuf, obuf_size, \"%g\", v1 / v2); return 0;
+}
+int bsh_modulo_numbers(int argc, char* argv[], char* obuf, int obuf_size) { // Typically for integers
+  if (argc < 2) { snprintf(obuf, obuf_size, \"Error: Expected 2 integers for mod\"); return 1; }
+  char *e1, *e2; long iv1 = strtol(argv[0], &e1, 10); long iv2 = strtol(argv[1], &e2, 10);
+  if (*e1 != '\\0' || *e2 != '\\0') { snprintf(obuf, obuf_size, \"Error: Invalid integer format for mod\"); return 2; }
+  if (iv2 == 0) { snprintf(obuf, obuf_size, \"Error: Modulo by zero\"); return 3; }
+  snprintf(obuf, obuf_size, \"%ld\", iv1 % iv2); return 0;
+}
+
+// Comparison operations (return \"1\" for true, \"0\" for false)
+// These C functions should handle type parsing (strtod) and then compare.
+int bsh_numbers_equal(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL); /* Add error checks for strtod */
+  snprintf(obuf, obuf_size, \"%d\", v1 == v2); return 0;
+}
+int bsh_numbers_not_equal(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
+  snprintf(obuf, obuf_size, \"%d\", v1 != v2); return 0;
+}
+int bsh_numbers_greater_than(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
+  snprintf(obuf, obuf_size, \"%d\", v1 > v2); return 0;
+}
+int bsh_numbers_less_than(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
+  snprintf(obuf, obuf_size, \"%d\", v1 < v2); return 0;
+}
+int bsh_numbers_greater_equal(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
+  snprintf(obuf, obuf_size, \"%d\", v1 >= v2); return 0;
+}
+int bsh_numbers_less_equal(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
+  snprintf(obuf, obuf_size, \"%d\", v1 <= v2); return 0;
+}
+
+// Type checking C functions (used by type.bsh or number.bsh's math_is_*)
+int bsh_is_integer(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 1 || argv[0][0] == '\\0') { snprintf(obuf, obuf_size, \"0\"); return 1; }
+  char *endptr; strtol(argv[0], &endptr, 10);
+  snprintf(obuf, obuf_size, \"%d\", *endptr == '\\0'); return 0;
+}
+int bsh_is_float(int argc, char* argv[], char* obuf, int obuf_size) { // Checks if it *can* be parsed as float
+  if (argc < 1 || argv[0][0] == '\\0') { snprintf(obuf, obuf_size, \"0\"); return 1; }
+  char *endptr; strtod(argv[0], &endptr);
+  snprintf(obuf, obuf_size, \"%d\", *endptr == '\\0'); return 0;
+}
+// Logical NOT C function (for '!')
+int bsh_logical_not(int argc, char* argv[], char* obuf, int obuf_size) {
+  if (argc < 1) { snprintf(obuf, obuf_size, \"1\"); return 1; } // Or error
+  if (strcmp(argv[0], \"0\") == 0 || strcmp(argv[0], \"false\") == 0 || argv[0][0] == '\\0') {
+    snprintf(obuf, obuf_size, \"1\"); // true
+  } else {
+    snprintf(obuf, obuf_size, \"0\"); // false
+  }
+  return 0;
+}
+"
+
+# Define compiler/linker flags if needed
+$BSH_MATH_CFLAGS = "-Wall -Wextra -O2" # Example
+$BSH_MATH_LDFLAGS = "-lm" # Link math library for fmod etc. if not default
+
+# Use def_c_lib from c_compiler.bsh to compile and load the C code
+def_c_lib bshmath BSH_MATH_C_LIB_SOURCE BSH_MATH_CFLAGS BSH_MATH_LDFLAGS
+
+# Check status variables set by def_c_lib
+if $bshmath_COMPILE_STATUS == "success" {
+    if $bshmath_LOAD_STATUS == "success" {
+        echo "'bshmath' C library compiled and loaded successfully."
+        # Now it's safe to import number.bsh which depends on bshmath
+        echo "Importing number module (math actions)..."
+        import number
+    } else {
+        echo "CRITICAL ERROR: 'bshmath' compiled but FAILED TO LOAD."
+        echo "Number operations will not function."
+    }
+} else {
+    echo "CRITICAL ERROR: FAILED TO COMPILE 'bshmath' C library."
+    echo "Number operations will not function."
+}
+echo "------------------------------------"
 
 # --- Import Core Framework Modules ---
 # Assumes modules are in a directory accessible via BSH_MODULE_PATH.
@@ -39,13 +171,10 @@ echo "------------------------------------"
 
 # Function to check if a variable's value is empty.
 # Usage: is_empty VAR_NAME_STRING RESULT_VAR_NAME
-function is_empty (var_name_str result_var) { # [cite: 7]
+# (is_empty, scope_test, for_loop from original .bshrc can go here)
+function is_empty (var_name_str result_var) {
     $temp_val = $($var_name_str)
-    if $temp_val == "" {
-        $($result_var) = "true"
-    } else {
-        $($result_var) = "false"
-    }
+    if $temp_val == "" { $($result_var) = "true" } else { $($result_var) = "false" }
 }
 
 # Function to demonstrate local scope
