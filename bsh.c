@@ -90,6 +90,9 @@
 #define MAX_SCOPE_DEPTH 64   // Max depth for lexical scopes (function calls)
 #define DEFAULT_MODULE_PATH "./framework:~/.bsh_framework:/usr/local/share/bsh/framework" // Example default module path
 
+#define JSON_STDOUT_PREFIX "json:"
+#define OBJECT_STDOUT_PREFIX "object:" // You can decide if "object:" is treated same as "json:"
+
 // --- Tokenizer Types ---
 typedef enum {
     TOKEN_EMPTY, TOKEN_WORD, TOKEN_STRING, TOKEN_VARIABLE, TOKEN_OPERATOR,
@@ -272,6 +275,7 @@ bool invoke_bsh_unary_op_call(const char* func_name_to_call, // For unary ops li
                                 char* c_result_buffer, size_t c_result_buffer_size);
 bool is_comparison_or_assignment_operator(const char* op_str);
 
+void parse_and_flatten_bsh_object_string(const char* data_string, const char* base_var_name, const char* data_type_prefix, int current_scope_id);
 
 // --- Main ---
 int main(int argc, char *argv[]) {
@@ -1811,6 +1815,29 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
     char value_to_set[INPUT_BUFFER_SIZE]; value_to_set[0] = '\0'; 
     bool is_rhs_command = false;
 
+    // --- Check for "object:" prefix ---
+    bool structured_data_parsed = false;
+    const char* data_to_parse_str = NULL;
+
+    if (strncmp(value_to_set, "object:", strlen("object:")) == 0) {
+        data_to_parse_str = value_to_set + strlen("object:");
+        structured_data_parsed = true;
+    }
+    // Add other prefixes here if needed in the future, e.g., "json:"
+
+    if (structured_data_parsed) {
+        int current_scope_id_for_data = (scope_stack_top >= 0) ? scope_stack[scope_stack_top].scope_id : GLOBAL_SCOPE_ID;
+        
+        // Call the new C function to parse and flatten this specific BSH object string
+        parse_and_flatten_bsh_object_string(data_to_parse_str, base_var_name, current_scope_id_for_data);
+
+        // The main variable ($base_var_name) can store the raw string (minus prefix)
+        // or a marker. Let's store the raw string.
+        memmove(value_to_set, (char*)data_to_parse_str, strlen(data_to_parse_str) + 1);
+    }
+    // If not structured_data_parsed, value_to_set contains the raw command output.
+    // --- END Prefix Check ---
+
     if (num_tokens > 2 && tokens[2].type == TOKEN_WORD) {
         char expanded_first_rhs_token[INPUT_BUFFER_SIZE];
         expand_variables_in_string_advanced(tokens[2].text, expanded_first_rhs_token, sizeof(expanded_first_rhs_token));
@@ -1905,86 +1932,112 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
         }
     }
 
-    if (!rhs_is_unary_op && is_rhs_command) { 
-        char *cmd_args[MAX_ARGS + 1]; 
-        char expanded_cmd_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE]; 
+     if (!rhs_is_unary_op && is_rhs_command) {
+        // ... (original cmd_args construction for execute_external_command) ...
+        char *cmd_args[MAX_ARGS + 1];
+        char expanded_cmd_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
         int cmd_arg_count = 0;
-
+        // (Loop to populate cmd_args and expanded_cmd_args_storage from tokens[2] onwards)
         for (int i = 2; i < num_tokens; i++) {
-            if (tokens[i].type == TOKEN_COMMENT) break; 
-
+            if (tokens[i].type == TOKEN_COMMENT) break;
             if (cmd_arg_count < MAX_ARGS) {
-                 if (tokens[i].type == TOKEN_STRING) { 
-                    char unescaped_val[INPUT_BUFFER_SIZE]; 
-                    unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val)); 
+                 if (tokens[i].type == TOKEN_STRING) {
+                    char unescaped_val[INPUT_BUFFER_SIZE];
+                    unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
                     expand_variables_in_string_advanced(unescaped_val, expanded_cmd_args_storage[cmd_arg_count], INPUT_BUFFER_SIZE);
-                } else { 
-                    expand_variables_in_string_advanced(tokens[i].text, expanded_cmd_args_storage[cmd_arg_count], INPUT_BUFFER_SIZE); 
+                } else {
+                    expand_variables_in_string_advanced(tokens[i].text, expanded_cmd_args_storage[cmd_arg_count], INPUT_BUFFER_SIZE);
                 }
-                cmd_args[cmd_arg_count] = expanded_cmd_args_storage[cmd_arg_count]; 
+                cmd_args[cmd_arg_count] = expanded_cmd_args_storage[cmd_arg_count];
                 cmd_arg_count++;
-            } else {
-                fprintf(stderr, "Warning: Too many arguments for RHS command in assignment. Max %d allowed.\n", MAX_ARGS);
-                break;
-            }
-        } 
-        cmd_args[cmd_arg_count] = NULL; 
+            } else { /* ... too many args warning ... */ break; }
+        }
+        cmd_args[cmd_arg_count] = NULL;
 
         if (cmd_arg_count > 0) {
-            bool is_user_func_rhs_final_check = false; 
-            UserFunction* user_func_check = function_list; 
-            while(user_func_check){ 
-                if(strcmp(cmd_args[0], user_func_check->name) == 0) {
-                    is_user_func_rhs_final_check = true; 
-                    break;
-                } 
-                user_func_check = user_func_check->next; 
-            }
+            // ... (check if it's a user function, which isn't captured this way) ...
+            bool is_user_func_rhs_final_check = false;
+            UserFunction* user_func_check = function_list;
+            while(user_func_check){ if(strcmp(cmd_args[0], user_func_check->name) == 0) { is_user_func_rhs_final_check = true; break; } user_func_check = user_func_check->next; }
 
-            if(is_user_func_rhs_final_check){ 
-                fprintf(stderr, "Assigning output of user-defined functions to variables is not directly supported for capture. Execute separately and use a result variable set by the function.\n"); 
+            if(is_user_func_rhs_final_check){
+                fprintf(stderr, "Assigning output of user-defined functions to variables is not directly supported for capture. Execute separately and use a result variable set by the function.\n");
                 strncpy(value_to_set, "USER_FUNC_ASSIGN_UNSUPPORTED", sizeof(value_to_set) -1);
-            } else { 
-                char full_cmd_path_for_exec[MAX_FULL_PATH_LEN]; 
-                if (find_command_in_path_dynamic(cmd_args[0], full_cmd_path_for_exec)) { 
-                    execute_external_command(full_cmd_path_for_exec, cmd_args, cmd_arg_count, value_to_set, sizeof(value_to_set)); 
-                } else { 
-                    fprintf(stderr, "Command for assignment not found: %s\n", cmd_args[0]); 
+            } else {
+                char full_cmd_path_for_exec[MAX_FULL_PATH_LEN];
+                if (find_command_in_path_dynamic(cmd_args[0], full_cmd_path_for_exec)) {
+                    // value_to_set is the output_buffer for execute_external_command
+                    execute_external_command(full_cmd_path_for_exec, cmd_args, cmd_arg_count, value_to_set, sizeof(value_to_set));
+                    
+                    // --- NEW: Check for structured data prefix ---
+                    bool structured_data_parsed = false;
+                    const char* data_to_parse = NULL;
+                    const char* detected_prefix_str = NULL;
+
+                    if (strncmp(value_to_set, JSON_STDOUT_PREFIX, strlen(JSON_STDOUT_PREFIX)) == 0) {
+                        data_to_parse = value_to_set + strlen(JSON_STDOUT_PREFIX);
+                        detected_prefix_str = JSON_STDOUT_PREFIX;
+                        structured_data_parsed = true;
+                    } else if (strncmp(value_to_set, OBJECT_STDOUT_PREFIX, strlen(OBJECT_STDOUT_PREFIX)) == 0) {
+                        data_to_parse = value_to_set + strlen(OBJECT_STDOUT_PREFIX);
+                        detected_prefix_str = OBJECT_STDOUT_PREFIX;
+                        structured_data_parsed = true;
+                    }
+
+                    if (structured_data_parsed) {
+                        // Call the C function to parse and flatten the structured data.
+                        // It will create BSH variables like $base_var_name_key = value
+                        int current_scope = (scope_stack_top >= 0) ? scope_stack[scope_stack_top].scope_id : GLOBAL_SCOPE_ID;
+                        parse_and_flatten_bsh_object_string(data_to_parse, base_var_name, detected_prefix_str, current_scope);
+
+                        // What should the main variable ($base_var_name) be set to?
+                        // Option 1: The raw string data (without prefix)
+                        // Option 2: A special marker value
+                        // Let's go with Option 1 for now.
+                        memmove(value_to_set, (char*)data_to_parse, strlen(data_to_parse) + 1); // Shift data to overwrite prefix
+                    }
+                    // If not structured_data_parsed, value_to_set contains the raw command output as before.
+                    // --- END NEW ---
+
+                } else {
+                    fprintf(stderr, "Command for assignment not found: %s\n", cmd_args[0]);
                     strncpy(value_to_set, "CMD_NOT_FOUND_ERROR", sizeof(value_to_set)-1);
                 }
             }
         } else { 
-             fprintf(stderr, "Internal error: RHS marked as command but no command arguments found.\n");
-             strncpy(value_to_set, "INTERNAL_ASSIGN_CMD_ERROR", sizeof(value_to_set)-1);
+            /* ... internal error ... */ 
+            printf("INTERNAL DEV ERROR: check handl_assigment_advanced in bsh.c 495823")
         }
-    } else if(!rhs_is_unary_op) { 
-        char combined_value[INPUT_BUFFER_SIZE] = ""; size_t current_len = 0;
-        for (int i = 2; i < num_tokens; i++) { 
-            if (tokens[i].type == TOKEN_COMMENT) break; 
-
-            char expanded_token_val[INPUT_BUFFER_SIZE];
-            if (tokens[i].type == TOKEN_STRING) { 
-                char unescaped_temp[INPUT_BUFFER_SIZE]; 
-                unescape_string(tokens[i].text, unescaped_temp, sizeof(unescaped_temp)); 
-                expand_variables_in_string_advanced(unescaped_temp, expanded_token_val, sizeof(expanded_token_val));
-            } else { 
-                expand_variables_in_string_advanced(tokens[i].text, expanded_token_val, sizeof(expanded_token_val)); 
-            }
-            size_t token_len = strlen(expanded_token_val);
-            if (current_len + token_len + (current_len > 0 && i > 2 ? 1 : 0) < INPUT_BUFFER_SIZE) { 
-                if (current_len > 0 && i > 2) { 
-                    strcat(combined_value, " "); 
-                    current_len++; 
+        } else if (!rhs_is_unary_op) { // This is the original path for simple value concatenation for assignment
+            // (Concatenate tokens from index 2 onwards into value_to_set, expanding variables)
+            char combined_value[INPUT_BUFFER_SIZE] = ""; size_t current_len = 0;
+            for (int i = 2; i < num_tokens; i++) {
+                if (tokens[i].type == TOKEN_COMMENT) break;
+                char expanded_token_val[INPUT_BUFFER_SIZE];
+                if (tokens[i].type == TOKEN_STRING) {
+                    char unescaped_temp[INPUT_BUFFER_SIZE];
+                    unescape_string(tokens[i].text, unescaped_temp, sizeof(unescaped_temp));
+                    expand_variables_in_string_advanced(unescaped_temp, expanded_token_val, sizeof(expanded_token_val));
+                } else {
+                    expand_variables_in_string_advanced(tokens[i].text, expanded_token_val, sizeof(expanded_token_val));
                 }
-                strcat(combined_value, expanded_token_val); 
-                current_len += token_len;
-            } else { 
-                fprintf(stderr, "Value too long for assignment.\n"); 
-                break; 
+                size_t token_len = strlen(expanded_token_val);
+                if (current_len + token_len + (current_len > 0 ? 1 : 0) < INPUT_BUFFER_SIZE) { // Add space if not first part
+                    if (current_len > 0) { strcat(combined_value, " "); current_len++; }
+                    strcat(combined_value, expanded_token_val); current_len += token_len;
+                } else { /* value too long */ break; }
             }
+            strncpy(value_to_set, combined_value, sizeof(value_to_set) -1);
+            value_to_set[sizeof(value_to_set)-1] = '\0';
         }
-        strncpy(value_to_set, combined_value, sizeof(value_to_set) -1); 
-        value_to_set[sizeof(value_to_set)-1] = '\0';
+        // (The rest of the assignment logic with value_to_set remains)
+
+        // Final assignment to LHS variable
+        if (is_array_assignment) {
+            set_array_element_scoped(base_var_name, index_str_raw, value_to_set);
+        } else {
+            set_variable_scoped(base_var_name, value_to_set, false);
+        }
     }
 
     // Finally, assign value_to_set to the LHS variable
@@ -2849,3 +2902,152 @@ void execute_script(const char *filename, bool is_import_call, bool is_startup_s
     }
 }
 
+///
+/// Objects (JSON-like)
+///
+
+// Helper to skip whitespace in the object string
+const char* skip_whitespace_in_obj_str(const char* s) {
+    while (*s && isspace((unsigned char)*s)) s++;
+    return s;
+}
+
+// Helper to parse a BSH-style quoted string from the object string
+// Returns a pointer to the character after the parsed string (and closing quote).
+// Stores the unescaped string content in 'dest_buffer'.
+// This is a simplified string parser for this specific context.
+const char* parse_quoted_string_from_obj_str(const char* s, char* dest_buffer, size_t buffer_size) {
+    dest_buffer[0] = '\0';
+    s = skip_whitespace_in_obj_str(s);
+    if (*s != '"') return s; // Expected opening quote
+
+    s++; // Skip opening quote
+    char* out = dest_buffer;
+    size_t count = 0;
+    while (*s && count < buffer_size - 1) {
+        if (*s == '"') { // End of string
+            s++; // Skip closing quote
+            *out = '\0';
+            return s;
+        }
+        // Basic escape handling (add more if needed: \n, \t, etc.)
+        if (*s == '\\' && *(s + 1) != '\0') {
+            s++;
+            if (*s == '"' || *s == '\\') {
+                *out++ = *s++;
+            } else { // Keep backslash if not a recognized escape for this simple parser
+                *out++ = '\\';
+                *out++ = *s++;
+            }
+        } else {
+            *out++ = *s++;
+        }
+        count++;
+    }
+    *out = '\0'; // Ensure null termination
+    // If loop ended due to buffer full or end of string without closing quote, it's an error
+    // or implies the string was truncated. For simplicity, we return current 's'.
+    return s;
+}
+
+// Main recursive parsing function
+// data_ptr is a pointer-to-pointer to traverse the input string
+void parse_bsh_object_recursive(const char** data_ptr, const char* current_base_bsh_var_name, int scope_id) {
+    const char* p = skip_whitespace_in_obj_str(*data_ptr);
+
+    if (*p != '[') {
+        fprintf(stderr, "BSH Object Parse Error: Expected '[' for object/array start. At: %s\n", p);
+        // To prevent infinite loops on malformed input, consume something or error out.
+        // For simplicity, we'll try to find the end or a known delimiter if things go wrong.
+        *data_ptr = p + strlen(p); // Consume rest of string on error
+        return;
+    }
+    p++; // Consume '['
+
+    bool first_element = true;
+    while (*p) {
+        p = skip_whitespace_in_obj_str(p);
+        if (*p == ']') {
+            p++; // Consume ']'
+            break; // End of current object/array
+        }
+
+        if (!first_element) {
+            if (*p == ',') {
+                p++; // Consume ','
+                p = skip_whitespace_in_obj_str(p);
+            } else {
+                fprintf(stderr, "BSH Object Parse Error: Expected ',' or ']' between elements. At: %s\n", p);
+                *data_ptr = p + strlen(p); return; // Error
+            }
+        }
+        first_element = false;
+
+        // Parse Key
+        char key_buffer[MAX_VAR_NAME_LEN]; // For "0", "ciao"
+        p = parse_quoted_string_from_obj_str(p, key_buffer, sizeof(key_buffer));
+        if (strlen(key_buffer) == 0) {
+            fprintf(stderr, "BSH Object Parse Error: Expected valid key string. At: %s\n", p);
+            *data_ptr = p + strlen(p); return; // Error
+        }
+
+        p = skip_whitespace_in_obj_str(p);
+        if (*p != ':') {
+            fprintf(stderr, "BSH Object Parse Error: Expected ':' after key '%s'. At: %s\n", key_buffer, p);
+            *data_ptr = p + strlen(p); return; // Error
+        }
+        p++; // Consume ':'
+        p = skip_whitespace_in_obj_str(p);
+
+        // Construct new base name for BSH variable
+        char next_base_bsh_var_name[MAX_VAR_NAME_LEN * 2]; // Increased size for nested names
+        // Sanitize key_buffer for use in variable names (e.g., replace disallowed chars with '_')
+        // For now, assume keys are simple enough or BSH var names allow them.
+        snprintf(next_base_bsh_var_name, sizeof(next_base_bsh_var_name), "%s_%s", current_base_bsh_var_name, key_buffer);
+
+        // Parse Value
+        if (*p == '[') { // Nested object/array
+            // Set a type for the current key indicating it's a nested structure
+            char type_var_for_key[MAX_VAR_NAME_LEN * 2 + 20];
+            snprintf(type_var_for_key, sizeof(type_var_for_key), "%s_BSH_STRUCT_TYPE", next_base_bsh_var_name);
+            set_variable_scoped(type_var_for_key, "BSH_OBJECT", false); // Using current scope
+
+            parse_bsh_object_recursive(&p, next_base_bsh_var_name, scope_id);
+        } else if (*p == '"') { // String value
+            char value_buffer[INPUT_BUFFER_SIZE]; // Assuming values fit here
+            p = parse_quoted_string_from_obj_str(p, value_buffer, sizeof(value_buffer));
+            set_variable_scoped(next_base_bsh_var_name, value_buffer, false); // Using current scope
+        } else {
+            fprintf(stderr, "BSH Object Parse Error: Expected value (string or nested object) after key '%s'. At: %s\n", key_buffer, p);
+            *data_ptr = p + strlen(p); return; // Error
+        }
+    } // End while
+    *data_ptr = p; // Update the main pointer
+}
+
+// The public function called by handle_assignment_advanced
+void parse_and_flatten_bsh_object_string(const char* object_data_string, const char* base_var_name, int current_scope_id) {
+    const char* p = object_data_string; // p will be advanced by the recursive parser
+
+    // Set a root type for the base variable name
+    char root_type_var_key[MAX_VAR_NAME_LEN + 30]; // Enough for _BSH_STRUCT_TYPE and safety
+    snprintf(root_type_var_key, sizeof(root_type_var_key), "%s_BSH_STRUCT_TYPE", base_var_name);
+    set_variable_scoped(root_type_var_key, "BSH_OBJECT_ROOT", false); // Or "BSH_ARRAY_ROOT"
+
+    // Temporarily push the target scope if different from current, or ensure set_variable_scoped uses it.
+    // For simplicity, we assume set_variable_scoped in our recursive calls will use the active scope
+    // which should be the one where the assignment is happening.
+    // If 'current_scope_id' is different from scope_stack[scope_stack_top].scope_id,
+    // you might need a temporary scope push/pop or pass scope_id to set_variable_scoped.
+    // The current set_variable_scoped uses scope_stack[scope_stack_top].scope_id implicitly.
+
+    parse_bsh_object_recursive(&p, base_var_name, current_scope_id);
+
+    // p should now point to the end of the parsed structure or where parsing stopped.
+    // You can check if *p is whitespace or null to see if the whole string was consumed.
+    p = skip_whitespace_in_obj_str(p);
+    if (*p != '\0') {
+        fprintf(stderr, "BSH Object Parse Warning: Extra characters found after main object structure. At: %s\n", p);
+    }
+    fprintf(stdout, "[BSH_DEBUG] Flattening complete for base var '%s'.\n", base_var_name);
+}
