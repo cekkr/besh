@@ -1,6 +1,6 @@
 /*
  * bsh - The Extensible Shell
- * Version: 0.5 (Lexical Scoping and Dynamic Operators)
+ * Version: 0.6 (Unary Prefix/Postfix Operators)
  * Copyright: Riccardo Cecchini <rcecchini.ds@gmail.com>
  *
  * This is an extensible shell designed to be lightweight yet powerful,
@@ -19,100 +19,39 @@
  *
  * 2.  **Keyword Aliasing:** The `defkeyword` built-in command allows users to create
  * aliases for existing keywords or commands. For example, `defkeyword defunc function`
- * makes `function` an alias for `defunc`[cite: 34]. This enhances script readability
+ * makes `function` an alias for `defunc`. This enhances script readability
  * and allows for personalized syntax.
  *
  * 3.  **User-Defined Functions (Script-level Logic):** The `defunc` (or `function`)
  * keyword allows users to define custom shell functions entirely within BSH script.
  * These functions support lexical scoping, meaning variables defined within a function
- * are local to that function's execution[cite: 37]. This enables complex logic and
- * code reuse directly in BSH, like the `for_loop` [cite: 38] or `json_get` [cite: 53] functions
+ * are local to that function's execution. This enables complex logic and
+ * code reuse directly in BSH, like the `for_loop` or `json_get` functions
  * defined in `.bshrc`.
  *
  * 4.  **Dynamic Library Loading (`loadlib` & `calllib`):** bsh can load shared C libraries
- * at runtime using `loadlib`[cite: 87]. Once loaded, functions within these libraries
- * can be invoked from BSH scripts using `calllib`[cite: 87]. This is crucial for
+ * at runtime using `loadlib`. Once loaded, functions within these libraries
+ * can be invoked from BSH scripts using `calllib`. This is crucial for
  * extending the shell with high-performance operations or accessing system APIs
  * that are impractical to implement in pure BSH script (e.g., mathematical
- * operations [cite: 63, 70, 75]).
+ * operations).
  *
  * 5.  **Dynamic Operator Handling (Infix Operations):** This is a powerful feature
  * that allows BSH scripts to define how arbitrary infix operators (like `+`, `-`, `*`, `/`)
  * are processed. When the C core encounters an expression like `$a + $b` or `val1 . val2`,
  * it doesn't have built-in arithmetic. Instead, it calls a special BSH function
- * (by convention, `__dynamic_op_handler` [cite: 19]).
+ * (by convention, `__dynamic_op_handler`).
  * This BSH function (defined in `init.bsh` or similar framework scripts)
  * then determines the operand types and calls the appropriate underlying C library
- * functions (e.g., `bsh_add_numbers` for `+` [cite: 63]) to perform the actual operation.
+ * functions (e.g., `bsh_add_numbers` for `+`) to perform the actual operation.
  * The result is then passed back to the C core to complete the assignment or evaluation.
  * This makes arithmetic and other complex data manipulations extensible at the script level.
  *
- * --- Basic Example of Extensibility in Action ---
- *
- * Imagine you want to perform arithmetic operations or concatenate numbers using a decimal point.
- * Without extensibility, this would require hardcoded C logic. With bsh:
- *
- * 1.  **C Library (`bshmath.so`):** A C library is compiled (using `c_compiler.bsh` [cite: 87])
- * and loaded, providing core numeric functions:
- * ```c
- * // Example from bsh_math_c_code in .bshrc
- * int bsh_add_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
- * // ... converts argv[0] and argv[1] to doubles, adds them, stores in obuf ...
- * snprintf(obuf, obuf_size, "%g", n1 + n2); [cite: 63]
- * return 0;
- * }
- * // Similar functions for subtract, multiply, divide, modulo, type checks [cite: 66, 70, 75, 80, 83]
- * ```
- * This C code is stored in a BSH variable `$bsh_math_c_code` [cite: 62] and compiled
- * into a shared library, then loaded with the alias `bshmath`[cite: 87].
- *
- * 2.  **BSH Number Framework (`number.bsh`):** This script provides BSH functions
- * that wrap the C library calls. For example:
- * ```bsh
- * # In number.bsh
- * function math_add (num1_str num2_str result_var) {
- * _math_binary_op "add" "bsh_add_numbers" "$num1_str" "$num2_str" $result_var [cite: 19, 21]
- * }
- * # ... other math_* functions [cite: 20]
- *
- * # And a special handler for decimal concatenation like "10" . "5" -> "10.5"
- * function bsh_decimal_constructor_handler (val1 type1 val2 type2 result_var) {
- * if "$val1" == "" { $($result_var) = "0.$val2" } [cite: 22]
- * else { $($result_var) = "$val1.$val2" } [cite: 17]
- * }
- * ```
- *
- * 3.  **Dynamic Operator Handler (`__dynamic_op_handler` in `init.bsh`):**
- * This central dispatcher function determines which `math_` function to call
- * based on the operator encountered in an infix expression:
- * ```bsh
- * # In init.bsh (which is imported by .bshrc)
- * function __dynamic_op_handler (operand1_val operand2_val operator result_var_name) {
- * # ... logic to determine operand types (e.g., using is_integer, is_float) ...
- * if $operator == "+" {
- * math_add "$operand1_val" "$operand2_val" $result_var_name [cite: 19, 21]
- * } else if $operator == "." {
- * bsh_decimal_constructor_handler "$operand1_val" "$op1_type" "$operand2_val" "$op2_type" $result_var_name [cite: 22]
- * }
- * # ... other operators ...
- * }
- * ```
- *
- * Now, from the `bsh` prompt or in any BSH script (after `.bshrc` and `init.bsh` are sourced):
- * ```bsh
- * $my_var = 10 + 5            # Calls __dynamic_op_handler, which calls math_add, which calls bsh_add_numbers
- * echo "Sum: $my_var"        # Output: Sum: 15
- *
- * $int_part = 20
- * $frac_part = 25
- * $combined = $int_part . $frac_part # Calls __dynamic_op_handler, which calls bsh_decimal_constructor_handler
- * echo "Combined: $combined" # Output: Combined: 20.25
- * ```
- *
- * This layered approach demonstrates how the C core provides minimal primitives (tokenization,
- * variable handling, dynamic library loading, and the `__dynamic_op_handler` hook), while
- * the vast majority of practical functionality, including complex arithmetic, is built
- * atop these primitives using BSH scripts and dynamically loaded C libraries.
+ * 6.  **Unary Prefix/Postfix Operations (`$var++`, `++$var`):** Similar to dynamic infix
+ * operators, when the C core detects a pattern like `$variable++` or `++$variable`,
+ * it calls a dedicated BSH handler function (e.g., `__bsh_postfix_increment`).
+ * This BSH function performs the actual increment/decrement logic, updates the
+ * variable, and can set a result variable for the C core to note the outcome.
  */
 
 #include <stdio.h>
@@ -157,6 +96,7 @@ typedef enum {
     TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_LBRACKET, TOKEN_RBRACKET,
     TOKEN_ASSIGN, TOKEN_SEMICOLON, TOKEN_PIPE, TOKEN_AMPERSAND, TOKEN_COMMENT,
     TOKEN_EOF, TOKEN_ERROR, TOKEN_NUMBER
+    // No specific TOKEN_INCREMENT, TOKEN_DECREMENT; use TOKEN_OPERATOR with text "++" or "--"
 } TokenType;
 
 typedef struct {
@@ -289,8 +229,7 @@ bool find_module_in_path(const char* module_name, char* full_path);
 int execute_external_command(char *command_path, char **args, int arg_count, char *output_buffer, size_t output_buffer_size);
 void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context);
 
-// Built-in Commands
-void handle_update_cwd_statement(Token *tokens, int num_tokens);
+// Built-in Commands & Operation Handlers
 void handle_defkeyword_statement(Token *tokens, int num_tokens);
 void handle_assignment_advanced(Token *tokens, int num_tokens);
 void handle_echo_advanced(Token *tokens, int num_tokens);
@@ -299,10 +238,12 @@ void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_sou
 void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no);
 void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no);
 void handle_defunc_statement_advanced(Token *tokens, int num_tokens);
-void handle_inc_dec_statement_advanced(Token *tokens, int num_tokens, bool increment);
+void handle_inc_dec_statement_advanced(Token *tokens, int num_tokens, bool increment); // For 'inc'/'dec' keywords
 void handle_loadlib_statement(Token *tokens, int num_tokens);
 void handle_calllib_statement(Token *tokens, int num_tokens);
 void handle_import_statement(Token *tokens, int num_tokens);
+void handle_update_cwd_statement(Token *tokens, int num_tokens);
+void handle_unary_op_statement(Token* var_token, Token* op_token, bool is_prefix); // For ++$var, $var++
 
 // Block Management (for if/while etc.)
 void push_block_bf(BlockType type, bool condition_true, long loop_start_fpos, int loop_start_line_no);
@@ -311,14 +252,24 @@ BlockFrame* peek_block_bf();
 void handle_opening_brace_token(Token token);
 void handle_closing_brace_token(Token token, FILE* input_source);
 
-// Utility
+// Utility & BSH Callers
 char* trim_whitespace(char *str);
 void free_all_variables();
 void free_function_list();
 void free_operator_list();
 void free_loaded_libs();
 long get_file_pos(FILE* f);
-char* unescape_string(const char* input, char* output_buffer, size_t buffer_size); // For string literals
+char* unescape_string(const char* input, char* output_buffer, size_t buffer_size);
+bool input_source_is_file(FILE* f);
+bool invoke_bsh_function_for_op(const char* func_name_to_call, // For binary dynamic ops
+                                const char* arg1_val, const char* arg2_val, const char* arg3_op,
+                                const char* bsh_result_var_name,
+                                char* c_result_buffer, size_t c_result_buffer_size);
+bool invoke_bsh_unary_op_call(const char* func_name_to_call, // For unary ops like $var++
+                                const char* bsh_arg1_var_name_str, 
+                                const char* bsh_arg2_result_holder_var_name,
+                                char* c_result_buffer, size_t c_result_buffer_size);
+bool is_comparison_or_assignment_operator(const char* op_str);
 
 
 // --- Main ---
@@ -332,30 +283,30 @@ int main(int argc, char *argv[]) {
     if (home_dir) {
         snprintf(startup_script_path, sizeof(startup_script_path), "%s/%s", home_dir, DEFAULT_STARTUP_SCRIPT);
         if (access(startup_script_path, F_OK) == 0) {
-            execute_script(startup_script_path, false, true); // is_import=false, is_startup=true
+            execute_script(startup_script_path, false, true); 
             startup_executed = true;
         }
     }
-    if (!startup_executed) { // Try current directory as fallback for default script
+    if (!startup_executed) { 
          if (access(DEFAULT_STARTUP_SCRIPT, F_OK) == 0) {
             execute_script(DEFAULT_STARTUP_SCRIPT, false, true);
         }
     }
 
-    if (argc > 1) { // Script provided as argument
-        execute_script(argv[1], false, false); // is_import=false, is_startup=false
+    if (argc > 1) { 
+        execute_script(argv[1], false, false); 
     } else { // Interactive mode
         char line_buffer[INPUT_BUFFER_SIZE];
-        char prompt_buffer[MAX_VAR_NAME_LEN + 30]; // For prompt string + state indicator
+        char prompt_buffer[MAX_VAR_NAME_LEN + 30]; 
         int line_counter_interactive = 0;
 
         while (1) {
             char* current_prompt_val = get_variable_scoped("PS1");
             if (!current_prompt_val || strlen(current_prompt_val) == 0) {
-                current_prompt_val = "bsh"; // Default prompt if PS1 is unset or empty
+                current_prompt_val = "bsh"; 
             }
 
-            char state_indicator[35] = ""; // Buffer for block state indicator
+            char state_indicator[35] = ""; 
             if (block_stack_top_bf >= 0) {
                 BlockFrame* top_block = peek_block_bf();
                 const char* block_type_str = "unknown";
@@ -370,11 +321,10 @@ int main(int argc, char *argv[]) {
                     snprintf(state_indicator, sizeof(state_indicator), "(skip %s %d)", block_type_str, block_stack_top_bf + 1);
                 } else if (current_exec_state == STATE_DEFINE_FUNC_BODY && current_function_definition) {
                      snprintf(state_indicator, sizeof(state_indicator), "(defunc %s)", current_function_definition->name);
-                } else if (top_block) { // Normal block execution
+                } else if (top_block) { 
                     snprintf(state_indicator, sizeof(state_indicator), "(%s %d)", block_type_str, block_stack_top_bf + 1);
                 }
             } else if (current_exec_state == STATE_DEFINE_FUNC_BODY && current_function_definition) {
-                // Function definition started but '{' not yet encountered
                 snprintf(state_indicator, sizeof(state_indicator), "(defunc %s...)", current_function_definition->name);
             }
 
@@ -382,7 +332,7 @@ int main(int argc, char *argv[]) {
             printf("%s", prompt_buffer);
 
             if (!fgets(line_buffer, sizeof(line_buffer), stdin)) {
-                printf("\n"); // EOF (Ctrl+D)
+                printf("\n"); 
                 break;
             }
             line_counter_interactive++;
@@ -396,72 +346,39 @@ int main(int argc, char *argv[]) {
 
 // --- Core Implementations ---
 
-C
-// bsh.c (Continued - Add or replace existing stubs with these implementations)
-
-// --- Forward Declarations for functions used in process_line if not already ordered ---
-// (Most are already in the prototype list, this is just for logical completeness here)
-// bool invoke_bsh_function_for_op(...); // From previous turn's suggestion
-// bool is_comparison_or_assignment_operator(...); // From previous turn's suggestion
-
-// --- Implementations ---
-
-// Placeholder for the C helper function discussed in the previous turn
-// This function would call the BSH '__dynamic_op_handler'
-// For now, ensure its prototype is available if you plan to use it directly in process_line.
-// bool invoke_bsh_function_for_op(const char* func_name_to_call,
-//                                 const char* arg1_val, const char* arg2_val, const char* arg3_op,
-//                                 const char* bsh_result_var_name,
-//                                 char* c_result_buffer, size_t c_result_buffer_size);
-
-// Definition for the helper from the previous turn (if not already added)
-// bool is_comparison_or_assignment_operator(const char* op_str) {
-//     if (strcmp(op_str, "==") == 0 || strcmp(op_str, "!=") == 0 ||
-//         strcmp(op_str, ">") == 0  || strcmp(op_str, "<") == 0 ||
-//         strcmp(op_str, ">=") == 0 || strcmp(op_str, "<=") == 0 ||
-//         strcmp(op_str, "=") == 0) {
-//         return true;
-//     }
-//     return false;
-// }
-
-
 void process_line(char *line_raw, FILE *input_source, int current_line_no, ExecutionState exec_mode_param) {
     char line[MAX_LINE_LENGTH];
     strncpy(line, line_raw, MAX_LINE_LENGTH -1);
     line[MAX_LINE_LENGTH-1] = '\0';
     trim_whitespace(line);
 
-    if (line[0] == '\0') { // Skip empty line
+    if (line[0] == '\0') { 
         return;
     }
 
-    // If we are defining a function body (and not skipping due to outer block)
     if (is_defining_function && current_function_definition &&
         (current_exec_state == STATE_DEFINE_FUNC_BODY || current_exec_state == STATE_IMPORT_PARSING || exec_mode_param == STATE_IMPORT_PARSING) &&
-        block_stack_top_bf >=0 && peek_block_bf() && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF && // Check we are inside the { }
-        strncmp(line, "}", 1) != 0 && strncmp(line, "}", strlen(line)) != 0 ) { // and line is not the closing brace
+        block_stack_top_bf >=0 && peek_block_bf() && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF && 
+        strncmp(line, "}", 1) != 0 && strncmp(line, "}", strlen(line)) != 0 ) { 
 
         if (current_function_definition->line_count < MAX_FUNC_LINES) {
             current_function_definition->body[current_function_definition->line_count] = strdup(line);
             if (!current_function_definition->body[current_function_definition->line_count]) {
                 perror("strdup for function body line failed");
-                // Consider error handling: stop defining function?
             } else {
                 current_function_definition->line_count++;
             }
         } else {
             fprintf(stderr, "Error: Function '%s' exceeds maximum line count of %d.\n",
                     current_function_definition->name, MAX_FUNC_LINES);
-            // Invalidate current function definition or handle error
              for(int i=0; i < current_function_definition->line_count; ++i) if(current_function_definition->body[i]) free(current_function_definition->body[i]);
             free(current_function_definition);
             current_function_definition = NULL;
             is_defining_function = false;
-            if (block_stack_top_bf >=0 && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF) pop_block_bf(); // Pop func def block
-            current_exec_state = STATE_NORMAL; // Or restore previous
+            if (block_stack_top_bf >=0 && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF) pop_block_bf(); 
+            current_exec_state = STATE_NORMAL; 
         }
-        return; // Line consumed by function definition
+        return; 
     }
 
 
@@ -470,69 +387,54 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
     int num_tokens = advanced_tokenize_line(line, tokens, MAX_ARGS, token_storage, TOKEN_STORAGE_SIZE);
 
     if (num_tokens == 0 || tokens[0].type == TOKEN_EMPTY || tokens[0].type == TOKEN_EOF) {
-        return; // Nothing to process
+        return; 
     }
 
     if (tokens[0].type == TOKEN_COMMENT) {
-        return; // Skip comment line
+        return; 
     }
 
-    // Handle '{' (opening brace)
-    if (tokens[0].type == TOKEN_LBRACE && num_tokens == 1) { // Line is just "{"
+    if (tokens[0].type == TOKEN_LBRACE && num_tokens == 1) { 
         handle_opening_brace_token(tokens[0]);
         return;
     }
-    // Handle '}' (closing brace)
-    if (tokens[0].type == TOKEN_RBRACE && num_tokens == 1) { // Line is just "}"
+    if (tokens[0].type == TOKEN_RBRACE && num_tokens == 1) { 
         handle_closing_brace_token(tokens[0], input_source);
         return;
     }
-     // Handle '{' or '}' at the end of other statements if not the only token
     if (num_tokens > 1 && tokens[num_tokens-1].type == TOKEN_LBRACE) {
-        // The LBRACE will be handled by specific handlers like if, while, defunc if they expect it.
-        // If it's unexpected, it might be an error or handled by a command.
-        // For now, let specific handlers consume it.
+        // Let specific handlers consume it.
     }
     if (num_tokens > 1 && tokens[num_tokens-1].type == TOKEN_RBRACE) {
-        // This is less common for '}' to not be standalone, could be syntax error
-        // unless a future command might use it. For now, '}' should mostly be standalone.
-        // If it's the only substantive token before a comment, advanced_tokenize_line might give num_tokens > 1.
         if (tokens[0].type == TOKEN_RBRACE && (tokens[1].type == TOKEN_COMMENT || tokens[1].type == TOKEN_EOF) ){
              handle_closing_brace_token(tokens[0], input_source);
              return;
         }
     }
 
-
-    // If we are in STATE_BLOCK_SKIP, only process block-ending '}' or 'else'/'else if'
     if (current_exec_state == STATE_BLOCK_SKIP && exec_mode_param != STATE_IMPORT_PARSING) {
         const char* first_token_text_resolved = NULL;
         if (tokens[0].type == TOKEN_WORD) {
              first_token_text_resolved = resolve_keyword_alias(tokens[0].text);
         }
 
-        if (tokens[0].type == TOKEN_RBRACE) { // '}' always processed to manage block stack
+        if (tokens[0].type == TOKEN_RBRACE) { 
             handle_closing_brace_token(tokens[0], input_source);
         } else if (first_token_text_resolved &&
                    (strcmp(first_token_text_resolved, "else") == 0 )) {
-            // 'else' or 'else if' needs to be processed to potentially change exec_state
             handle_else_statement_advanced(tokens, num_tokens, input_source, current_line_no);
         } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "if") == 0){
-            // Nested if while skipping: just push another skip block
             push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no);
         } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "while") == 0){
             push_block_bf(BLOCK_TYPE_WHILE, false, 0, current_line_no);
         } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "defunc") == 0){
-             push_block_bf(BLOCK_TYPE_FUNCTION_DEF, false, 0, current_line_no); // False = don't collect body
-        } else if (tokens[0].type == TOKEN_LBRACE) { // An opening brace while skipping (likely after a skipped if/while header)
+             push_block_bf(BLOCK_TYPE_FUNCTION_DEF, false, 0, current_line_no); 
+        } else if (tokens[0].type == TOKEN_LBRACE) { 
             BlockFrame* current_block = peek_block_bf();
-            if (current_block) { // The LBRACE corresponds to the block we just pushed for skipping
-                // current_exec_state remains STATE_BLOCK_SKIP
-            } else {
+            if (!current_block) { // Should not happen if LBRACE follows a skipped if/while/defunc
                  fprintf(stderr, "Syntax error: Unmatched '{' on line %d while skipping.\n", current_line_no);
             }
         }
-        // Other tokens are ignored during STATE_BLOCK_SKIP
         return;
     }
 
@@ -540,7 +442,23 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
     // --- Actual command/statement processing ---
     if (tokens[0].type == TOKEN_VARIABLE && num_tokens > 1 && tokens[1].type == TOKEN_ASSIGN) {
         handle_assignment_advanced(tokens, num_tokens);
-    } else if (tokens[0].type == TOKEN_WORD) {
+    } 
+    // Check for unary prefix/postfix operations (e.g. $var++, ++$var)
+    // These should have exactly 2 tokens if there are no spaces.
+    else if (num_tokens == 2 &&
+               tokens[0].type == TOKEN_VARIABLE &&
+               tokens[1].type == TOKEN_OPERATOR &&
+               (strcmp(tokens[1].text, "++") == 0 || strcmp(tokens[1].text, "--") == 0)) {
+        // Postfix: $var++ or $var--
+        handle_unary_op_statement(&tokens[0], &tokens[1], false /*is_prefix*/);
+    } else if (num_tokens == 2 &&
+               tokens[1].type == TOKEN_VARIABLE && // Operand is the second token
+               tokens[0].type == TOKEN_OPERATOR &&
+               (strcmp(tokens[0].text, "++") == 0 || strcmp(tokens[0].text, "--") == 0)) {
+        // Prefix: ++$var or --$var
+        handle_unary_op_statement(&tokens[1], &tokens[0], true /*is_prefix*/);
+    }
+    else if (tokens[0].type == TOKEN_WORD) {
         const char* command_name = resolve_keyword_alias(tokens[0].text);
 
         if (strcmp(command_name, "echo") == 0) {
@@ -549,7 +467,7 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
             handle_defkeyword_statement(tokens, num_tokens);
         } else if (strcmp(command_name, "if") == 0) {
             handle_if_statement_advanced(tokens, num_tokens, input_source, current_line_no);
-        } else if (strcmp(command_name, "else") == 0) { // Handles "else" and "else if"
+        } else if (strcmp(command_name, "else") == 0) { 
             handle_else_statement_advanced(tokens, num_tokens, input_source, current_line_no);
         } else if (strcmp(command_name, "while") == 0) {
             handle_while_statement_advanced(tokens, num_tokens, input_source, current_line_no);
@@ -565,12 +483,10 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
             handle_calllib_statement(tokens, num_tokens);
         } else if (strcmp(command_name, "import") == 0) {
             handle_import_statement(tokens, num_tokens);
-        } else if (strcmp(command_name, "update_cwd") == 0) { 
-            handle_update_cwd_statement(tokens, num_tokens);  
-        }    
-        // Add other built-in keywords here...
+        } else if (strcmp(command_name, "update_cwd") == 0) {
+            handle_update_cwd_statement(tokens, num_tokens);
+        }
         else {
-            // Not a known built-in keyword, try user function or external command or dynamic operator
             UserFunction* func_to_run = function_list;
             bool found_user_func = false;
             while(func_to_run) {
@@ -584,47 +500,43 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
             if (found_user_func) {
                 execute_user_function(func_to_run, &tokens[1], num_tokens - 1, input_source);
             } else {
-                // Check for standalone dynamic operator pattern: val1 op val2
-                // This relies on the C helper 'invoke_bsh_function_for_op' and 'is_comparison_or_assignment_operator'
-                // from the previous turn's suggestions.
+                // Standalone dynamic operator pattern: val1 op val2 (e.g. 10 + 5 at prompt)
                 if ( (num_tokens == 3 || (num_tokens == 4 && tokens[3].type == TOKEN_COMMENT)) &&
-                     (tokens[0].type == TOKEN_VARIABLE || tokens[0].type == TOKEN_NUMBER || tokens[0].type == TOKEN_STRING) && // Token 0 is the first operand here
-                     tokens[1].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[1].text) && // Token 1 is the operator
-                     (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING) // Token 2 is the second operand
+                     (tokens[0].type == TOKEN_VARIABLE || tokens[0].type == TOKEN_NUMBER || tokens[0].type == TOKEN_STRING || tokens[0].type == TOKEN_WORD) && 
+                     tokens[1].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[1].text) &&
+                     (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING || tokens[2].type == TOKEN_WORD) 
                    ) {
                         char op1_expanded[INPUT_BUFFER_SIZE];
                         char op2_expanded[INPUT_BUFFER_SIZE];
                         char result_c_buffer[INPUT_BUFFER_SIZE];
                         const char* operator_str = tokens[1].text;
-                        const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES"; // BSH var for result
+                        const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES"; 
 
-                        // Expand operand1 (tokens[0] is the first operand in this context)
                         if (tokens[0].type == TOKEN_STRING) {
                             char unescaped[INPUT_BUFFER_SIZE];
                             unescape_string(tokens[0].text, unescaped, sizeof(unescaped));
                             expand_variables_in_string_advanced(unescaped, op1_expanded, sizeof(op1_expanded));
-                        } else {
+                        } else { 
                             expand_variables_in_string_advanced(tokens[0].text, op1_expanded, sizeof(op1_expanded));
                         }
 
-                        // Expand operand2 (tokens[2])
                         if (tokens[2].type == TOKEN_STRING) {
                             char unescaped[INPUT_BUFFER_SIZE];
                             unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
                             expand_variables_in_string_advanced(unescaped, op2_expanded, sizeof(op2_expanded));
-                        } else {
+                        } else { 
                             expand_variables_in_string_advanced(tokens[2].text, op2_expanded, sizeof(op2_expanded));
                         }
-                        // (Ensure invoke_bsh_function_for_op prototype is available)
+                        
                         if (invoke_bsh_function_for_op("__dynamic_op_handler",
-                                                       op1_expanded, op2_expanded, operator_str, /* op is 3rd param to C func */
+                                                       op1_expanded, op2_expanded, operator_str, 
                                                        temp_bsh_result_var,
                                                        result_c_buffer, sizeof(result_c_buffer))) {
                             if (strlen(result_c_buffer) > 0 &&
                                 strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0 &&
                                 strncmp(result_c_buffer, "NO_HANDLER_ERROR", 16) != 0 &&
                                 strncmp(result_c_buffer, "UNKNOWN_HANDLER_ERROR", 21) != 0 ) {
-                                printf("%s\n", result_c_buffer);
+                                printf("%s\n", result_c_buffer); // Print result of standalone operation
                             }
                             set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
                         } else {
@@ -637,11 +549,11 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                     if (find_command_in_path_dynamic(command_name, command_path)) {
                         char *args[MAX_ARGS + 1];
                         char expanded_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
-                        args[0] = command_path; // First arg is the command itself
+                        args[0] = command_path; 
                         int arg_count = 1;
 
                         for (int i = 1; i < num_tokens; ++i) {
-                            if (tokens[i].type == TOKEN_COMMENT) break; // Stop at comment
+                            if (tokens[i].type == TOKEN_COMMENT) break; 
                             if (arg_count < MAX_ARGS) {
                                 if (tokens[i].type == TOKEN_STRING) {
                                     char unescaped_val[INPUT_BUFFER_SIZE];
@@ -656,24 +568,21 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                                 break;
                             }
                         }
-                        args[arg_count] = NULL; // Null-terminate arg list for execv
+                        args[arg_count] = NULL; 
 
-                        char output_buffer_ext[INPUT_BUFFER_SIZE]; // For capturing output if needed, not used by default echo
-                        execute_external_command(command_path, args, arg_count, NULL, 0); // No output capture for direct execution for now
-                                                                                        // Or, if output is desired, pass output_buffer_ext and its size
+                        execute_external_command(command_path, args, arg_count, NULL, 0); 
                     } else {
                         fprintf(stderr, "Command not found: %s (line %d)\n", command_name, current_line_no);
                     }
                 }
             }
         }
-    } else if (tokens[0].type == TOKEN_LBRACE) { // '{' as the first token on a line with other stuff
-        handle_opening_brace_token(tokens[0]); // Handles if it starts a block
-        // If there are tokens after '{', it might be a syntax error or part of a complex data structure (not supported yet)
+    } else if (tokens[0].type == TOKEN_LBRACE) { 
+        handle_opening_brace_token(tokens[0]); 
         if (num_tokens > 1 && tokens[1].type != TOKEN_COMMENT && tokens[1].type != TOKEN_EOF) {
             fprintf(stderr, "Warning: Tokens found after '{' on the same line %d. '{' should ideally be standalone or at the end of if/while/defunc.\n", current_line_no);
         }
-    } else if (tokens[0].type == TOKEN_RBRACE) { // '}' as the first token on a line with other stuff
+    } else if (tokens[0].type == TOKEN_RBRACE) { 
          handle_closing_brace_token(tokens[0], input_source);
          if (num_tokens > 1 && tokens[1].type != TOKEN_COMMENT && tokens[1].type != TOKEN_EOF) {
              fprintf(stderr, "Warning: Tokens found after '}' on the same line %d. '}' should ideally be standalone.\n", current_line_no);
@@ -684,60 +593,11 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
 }
 
 
-// Stub for handle_import_statement
-void handle_import_statement(Token *tokens, int num_tokens) {
-    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) { // Don't import if outer block is skipping, unless we are already in an import
-        // If we are skipping, and an import is encountered, we should also skip the content of the imported file.
-        // This means execute_script needs to correctly handle being called with a "skip" context.
-        // For now, we just don't execute the import.
-        // printf("Skipping import due to current_exec_state = STATE_BLOCK_SKIP\n");
-        return;
-    }
-
-    if (num_tokens < 2) {
-        fprintf(stderr, "Syntax: import <module_name_or_path>\n");
-        return;
-    }
-
-    char module_spec_expanded[MAX_FULL_PATH_LEN];
-    if (tokens[1].type == TOKEN_STRING) {
-        char unescaped_module_spec[MAX_FULL_PATH_LEN];
-        unescape_string(tokens[1].text, unescaped_module_spec, sizeof(unescaped_module_spec));
-        expand_variables_in_string_advanced(unescaped_module_spec, module_spec_expanded, sizeof(module_spec_expanded));
-    } else { // TOKEN_WORD or TOKEN_VARIABLE
-        expand_variables_in_string_advanced(tokens[1].text, module_spec_expanded, sizeof(module_spec_expanded));
-    }
-    
-    if (strlen(module_spec_expanded) == 0) {
-        fprintf(stderr, "Error: import statement received an empty module path/name after expansion.\n");
-        return;
-    }
-
-    char full_module_path[MAX_FULL_PATH_LEN];
-    if (find_module_in_path(module_spec_expanded, full_module_path)) {
-        // Prevent recursive imports of the same file within the same import chain (simple check)
-        // A more robust solution would involve a stack of currently importing files.
-        // For now, we rely on the user to avoid deep recursion or have a max import depth.
-        // printf("Importing module: %s (resolved to %s)\n", module_spec_expanded, full_module_path);
-
-        // Store current execution state, to be restored after import
-        ExecutionState previous_exec_state = current_exec_state;
-        current_exec_state = STATE_IMPORT_PARSING; // Set special state for import
-
-        execute_script(full_module_path, true, false); // is_import=true, is_startup=false
-
-        current_exec_state = previous_exec_state; // Restore execution state
-    } else {
-        fprintf(stderr, "Error: Module '%s' not found for import.\n", module_spec_expanded);
-    }
-}
-
 // Shell
 void initialize_shell() {
-    scope_stack_top = -1; // Initialize scope stack
-    enter_scope();        // Enter global scope (scope_id 0)
+    scope_stack_top = -1; 
+    enter_scope();        
 
-    // Initialize executable PATH
     char *path_env = getenv("PATH");
     if (path_env) {
         char *path_copy = strdup(path_env);
@@ -751,27 +611,24 @@ void initialize_shell() {
         } else { perror("strdup for PATH failed in initialize_shell"); }
     }
 
-    initialize_module_path(); // Initialize BSH_MODULE_PATH list
-    initialize_operators_dynamic(); // Initialize built-in operators
+    initialize_module_path(); 
+    initialize_operators_dynamic(); 
 
-    // Set some initial shell variables in the global scope
-    set_variable_scoped("SHELL_VERSION", "bsh-dynamic-vals-0.5", false);
-    set_variable_scoped("PS1", "bsh", false); // Default prompt
+    set_variable_scoped("SHELL_VERSION", "bsh-dynamic-vals-0.6", false); // Updated version
+    set_variable_scoped("PS1", "bsh", false); 
 
-    // Set BSH_MODULE_PATH as a shell variable too, so scripts can inspect/modify it
     char* initial_module_path_env = getenv("BSH_MODULE_PATH");
     if (!initial_module_path_env || strlen(initial_module_path_env) == 0) {
         initial_module_path_env = DEFAULT_MODULE_PATH;
     }
     set_variable_scoped("BSH_MODULE_PATH", initial_module_path_env, false);
-
-    // Initialize and set CWD variable
+    
     char cwd_buffer[PATH_MAX];
     if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL) {
         set_variable_scoped("CWD", cwd_buffer, false);
     } else {
         perror("bsh: getcwd() error on init");
-        set_variable_scoped("CWD", "", false); // Set to empty if error
+        set_variable_scoped("CWD", "", false); 
     }
 }
 
@@ -784,8 +641,7 @@ void cleanup_shell() {
     free_path_dir_list(&module_path_list_head);
     free_loaded_libs();
 
-    // Ensure all scopes are formally left (though variables are cleaned by free_all_variables)
-    while(scope_stack_top >= 0) { // Should only be global scope left if balanced
+    while(scope_stack_top >= 0) { 
         leave_scope(scope_stack[scope_stack_top].scope_id);
     }
 }
@@ -838,6 +694,8 @@ void initialize_module_path() {
 // --- Tokenizer & Keyword Aliasing ---
 void initialize_operators_dynamic() {
     // Order for matching: longest first if not using a more complex matching like Trie
+    add_operator_dynamic("++", TOKEN_OPERATOR); // Added for unary ops
+    add_operator_dynamic("--", TOKEN_OPERATOR); // Added for unary ops
     add_operator_dynamic("==", TOKEN_OPERATOR); add_operator_dynamic("!=", TOKEN_OPERATOR);
     add_operator_dynamic(">=", TOKEN_OPERATOR); add_operator_dynamic("<=", TOKEN_OPERATOR);
     add_operator_dynamic("&&", TOKEN_OPERATOR); add_operator_dynamic("||", TOKEN_OPERATOR);
@@ -850,7 +708,7 @@ void initialize_operators_dynamic() {
     add_operator_dynamic("}", TOKEN_RBRACE);  add_operator_dynamic("[", TOKEN_LBRACKET);
     add_operator_dynamic("]", TOKEN_RBRACKET);add_operator_dynamic(";", TOKEN_SEMICOLON);
     add_operator_dynamic("|", TOKEN_PIPE);    add_operator_dynamic("&", TOKEN_AMPERSAND);
-     add_operator_dynamic(".", TOKEN_OPERATOR);
+    add_operator_dynamic(".", TOKEN_OPERATOR);
 }
 
 void add_operator_dynamic(const char* op_str, TokenType type) {
@@ -861,13 +719,13 @@ void add_operator_dynamic(const char* op_str, TokenType type) {
     OperatorDefinition *new_op = (OperatorDefinition*)malloc(sizeof(OperatorDefinition));
     if (!new_op) { perror("malloc for new operator failed"); return; }
     strcpy(new_op->op_str, op_str); new_op->op_type = type;
-    new_op->next = operator_list_head; operator_list_head = new_op; // Prepend
+    new_op->next = operator_list_head; operator_list_head = new_op; 
 }
 
 int match_operator_dynamic(const char *input, const char **op_text, TokenType *matched_type) {
     OperatorDefinition *current = operator_list_head;
     const char* best_match_text = NULL;
-    TokenType best_match_type = TOKEN_EMPTY; // Default if no specific type found for a generic op
+    TokenType best_match_type = TOKEN_EMPTY; 
     int longest_match_len = 0;
 
     while (current) {
@@ -875,7 +733,7 @@ int match_operator_dynamic(const char *input, const char **op_text, TokenType *m
         if (strncmp(input, current->op_str, op_len) == 0) {
             if (op_len > longest_match_len) {
                 longest_match_len = op_len;
-                best_match_text = current->op_str;
+                best_match_text = current->op_str; 
                 best_match_type = current->op_type;
             }
         }
@@ -883,11 +741,11 @@ int match_operator_dynamic(const char *input, const char **op_text, TokenType *m
     }
 
     if (longest_match_len > 0) {
-        *op_text = best_match_text; // This points to the string within OperatorDefinition
+        *op_text = best_match_text; 
         if(matched_type) *matched_type = best_match_type;
         return longest_match_len;
     }
-    return 0; // No operator matched
+    return 0; 
 }
 
 void add_keyword_alias(const char* original, const char* alias_name) {
@@ -895,10 +753,10 @@ void add_keyword_alias(const char* original, const char* alias_name) {
         fprintf(stderr, "Keyword or alias too long (max %d chars).\n", MAX_KEYWORD_LEN); return;
     }
     KeywordAlias* current = keyword_alias_head;
-    while(current){ // Check if alias already exists
+    while(current){ 
         if(strcmp(current->alias, alias_name) == 0){
             fprintf(stderr, "Warning: Alias '%s' already defined for '%s'. Overwriting with new original '%s'.\n", alias_name, current->original, original);
-            strncpy(current->original, original, MAX_KEYWORD_LEN); // Overwrite original
+            strncpy(current->original, original, MAX_KEYWORD_LEN); 
             current->original[MAX_KEYWORD_LEN] = '\0';
             return;
         }
@@ -908,18 +766,18 @@ void add_keyword_alias(const char* original, const char* alias_name) {
     if (!new_alias) { perror("malloc for keyword alias failed"); return; }
     strncpy(new_alias->original, original, MAX_KEYWORD_LEN); new_alias->original[MAX_KEYWORD_LEN] = '\0';
     strncpy(new_alias->alias, alias_name, MAX_KEYWORD_LEN); new_alias->alias[MAX_KEYWORD_LEN] = '\0';
-    new_alias->next = keyword_alias_head; keyword_alias_head = new_alias; // Prepend
+    new_alias->next = keyword_alias_head; keyword_alias_head = new_alias; 
 }
 
 const char* resolve_keyword_alias(const char* alias_name) {
     KeywordAlias *current = keyword_alias_head;
     while (current) {
         if (strcmp(current->alias, alias_name) == 0) {
-            return current->original; // Return pointer to original keyword string
+            return current->original; 
         }
         current = current->next;
     }
-    return alias_name; // No alias found, return the input name itself
+    return alias_name; 
 }
 
 void free_keyword_alias_list() {
@@ -932,36 +790,29 @@ int advanced_tokenize_line(const char *line, Token *tokens, int max_tokens, char
     int token_count = 0; const char *p = line; char *storage_ptr = token_storage;
     size_t remaining_storage = storage_size;
     while (*p && token_count < max_tokens) {
-        while (isspace((unsigned char)*p)) p++; // Skip leading whitespace
-        if (!*p) break; // End of line
-        if (*p == '#') {tokens[token_count].type = TOKEN_COMMENT; tokens[token_count].text = p; tokens[token_count].len = strlen(p); token_count++; break;} // Comment consumes rest of line
+        while (isspace((unsigned char)*p)) p++; 
+        if (!*p) break; 
+        if (*p == '#') {tokens[token_count].type = TOKEN_COMMENT; tokens[token_count].text = p; tokens[token_count].len = strlen(p); token_count++; break;} 
 
-         const char *p_original = p; // Save current position in case this is not a number
+         const char *p_original = p; 
 
-        // Try to parse an integer, possibly with a leading '-'
         bool is_negative_candidate = false;
         if (*p == '-') {
-            // Check if next char is a digit. If not, this '-' is not part of a number here.
             if (isdigit((unsigned char)*(p + 1))) {
                 is_negative_candidate = true;
-                p++; // Tentatively consume '-'
+                p++; 
             }
-            // If not isdigit(*(p+1)), p remains at '-', will be handled by operator matching later.
         }
 
-        if (isdigit((unsigned char)*p)) { // Current char is a digit (or was after a consumed '-')
-            const char *num_val_start = p; // Start of the digits themselves
+        if (isdigit((unsigned char)*p)) { 
+            const char *num_val_start = p; 
             while (isdigit((unsigned char)*p)) {
-                p++; // Consume all digits
+                p++; 
             }
 
-            // Check if any digits were actually consumed after the optional '-'
             if (p > num_val_start) {
-                // Valid integer part found.
                 tokens[token_count].type = TOKEN_NUMBER;
                 tokens[token_count].text = storage_ptr;
-                // Calculate length from the original start (p_original) if negative, or num_val_start if positive
-                // However, p_original correctly captures the start of the whole token ("-5" or "5")
                 tokens[token_count].len = p - p_original;
 
                 if (remaining_storage > (size_t)tokens[token_count].len) {
@@ -970,51 +821,42 @@ int advanced_tokenize_line(const char *line, Token *tokens, int max_tokens, char
                     storage_ptr += (tokens[token_count].len + 1);
                     remaining_storage -= (tokens[token_count].len + 1);
                     token_count++;
-                    continue; // Successfully tokenized a number, restart loop for the next token
+                    continue; 
                 } else {
-                    tokens[token_count].type = TOKEN_ERROR; // Ran out of storage
+                    tokens[token_count].type = TOKEN_ERROR; 
                     fprintf(stderr, "Tokenizer error: Out of token storage.\n");
-                    // p = p_original; // Reset p if breaking, or ensure loop terminates
-                    break; // Critical error, stop tokenizing line
+                    break; 
                 }
             } else if (is_negative_candidate) {
-                // We consumed a '-' (is_negative_candidate is true, p was advanced) but found no digits after it.
-                // This '-' should be treated as an operator. Backtrack p.
                 p = p_original;
-                // Fall through to operator matching.
             }
-            // If it wasn't isdigit(*p) initially (and not is_negative_candidate),
-            // p is still p_original, fall through.
         } else if (is_negative_candidate) {
-            // We tentatively consumed a '-' (p was advanced) but the char after it was not a digit.
-            // This '-' should be treated as an operator. Backtrack p.
             p = p_original;
-            // Fall through to operator matching.
         }
 
-        tokens[token_count].text = storage_ptr; // Tentatively set text pointer
+        tokens[token_count].text = storage_ptr; 
 
-        const char *matched_op_text = NULL; TokenType matched_op_type = TOKEN_OPERATOR; // Default to generic operator if type not specific
+        const char *matched_op_text = NULL; TokenType matched_op_type = TOKEN_OPERATOR; 
         int op_len = match_operator_dynamic(p, &matched_op_text, &matched_op_type);
 
-        if (op_len > 0) { // Operator matched
+        if (op_len > 0) { 
             tokens[token_count].type = matched_op_type;
             tokens[token_count].len = op_len;
             if (remaining_storage > op_len) {
-                strncpy(storage_ptr, p, op_len); // Copy the matched part of input string
+                strncpy(storage_ptr, p, op_len); 
                 storage_ptr[op_len] = '\0';
-                storage_ptr += (op_len + 1); // Advance storage pointer
+                storage_ptr += (op_len + 1); 
                 remaining_storage -= (op_len + 1);
-            } else { tokens[token_count].type = TOKEN_ERROR; /* Ran out of storage */ break; }
-            p += op_len; // Advance input pointer
-        } else if (*p == '"') { // Quoted string
+            } else { tokens[token_count].type = TOKEN_ERROR; break; }
+            p += op_len; 
+        } else if (*p == '"') { 
             tokens[token_count].type = TOKEN_STRING;
-            const char *start = p; // Keep quotes as part of token text for now
-            p++; // Skip opening quote
-            while (*p && (*p != '"' || (*(p-1) == '\\' && (p-2 < start || *(p-2) != '\\' )))) { // Handle escaped quotes like \"
+            const char *start = p; 
+            p++; 
+            while (*p && (*p != '"' || (*(p-1) == '\\' && (p-2 < start || *(p-2) != '\\' )))) { 
                 p++;
             }
-            if (*p == '"') p++; // Skip closing quote
+            if (*p == '"') p++; 
             tokens[token_count].len = p - start;
             if (remaining_storage > (size_t)tokens[token_count].len) {
                 strncpy(storage_ptr, start, tokens[token_count].len);
@@ -1022,22 +864,21 @@ int advanced_tokenize_line(const char *line, Token *tokens, int max_tokens, char
                 storage_ptr += (tokens[token_count].len + 1);
                 remaining_storage -= (tokens[token_count].len + 1);
             } else { tokens[token_count].type = TOKEN_ERROR; break; }
-        } else if (*p == '$') { // Variable
+        } else if (*p == '$') { 
             tokens[token_count].type = TOKEN_VARIABLE;
-            const char *start = p; p++; // Skip '$'
-            if (*p == '{') { // ${variable_name[index]}
-                p++; // Skip '{'
-                // Allow more complex expressions inside ${...}, expansion logic will parse it
-                while (*p && *p != '}') { p++; } // Simplified: just find matching '}'
-                if (*p == '}') p++; // Skip '}'
-            } else { // $variable_name or $arr[index]
+            const char *start = p; p++; 
+            if (*p == '{') { 
+                p++; 
+                while (*p && *p != '}') { p++; } 
+                if (*p == '}') p++; 
+            } else { 
                 while (isalnum((unsigned char)*p) || *p == '_') p++;
-                if (*p == '[') { // Array access $arr[index]
-                    p++; // Skip '['
+                if (*p == '[') { 
+                    p++; 
                     int bracket_depth = 1;
                     while(*p && bracket_depth > 0) {
                         if (*p == '[') bracket_depth++; else if (*p == ']') bracket_depth--;
-                        if (bracket_depth == 0 && *(p) == ']') { p++; break; } // Consume final ']' for token
+                        if (bracket_depth == 0 && *(p) == ']') { p++; break; } 
                         p++;
                     }
                 }
@@ -1049,20 +890,22 @@ int advanced_tokenize_line(const char *line, Token *tokens, int max_tokens, char
                 storage_ptr += (tokens[token_count].len + 1);
                 remaining_storage -= (tokens[token_count].len + 1);
             } else { tokens[token_count].type = TOKEN_ERROR; break; }
-        } else { // Word (command, argument, unquoted identifier)
+        } else { 
             tokens[token_count].type = TOKEN_WORD;
             const char *start = p;
             while (*p && !isspace((unsigned char)*p)) {
                 const char* temp_op_text_check = NULL; TokenType temp_op_type_check;
-                if (match_operator_dynamic(p, &temp_op_text_check, &temp_op_type_check) > 0) break; // Stop if an operator starts
-                if (*p == '"' || *p == '$' || *p == '#') break; // Stop if other special token starts
-                // As per spec: "A word can be composed only from alphanumeric values and _"
-                if (!isalnum((unsigned char)*p) && *p != '_') break; // Break on non-alnum/_
+                // Check if the current position matches a defined operator.
+                // This ensures that if "++" or "--" are encountered, they are tokenized separately
+                // rather than being absorbed into a word if they are not separated by space.
+                if (match_operator_dynamic(p, &temp_op_text_check, &temp_op_type_check) > 0) break; 
+                if (*p == '"' || *p == '$' || *p == '#') break; 
+                if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-') break; 
                 p++;
             }
             tokens[token_count].len = p - start;
-            if (tokens[token_count].len == 0 && *p) { /* Should not happen if *p was not whitespace or special */ p++; continue; }
-            if (tokens[token_count].len == 0 && !*p) break; // EOS
+            if (tokens[token_count].len == 0 && *p) { p++; continue; }
+            if (tokens[token_count].len == 0 && !*p) break; 
 
             if (remaining_storage > (size_t)tokens[token_count].len) {
                 strncpy(storage_ptr, start, tokens[token_count].len);
@@ -1073,32 +916,30 @@ int advanced_tokenize_line(const char *line, Token *tokens, int max_tokens, char
         }
         token_count++;
     }
-    if (token_count < max_tokens) { // Add EOF token if space
+    if (token_count < max_tokens) { 
         tokens[token_count].type = TOKEN_EOF;
-        tokens[token_count].text = "EOF"; // Not from token_storage
+        tokens[token_count].text = "EOF"; 
         tokens[token_count].len = 3;
-        // token_count++; // Optionally count EOF if it's processed by loops
     }
     return token_count;
 }
 
 // --- Variable & Scope Management ---
+// ... (rest of variable and scope management functions remain the same)
 int enter_scope() {
     if (scope_stack_top + 1 >= MAX_SCOPE_DEPTH) {
         fprintf(stderr, "Error: Maximum scope depth exceeded (%d).\n", MAX_SCOPE_DEPTH);
-        return -1; // Indicate error
+        return -1; 
     }
     scope_stack_top++;
     scope_stack[scope_stack_top].scope_id = (scope_stack_top == 0 && next_scope_id == 1) ? GLOBAL_SCOPE_ID : next_scope_id++;
-    // Ensure global scope is always ID 0, even if enter_scope is called multiple times at init.
     if (scope_stack_top == 0) scope_stack[scope_stack_top].scope_id = GLOBAL_SCOPE_ID;
 
     return scope_stack[scope_stack_top].scope_id;
 }
 
 void leave_scope(int scope_id_to_leave) {
-    if (scope_stack_top < 0 ) { // No scopes to leave
-        // fprintf(stderr, "Warning: leave_scope called when scope stack is empty.\n");
+    if (scope_stack_top < 0 ) { 
         return;
     }
     if (scope_stack[scope_stack_top].scope_id != scope_id_to_leave) {
@@ -1106,34 +947,31 @@ void leave_scope(int scope_id_to_leave) {
              fprintf(stderr, "Error: Scope mismatch on leave_scope. Trying to leave %d, current top is %d.\n",
                 scope_id_to_leave, scope_stack[scope_stack_top].scope_id );
         }
-        // Attempt to recover by just popping, but this indicates a logic flaw elsewhere.
         scope_stack_top--;
         return;
     }
-    if (scope_id_to_leave != GLOBAL_SCOPE_ID) { // Don't clean global vars on 'leave_scope(0)'
+    if (scope_id_to_leave != GLOBAL_SCOPE_ID) { 
         cleanup_variables_for_scope(scope_id_to_leave);
     }
     scope_stack_top--;
 }
 
 void cleanup_variables_for_scope(int scope_id) {
-    if (scope_id == GLOBAL_SCOPE_ID) return; // Global scope variables are not cleaned up this way
+    if (scope_id == GLOBAL_SCOPE_ID) return; 
 
     Variable *current = variable_list_head;
     Variable *prev = NULL;
     while (current != NULL) {
         if (current->scope_id == scope_id) {
             Variable *to_delete = current;
-            if (prev == NULL) { // Deleting head of the list
+            if (prev == NULL) { 
                 variable_list_head = current->next;
-            } else { // Deleting middle or tail element
+            } else { 
                 prev->next = current->next;
             }
-            current = current->next; // Move current before freeing to_delete
-            // printf("Cleaning var '%s' (value '%s') from scope %d\n", to_delete->name, to_delete->value, to_delete->scope_id);
+            current = current->next; 
             if (to_delete->value) free(to_delete->value);
             free(to_delete);
-            // If prev was not NULL, it remains the same. If prev was NULL, it's still NULL for the new head.
         } else {
             prev = current;
             current = current->next;
@@ -1159,18 +997,17 @@ char* get_variable_scoped(const char *name_raw) {
     trim_whitespace(clean_name);
     if (strlen(clean_name) == 0) return NULL;
 
-    // Search from current (innermost) scope outwards to global
     for (int i = scope_stack_top; i >= 0; i--) {
         int current_search_scope_id = scope_stack[i].scope_id;
         Variable *current_node = variable_list_head;
         while (current_node != NULL) {
             if (current_node->scope_id == current_search_scope_id && strcmp(current_node->name, clean_name) == 0) {
-                return current_node->value; // Found
+                return current_node->value; 
             }
             current_node = current_node->next;
         }
     }
-    return NULL; // Not found in any active scope
+    return NULL; 
 }
 
 void set_variable_scoped(const char *name_raw, const char *value_to_set, bool is_array_elem) {
@@ -1185,28 +1022,26 @@ void set_variable_scoped(const char *name_raw, const char *value_to_set, bool is
     trim_whitespace(clean_name);
     if (strlen(clean_name) == 0) { fprintf(stderr, "Error: Cannot set variable with empty name.\n"); return; }
 
-    // Try to update if variable already exists in the CURRENT scope
     Variable *current_node = variable_list_head;
     while (current_node != NULL) {
         if (current_node->scope_id == current_scope_id && strcmp(current_node->name, clean_name) == 0) {
-            if (current_node->value) free(current_node->value); // Free old value
+            if (current_node->value) free(current_node->value); 
             current_node->value = strdup(value_to_set);
-            if (!current_node->value) { perror("strdup failed for variable value update"); current_node->value = strdup(""); /* Fallback to empty */ }
+            if (!current_node->value) { perror("strdup failed for variable value update"); current_node->value = strdup("");  }
             current_node->is_array_element = is_array_elem;
             return;
         }
         current_node = current_node->next;
     }
 
-    // Not found in current scope, create new variable in current scope
     Variable *new_var = (Variable*)malloc(sizeof(Variable));
     if (!new_var) { perror("malloc for new variable failed"); return; }
     strncpy(new_var->name, clean_name, MAX_VAR_NAME_LEN - 1); new_var->name[MAX_VAR_NAME_LEN - 1] = '\0';
     new_var->value = strdup(value_to_set);
-    if (!new_var->value) { perror("strdup failed for new variable value"); free(new_var); new_var = NULL; /* Critical error */ return; }
+    if (!new_var->value) { perror("strdup failed for new variable value"); free(new_var); new_var = NULL;  return; }
     new_var->is_array_element = is_array_elem;
     new_var->scope_id = current_scope_id;
-    new_var->next = variable_list_head; // Prepend to global list
+    new_var->next = variable_list_head; 
     variable_list_head = new_var;
 }
 
@@ -1216,69 +1051,76 @@ void expand_variables_in_string_advanced(const char *input_str, char *expanded_s
 
     while (*p_in && remaining_size > 0) {
         if (*p_in == '$') {
-            p_in++; // Skip '$'
-            char var_name_buffer[MAX_VAR_NAME_LEN * 2]; // Buffer for var name or arr[idx] form
+            p_in++; 
+            char var_name_buffer[MAX_VAR_NAME_LEN * 2]; 
             char *pv = var_name_buffer;
 
-            if (*p_in == '{') { // ${...}
-                p_in++; // Skip '{'
+            if (*p_in == '{') { 
+                p_in++; 
                 int brace_level = 1;
                 while (*p_in && brace_level > 0 && (pv - var_name_buffer < (long)sizeof(var_name_buffer) - 1)) {
                     if (*p_in == '{') brace_level++;
                     else if (*p_in == '}') brace_level--;
-                    if (brace_level > 0) *pv++ = *p_in; // Copy content within braces
+                    if (brace_level > 0) *pv++ = *p_in; 
                     p_in++;
                 }
-                *pv = '\0'; // Null-terminate the extracted content
-                // p_in is now at char after '}' or at EOS
-            } else { // $var or $arr[idx] (no curly braces)
-                while (isalnum((unsigned char)*p_in) || *p_in == '_') { // Read base variable name
+                *pv = '\0'; 
+            } else { 
+                while (isalnum((unsigned char)*p_in) || *p_in == '_') { 
                     if (pv - var_name_buffer < MAX_VAR_NAME_LEN -1) *pv++ = *p_in++; else break;
                 }
-                // *pv = '\0'; // Tentatively terminate base name
-                if (*p_in == '[') { // Array access part
-                    // pv should be at the end of base name to append '['
-                    if (pv - var_name_buffer < (long)sizeof(var_name_buffer) -1) *pv++ = *p_in++; else break; // Add '['
+                if (*p_in == '[') { 
+                    if (pv - var_name_buffer < (long)sizeof(var_name_buffer) -1) *pv++ = *p_in++; else break; 
                     int bracket_level = 1;
                     while (*p_in && bracket_level > 0 && (pv - var_name_buffer < (long)sizeof(var_name_buffer) - 1)) {
                         if (*p_in == '[') bracket_level++;
                         else if (*p_in == ']') bracket_level--;
-                        *pv++ = *p_in++; // Copy index part including the final ']'
+                        *pv++ = *p_in++; 
                     }
                 }
-                *pv = '\0'; // Terminate full var_name_buffer (e.g. "var" or "arr[idx]")
+                *pv = '\0'; 
             }
 
-            // Parse var_name_buffer for base name and index if it's an array.
             char base_var_name[MAX_VAR_NAME_LEN];
-            char index_str_raw[MAX_VAR_NAME_LEN] = ""; // Index part, possibly quoted or another var
+            char index_str_raw[MAX_VAR_NAME_LEN] = ""; 
             bool is_array_access = false;
 
             char* bracket_ptr = strchr(var_name_buffer, '[');
             if (bracket_ptr) {
-                char* end_bracket_ptr = strrchr(bracket_ptr, ']'); // Find last ']'
+                char* end_bracket_ptr = strrchr(bracket_ptr, ']'); 
                 if (end_bracket_ptr && end_bracket_ptr > bracket_ptr) {
                     is_array_access = true;
                     size_t base_len = bracket_ptr - var_name_buffer;
                     strncpy(base_var_name, var_name_buffer, base_len); base_var_name[base_len] = '\0';
                     size_t index_len = end_bracket_ptr - (bracket_ptr + 1);
                     strncpy(index_str_raw, bracket_ptr + 1, index_len); index_str_raw[index_len] = '\0';
-                } else { // Malformed array syntax
+                } else { 
                     strncpy(base_var_name, var_name_buffer, MAX_VAR_NAME_LEN -1); base_var_name[MAX_VAR_NAME_LEN -1] = '\0';
                 }
-            } else { // Simple variable
+            } else { 
                 strncpy(base_var_name, var_name_buffer, MAX_VAR_NAME_LEN -1); base_var_name[MAX_VAR_NAME_LEN -1] = '\0';
             }
             
             char *value_to_insert = NULL;
-            if (is_array_access) { // Se la sintassi è $name[index]
-                value_to_insert = get_array_element_scoped(base_var_name, expanded_index_val); // Prova prima come array BSH
+            char expanded_index_val[INPUT_BUFFER_SIZE] = ""; 
+            if (is_array_access) {
+                if (index_str_raw[0] == '"' && index_str_raw[strlen(index_str_raw)-1] == '"') {
+                    char unescaped_idx[INPUT_BUFFER_SIZE];
+                    unescape_string(index_str_raw, unescaped_idx, sizeof(unescaped_idx));
+                    expand_variables_in_string_advanced(unescaped_idx, expanded_index_val, sizeof(expanded_index_val));
+                } else if (index_str_raw[0] == '$') {
+                    expand_variables_in_string_advanced(index_str_raw, expanded_index_val, sizeof(expanded_index_val));
+                } else { 
+                    strncpy(expanded_index_val, index_str_raw, sizeof(expanded_index_val)-1);
+                    expanded_index_val[sizeof(expanded_index_val)-1] = '\0';
+                }
 
-                if (!value_to_insert) { // Non trovato come array BSH, prova come accesso a carattere di stringa
+                value_to_insert = get_array_element_scoped(base_var_name, expanded_index_val); 
+
+                if (!value_to_insert) { 
                     char* simple_var_val = get_variable_scoped(base_var_name);
-                    if (simple_var_val) { // Trovata una variabile semplice con quel nome base
-                        // Esegui l'accesso al carattere
-                        char temp_char_buffer[2]; // Buffer per 1 carattere + null terminator
+                    if (simple_var_val) { 
+                        char temp_char_buffer[2]; 
                         long index_num = -1;
                         char *endptr;
                         errno = 0;
@@ -1287,18 +1129,14 @@ void expand_variables_in_string_advanced(const char *input_str, char *expanded_s
                         if (errno == 0 && *expanded_index_val != '\0' && *endptr == '\0' && index_num >= 0 && (size_t)index_num < strlen(simple_var_val)) {
                             temp_char_buffer[0] = simple_var_val[index_num];
                             temp_char_buffer[1] = '\0';
-                            value_to_insert = temp_char_buffer; // value_to_insert ora punta a temp_char_buffer
-                                                                // La stringa verrà copiata nel buffer di output p_out
+                            value_to_insert = temp_char_buffer; 
                         } else {
-                            // Index non valido, fuori range, o non numerico: espande a stringa vuota
                             temp_char_buffer[0] = '\0';
                             value_to_insert = temp_char_buffer;
                         }
                     }
-                    // Se simple_var_val non esiste, value_to_insert rimane NULL (o stringa vuota se preferito)
-                    // e si espanderà a stringa vuota come per variabili non definite.
                 }
-            } else { // Variabile semplice (es. $varname)
+            } else { 
                 value_to_insert = get_variable_scoped(base_var_name);
             }
 
@@ -1315,32 +1153,19 @@ void expand_variables_in_string_advanced(const char *input_str, char *expanded_s
                 }
             }
 
-        } else if (*p_in == '\\' && *(p_in+1) == '$') { // Escaped dollar sign \$
-            p_in++; // Skip '\'
-            if (remaining_size > 0) { *p_out++ = *p_in++; remaining_size--; } // Copy '$'
-        } else { // Regular character
+        } else if (*p_in == '\\' && *(p_in+1) == '$') { 
+            p_in++; 
+            if (remaining_size > 0) { *p_out++ = *p_in++; remaining_size--; } 
+        } else { 
             *p_out++ = *p_in++; remaining_size--;
         }
     }
-    *p_out = '\0'; // Null-terminate the expanded string
+    *p_out = '\0'; 
 }
 
 char* get_array_element_scoped(const char* array_base_name, const char* index_str_raw_param) {
-    char index_str_raw[INPUT_BUFFER_SIZE]; // Local copy for modification if needed
-    strncpy(index_str_raw, index_str_raw_param, sizeof(index_str_raw) -1);
-    index_str_raw[sizeof(index_str_raw)-1] = '\0';
-
-    char expanded_index_val[INPUT_BUFFER_SIZE];
-    if (index_str_raw[0] == '"' && index_str_raw[strlen(index_str_raw)-1] == '"') {
-        unescape_string(index_str_raw, expanded_index_val, sizeof(expanded_index_val));
-    } else if (index_str_raw[0] == '$') {
-        expand_variables_in_string_advanced(index_str_raw, expanded_index_val, sizeof(expanded_index_val));
-    } else { // Unquoted literal key
-        strncpy(expanded_index_val, index_str_raw, sizeof(expanded_index_val)-1);
-        expanded_index_val[sizeof(expanded_index_val)-1] = '\0';
-    }
-    char mangled_name[MAX_VAR_NAME_LEN * 2]; // Base + _ARRAYIDX_ + index
-    snprintf(mangled_name, sizeof(mangled_name), "%s_ARRAYIDX_%s", array_base_name, expanded_index_val);
+    char mangled_name[MAX_VAR_NAME_LEN * 2]; 
+    snprintf(mangled_name, sizeof(mangled_name), "%s_ARRAYIDX_%s", array_base_name, index_str_raw_param);
     return get_variable_scoped(mangled_name);
 }
 
@@ -1351,22 +1176,25 @@ void set_array_element_scoped(const char* array_base_name, const char* index_str
 
     char expanded_index_val[INPUT_BUFFER_SIZE];
     if (index_str_raw[0] == '"' && index_str_raw[strlen(index_str_raw)-1] == '"') {
-        unescape_string(index_str_raw, expanded_index_val, sizeof(expanded_index_val));
+        char unescaped_idx[INPUT_BUFFER_SIZE];
+        unescape_string(index_str_raw, unescaped_idx, sizeof(unescaped_idx));
+        expand_variables_in_string_advanced(unescaped_idx, expanded_index_val, sizeof(expanded_index_val));
     } else if (index_str_raw[0] == '$') {
         expand_variables_in_string_advanced(index_str_raw, expanded_index_val, sizeof(expanded_index_val));
-    } else {
+    } else { 
         strncpy(expanded_index_val, index_str_raw, sizeof(expanded_index_val)-1);
         expanded_index_val[sizeof(expanded_index_val)-1] = '\0';
     }
     char mangled_name[MAX_VAR_NAME_LEN * 2];
     snprintf(mangled_name, sizeof(mangled_name), "%s_ARRAYIDX_%s", array_base_name, expanded_index_val);
-    set_variable_scoped(mangled_name, value, true); // true: is_array_element
+    set_variable_scoped(mangled_name, value, true); 
 }
 
 
 // --- Command Execution ---
+// ... (find_command_in_path_dynamic, find_module_in_path, execute_external_command, execute_user_function remain the same)
 bool find_command_in_path_dynamic(const char *command, char *full_path) {
-    if (strchr(command, '/') != NULL) { // Command contains a path
+    if (strchr(command, '/') != NULL) { 
         if (access(command, X_OK) == 0) {
             strncpy(full_path, command, MAX_FULL_PATH_LEN -1); full_path[MAX_FULL_PATH_LEN-1] = '\0';
             return true;
@@ -1388,33 +1216,30 @@ bool find_module_in_path(const char* module_spec, char* result_full_path) {
     module_path_part[sizeof(module_path_part) - 1] = '\0';
 
     char *dot = strrchr(module_path_part, '.');
-    if (dot && strchr(module_path_part, '/') == NULL) { // Contains '.' but no '/', assume library.part
-        *dot = '/'; // Replace last dot with slash
+    if (dot && strchr(module_path_part, '/') == NULL) { 
+        *dot = '/'; 
         strncat(module_path_part, ".bsh", sizeof(module_path_part) - strlen(module_path_part) - 1);
     } else if (strchr(module_path_part, '/') == NULL && (strstr(module_path_part, ".bsh") == NULL) ) {
         strncat(module_path_part, ".bsh", sizeof(module_path_part) - strlen(module_path_part) - 1);
     }
 
-    // 1. Try as direct path (absolute or relative to CWD)
     char temp_path[PATH_MAX];
     if (realpath(module_path_part, temp_path) && access(temp_path, F_OK) == 0) {
         strncpy(result_full_path, temp_path, MAX_FULL_PATH_LEN -1);
         result_full_path[MAX_FULL_PATH_LEN-1] = '\0';
         return true;
     }
-     // If realpath fails (e.g. file doesn't exist yet for relative path), try access on original
     if (access(module_path_part, F_OK) == 0) {
-         strncpy(result_full_path, module_path_part, MAX_FULL_PATH_LEN -1); // Use as is if accessible
+         strncpy(result_full_path, module_path_part, MAX_FULL_PATH_LEN -1); 
          result_full_path[MAX_FULL_PATH_LEN-1] = '\0';
          return true;
     }
 
 
-    if (strchr(module_spec, '/') != NULL) { // If original spec contained a path, don't search module_path
+    if (strchr(module_spec, '/') != NULL) { 
         return false;
     }
 
-    // 2. Search in BSH_MODULE_PATH
     PathDirNode *current_module_dir = module_path_list_head;
     while (current_module_dir) {
         snprintf(result_full_path, MAX_FULL_PATH_LEN, "%s/%s", current_module_dir->path, module_path_part);
@@ -1422,12 +1247,12 @@ bool find_module_in_path(const char* module_spec, char* result_full_path) {
              strncpy(result_full_path, temp_path, MAX_FULL_PATH_LEN -1);
              result_full_path[MAX_FULL_PATH_LEN-1] = '\0';
             return true;
-        } else if (access(result_full_path, F_OK) == 0) { // Fallback if realpath fails but access works
+        } else if (access(result_full_path, F_OK) == 0) { 
             return true;
         }
         current_module_dir = current_module_dir->next;
     }
-    result_full_path[0] = '\0'; // Clear path if not found
+    result_full_path[0] = '\0'; 
     return false;
 }
 
@@ -1435,13 +1260,13 @@ int execute_external_command(char *command_path, char **args, int arg_count, cha
     pid_t pid; int status; int pipefd[2] = {-1, -1};
     if (output_buffer) { if (pipe(pipefd) == -1) { perror("pipe failed for cmd output"); return -1; } }
     pid = fork();
-    if (pid == 0) { // Child
+    if (pid == 0) { 
         if (output_buffer) { close(pipefd[0]); dup2(pipefd[1], STDOUT_FILENO); dup2(pipefd[1], STDERR_FILENO); close(pipefd[1]); }
         execv(command_path, args);
         perror("execv failed"); exit(EXIT_FAILURE);
-    } else if (pid < 0) { // Fork error
+    } else if (pid < 0) { 
         perror("fork failed"); if (output_buffer) { close(pipefd[0]); close(pipefd[1]); } return -1;
-    } else { // Parent
+    } else { 
         if (output_buffer) {
             close(pipefd[1]); ssize_t bytes_read; size_t total_bytes_read = 0;
             char read_buf[INPUT_BUFFER_SIZE]; output_buffer[0] = '\0';
@@ -1450,28 +1275,25 @@ int execute_external_command(char *command_path, char **args, int arg_count, cha
                     read_buf[bytes_read] = '\0'; strcat(output_buffer, read_buf); total_bytes_read += bytes_read;
                 } else { strncat(output_buffer, read_buf, output_buffer_size - total_bytes_read -1); break; }
             } close(pipefd[0]);
-            // Trim trailing newlines
             char* nl = strrchr(output_buffer, '\n');
             while(nl && (nl == output_buffer + strlen(output_buffer) -1)) { *nl = '\0'; nl = strrchr(output_buffer, '\n');}
         }
         do { waitpid(pid, &status, WUNTRACED); } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-        // Set $? (LAST_COMMAND_STATUS)
         char status_str[12]; snprintf(status_str, sizeof(status_str), "%d", WEXITSTATUS(status));
         set_variable_scoped("LAST_COMMAND_STATUS", status_str, false);
         return WEXITSTATUS(status);
     }
-    return -1; // Should not be reached
+    return -1; 
 }
 
 void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context) {
     if (!func) return;
     int function_scope_id = enter_scope();
-    if (function_scope_id == -1) { /* Max scope depth reached */ return; }
+    if (function_scope_id == -1) { return; }
 
-    // Set parameters in the new function scope
     for (int i = 0; i < func->param_count; ++i) {
         if (i < call_arg_token_count) {
-            char expanded_arg_val[INPUT_BUFFER_SIZE]; // Use larger buffer for expansion
+            char expanded_arg_val[INPUT_BUFFER_SIZE]; 
             if (call_arg_tokens[i].type == TOKEN_STRING) {
                  char unescaped_temp[INPUT_BUFFER_SIZE];
                  unescape_string(call_arg_tokens[i].text, unescaped_temp, sizeof(unescaped_temp));
@@ -1481,79 +1303,50 @@ void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_
             }
             set_variable_scoped(func->params[i], expanded_arg_val, false);
         } else {
-            set_variable_scoped(func->params[i], "", false); // Unprovided params are empty strings
+            set_variable_scoped(func->params[i], "", false); 
         }
     }
 
     int func_outer_block_stack_top_bf = block_stack_top_bf;
     ExecutionState func_outer_exec_state = current_exec_state;
-    current_exec_state = STATE_NORMAL; // Functions start in normal state internally
+    current_exec_state = STATE_NORMAL; 
 
     for (int i = 0; i < func->line_count; ++i) {
-        char line_copy[MAX_LINE_LENGTH]; // Function body lines are original lines
+        char line_copy[MAX_LINE_LENGTH]; 
         strncpy(line_copy, func->body[i], MAX_LINE_LENGTH-1); line_copy[MAX_LINE_LENGTH-1] = '\0';
-        process_line(line_copy, NULL, i + 1, STATE_NORMAL); // Pass NULL input_source for in-memory lines
+        process_line(line_copy, NULL, i + 1, STATE_NORMAL); 
     }
 
-    // Restore block execution context from within the function
     while(block_stack_top_bf > func_outer_block_stack_top_bf) {
         pop_block_bf();
     }
     current_exec_state = func_outer_exec_state;
 
-    leave_scope(function_scope_id); // Clean up function's local variables
+    leave_scope(function_scope_id); 
 }
 
-// --- Built-in Commands ---
-
-void handle_update_cwd_statement(Token *tokens, int num_tokens) {
-    if (current_exec_state == STATE_BLOCK_SKIP) return;
-
-    if (num_tokens != 1) {
-        fprintf(stderr, "Syntax: update_cwd (takes no arguments)\n");
-        return;
-    }
-
-    char cwd_buffer[PATH_MAX];
-    if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL) {
-        set_variable_scoped("CWD", cwd_buffer, false);
-        // Optionally, you might want to echo the new CWD or store it in LAST_LIB_CALL_OUTPUT
-        // for consistency if other commands do so, but for a simple update, setting the var is enough.
-        // For example: set_variable_scoped("LAST_OPERATION_RESULT", cwd_buffer, false);
-    } else {
-        perror("bsh: update_cwd: getcwd() error");
-        set_variable_scoped("CWD", "", false); // Set to empty on error
-        // set_variable_scoped("LAST_OPERATION_RESULT", "ERROR_UPDATING_CWD", false);
-    }
-}
-
+// --- Built-in Commands & Operation Handlers ---
 void handle_defkeyword_statement(Token *tokens, int num_tokens) {
     if (num_tokens != 3 || tokens[1].type != TOKEN_WORD || tokens[2].type != TOKEN_WORD) {
         fprintf(stderr, "Syntax: defkeyword <original_keyword> <new_alias>\n"); return;
     }
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     add_keyword_alias(tokens[1].text, tokens[2].text);
-    // printf("Keyword alias defined: '%s' -> '%s'\n", tokens[2].text, tokens[1].text);
 }
 
-
-// Helper to check if an operator is a comparison operator (already handled elsewhere)
 bool is_comparison_or_assignment_operator(const char* op_str) {
     if (strcmp(op_str, "==") == 0 || strcmp(op_str, "!=") == 0 ||
         strcmp(op_str, ">") == 0  || strcmp(op_str, "<") == 0 ||
         strcmp(op_str, ">=") == 0 || strcmp(op_str, "<=") == 0 ||
-        strcmp(op_str, "=") == 0) { // '=' is assignment
+        strcmp(op_str, "=") == 0) { 
         return true;
     }
     return false;
 }
 
-// Function to invoke a BSH user function (like __dynamic_op_handler) from C
-// with string arguments. The result from the BSH function (which it places
-// in the variable named by 'bsh_result_var_name') is copied into 'c_result_buffer'.
-// Returns true on success, false on failure.
+// For binary dynamic ops like $var = $op1 + $op2
 bool invoke_bsh_function_for_op(const char* func_name_to_call,
-                                const char* arg1_val, const char* arg2_val, const char* arg3_op, /* op is 3rd for __dyn_op */
+                                const char* arg1_val, const char* arg2_val, const char* arg3_op, 
                                 const char* bsh_result_var_name,
                                 char* c_result_buffer, size_t c_result_buffer_size) {
     UserFunction* func = function_list;
@@ -1563,61 +1356,117 @@ bool invoke_bsh_function_for_op(const char* func_name_to_call,
     }
     if (!func) {
         fprintf(stderr, "Error: BSH internal handler function '%s' not found.\n", func_name_to_call);
+        snprintf(c_result_buffer, c_result_buffer_size, "NO_HANDLER_ERROR");
         return false;
     }
 
-    // Max 4 args for __dynamic_op_handler: operand1, operator, operand2, result_var_name
-    if (func->param_count != 4) {
-         fprintf(stderr, "Error: BSH function '%s' has incorrect param count (expected 4, got %d).\n", func_name_to_call, func->param_count);
+    if (func->param_count != 4) { // Expects (op1_val_str, op_str, op2_val_str, result_holder_var_name)
+                                  // or (op1_val_str, op2_val_str, op_str, result_holder_var_name)
+                                  // The BSH script defines the order. The C call here assumes op1, op2, op_str for args.
+         fprintf(stderr, "Error: BSH function '%s' has incorrect param count (expected 4, got %d) for binary op.\n", func_name_to_call, func->param_count);
+         snprintf(c_result_buffer, c_result_buffer_size, "UNKNOWN_HANDLER_ERROR");
         return false;
     }
 
-    Token call_tokens[4]; // We will pass 4 arguments to __dynamic_op_handler
+    Token call_tokens[4]; 
     char token_storage_arg1[INPUT_BUFFER_SIZE];
     char token_storage_arg2[INPUT_BUFFER_SIZE];
     char token_storage_arg3_op[MAX_OPERATOR_LEN + 1];
     char token_storage_arg4_res_var[MAX_VAR_NAME_LEN];
 
-    // Arg 1: operand1_val
+    // Argument 1 to BSH function (operand1 value)
     strncpy(token_storage_arg1, arg1_val, INPUT_BUFFER_SIZE -1); token_storage_arg1[INPUT_BUFFER_SIZE-1] = '\0';
-    call_tokens[0].type = TOKEN_STRING; // Pass as string literal to BSH function
+    call_tokens[0].type = TOKEN_STRING; 
     call_tokens[0].text = token_storage_arg1;
     call_tokens[0].len = strlen(token_storage_arg1);
 
-    // Arg 2: op_str
-    strncpy(token_storage_arg3_op, arg3_op, MAX_OPERATOR_LEN); token_storage_arg3_op[MAX_OPERATOR_LEN] = '\0';
-    call_tokens[1].type = TOKEN_STRING;
-    call_tokens[1].text = token_storage_arg3_op;
-    call_tokens[1].len = strlen(token_storage_arg3_op);
-
-    // Arg 3: operand2_val
+    // Argument 2 to BSH function (operand2 value)
     strncpy(token_storage_arg2, arg2_val, INPUT_BUFFER_SIZE -1); token_storage_arg2[INPUT_BUFFER_SIZE-1] = '\0';
-    call_tokens[2].type = TOKEN_STRING;
-    call_tokens[2].text = token_storage_arg2;
-    call_tokens[2].len = strlen(token_storage_arg2);
+    call_tokens[1].type = TOKEN_STRING;
+    call_tokens[1].text = token_storage_arg2;
+    call_tokens[1].len = strlen(token_storage_arg2);
+    
+    // Argument 3 to BSH function (operator string)
+    strncpy(token_storage_arg3_op, arg3_op, MAX_OPERATOR_LEN); token_storage_arg3_op[MAX_OPERATOR_LEN] = '\0';
+    call_tokens[2].type = TOKEN_STRING; 
+    call_tokens[2].text = token_storage_arg3_op;
+    call_tokens[2].len = strlen(token_storage_arg3_op);
 
-    // Arg 4: bsh_result_var_name (where the BSH function will store its output)
+    // Argument 4 to BSH function (result holder variable name)
     strncpy(token_storage_arg4_res_var, bsh_result_var_name, MAX_VAR_NAME_LEN -1); token_storage_arg4_res_var[MAX_VAR_NAME_LEN-1] = '\0';
-    call_tokens[3].type = TOKEN_WORD; // Pass as a variable name
+    call_tokens[3].type = TOKEN_WORD; 
     call_tokens[3].text = token_storage_arg4_res_var;
     call_tokens[3].len = strlen(token_storage_arg4_res_var);
 
-    // Temporarily suppress output from the function call if desired
-    // This is complex; for now, assume echo within __dynamic_op_handler is for debugging.
-    execute_user_function(func, call_tokens, 4, NULL); // NULL for input_source_for_context
+    execute_user_function(func, call_tokens, 4, NULL); 
 
-    // Retrieve the result from the BSH variable
     char* result_from_bsh = get_variable_scoped(bsh_result_var_name);
     if (result_from_bsh) {
         strncpy(c_result_buffer, result_from_bsh, c_result_buffer_size - 1);
         c_result_buffer[c_result_buffer_size - 1] = '\0';
     } else {
-        // If result var is not set, it could be an error or intended (e.g. empty string)
         snprintf(c_result_buffer, c_result_buffer_size, "OP_HANDLER_NO_RESULT_VAR<%s>", bsh_result_var_name);
-        return false; // Indicate potential issue
+        return false; 
     }
     return true;
 }
+
+// For unary ops like $var++ or ++$var
+bool invoke_bsh_unary_op_call(const char* func_name_to_call,
+                                const char* bsh_arg1_var_name_str,      // Name of the variable to be modified (e.g., "myvar")
+                                const char* bsh_arg2_result_holder_var_name, // Name of BSH var to store result (e.g., "__TEMP_UNARY_OP_RES")
+                                char* c_result_buffer, size_t c_result_buffer_size) {
+    UserFunction* func = function_list;
+    while (func) {
+        if (strcmp(func->name, func_name_to_call) == 0) break;
+        func = func->next;
+    }
+    if (!func) {
+        fprintf(stderr, "Error: BSH internal unary handler function '%s' not found.\n", func_name_to_call);
+        snprintf(c_result_buffer, c_result_buffer_size, "NO_UNARY_HANDLER_ERROR");
+        return false;
+    }
+
+    if (func->param_count != 2) { // BSH function expects (var_name_string, result_holder_name_string)
+        fprintf(stderr, "Error: BSH unary handler '%s' has incorrect param count (expected 2, got %d).\n", func_name_to_call, func->param_count);
+        snprintf(c_result_buffer, c_result_buffer_size, "UNARY_HANDLER_PARAM_ERROR");
+        return false;
+    }
+
+    Token call_tokens[2];
+    char token_storage_arg1_var_name[MAX_VAR_NAME_LEN]; 
+    char token_storage_arg2_res_holder_name[MAX_VAR_NAME_LEN];
+
+    // Argument 1 to BSH function: the name of the variable to modify, passed as a string literal
+    strncpy(token_storage_arg1_var_name, bsh_arg1_var_name_str, MAX_VAR_NAME_LEN -1); 
+    token_storage_arg1_var_name[MAX_VAR_NAME_LEN-1] = '\0';
+    call_tokens[0].type = TOKEN_STRING; 
+    call_tokens[0].text = token_storage_arg1_var_name;
+    call_tokens[0].len = strlen(token_storage_arg1_var_name);
+
+    // Argument 2 to BSH function: the name of the variable where BSH func will store the "result of the expression"
+    strncpy(token_storage_arg2_res_holder_name, bsh_arg2_result_holder_var_name, MAX_VAR_NAME_LEN -1);
+    token_storage_arg2_res_holder_name[MAX_VAR_NAME_LEN-1] = '\0';
+    call_tokens[1].type = TOKEN_WORD; // Pass this as a variable name (not its value)
+    call_tokens[1].text = token_storage_arg2_res_holder_name;
+    call_tokens[1].len = strlen(token_storage_arg2_res_holder_name);
+
+    execute_user_function(func, call_tokens, 2, NULL);
+
+    // Retrieve the result from the BSH result holder variable
+    char* result_from_bsh = get_variable_scoped(bsh_arg2_result_holder_var_name);
+    if (result_from_bsh) {
+        strncpy(c_result_buffer, result_from_bsh, c_result_buffer_size - 1);
+        c_result_buffer[c_result_buffer_size - 1] = '\0';
+    } else {
+        // This indicates the BSH handler didn't set the result variable.
+        snprintf(c_result_buffer, c_result_buffer_size, "UNARY_OP_NO_RESULT_VAR<%s>", bsh_arg2_result_holder_var_name);
+        // For inc/dec, we expect a result, so this is likely an issue in the BSH script.
+        return false; 
+    }
+    return true;
+}
+
 
 void handle_assignment_advanced(Token *tokens, int num_tokens) {
     if (num_tokens < 3 || tokens[0].type != TOKEN_VARIABLE || tokens[1].type != TOKEN_ASSIGN) {
@@ -1625,8 +1474,8 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
     }
     if (current_exec_state == STATE_BLOCK_SKIP) return;
 
-    char var_token_text_copy[MAX_VAR_NAME_LEN * 2]; // For parsing $arr[idx] from token text
-    strncpy(var_token_text_copy, tokens[0].text + 1, sizeof(var_token_text_copy) -1); // Skip '$'
+    char var_token_text_copy[MAX_VAR_NAME_LEN * 2]; 
+    strncpy(var_token_text_copy, tokens[0].text + 1, sizeof(var_token_text_copy) -1); 
     var_token_text_copy[sizeof(var_token_text_copy)-1] = '\0';
 
     char base_var_name[MAX_VAR_NAME_LEN]; char index_str_raw[MAX_VAR_NAME_LEN] = ""; bool is_array_assignment = false;
@@ -1642,25 +1491,37 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
         } else { fprintf(stderr, "Malformed array assignment: %s\n", tokens[0].text); return; }
     } else { strncpy(base_var_name, var_token_text_copy, MAX_VAR_NAME_LEN - 1); base_var_name[MAX_VAR_NAME_LEN - 1] = '\0'; }
 
-    char value_to_set[INPUT_BUFFER_SIZE]; value_to_set[0] = '\0'; // Use larger buffer
+    char value_to_set[INPUT_BUFFER_SIZE]; value_to_set[0] = '\0'; 
     bool is_rhs_command = false;
+
     if (num_tokens > 2 && tokens[2].type == TOKEN_WORD) {
         char expanded_first_rhs_token[INPUT_BUFFER_SIZE];
         expand_variables_in_string_advanced(tokens[2].text, expanded_first_rhs_token, sizeof(expanded_first_rhs_token));
-        UserFunction* func = function_list; while(func) { if (strcmp(expanded_first_rhs_token, func->name) == 0) { is_rhs_command = true; break; } func = func->next; }
-        if (!is_rhs_command) { char full_cmd_path_check[MAX_FULL_PATH_LEN]; if (find_command_in_path_dynamic(expanded_first_rhs_token, full_cmd_path_check)) is_rhs_command = true; }
+        
+        UserFunction* func = function_list; 
+        while(func) { 
+            if (strcmp(expanded_first_rhs_token, func->name) == 0) { 
+                is_rhs_command = true; 
+                break; 
+            } 
+            func = func->next; 
+        }
+        if (!is_rhs_command) { 
+            char full_cmd_path_check[MAX_FULL_PATH_LEN]; 
+            if (find_command_in_path_dynamic(expanded_first_rhs_token, full_cmd_path_check)) {
+                is_rhs_command = true; 
+            }
+        }
     }
 
-    // Check if RHS is a potential dynamic binary operation: val1 op val2
-    // E.g. $var = $operand1 + $operand2
-    // Tokens: $var, =, $operand1, +, $operand2. num_tokens here would be 5.
-    // tokens[0] is var, tokens[1] is =, tokens[2] is op1, tokens[3] is op, tokens[4] is op2.
-    if (num_tokens == 5 && // Simplest case: var = op1 op op2 (no further tokens)
-        (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING) &&
+
+    if (num_tokens >= 5 && 
+        (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING || tokens[2].type == TOKEN_WORD) &&
         tokens[3].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[3].text) &&
-        (tokens[4].type == TOKEN_VARIABLE || tokens[4].type == TOKEN_NUMBER || tokens[4].type == TOKEN_STRING)
+        (tokens[4].type == TOKEN_VARIABLE || tokens[4].type == TOKEN_NUMBER || tokens[4].type == TOKEN_STRING || tokens[4].type == TOKEN_WORD) &&
+        (num_tokens == 5 || (num_tokens == 6 && tokens[5].type == TOKEN_COMMENT)) 
         ) {
-        if (current_exec_state == STATE_BLOCK_SKIP) return; // Still respect skipping
+        if (current_exec_state == STATE_BLOCK_SKIP) return; 
 
         char op1_expanded[INPUT_BUFFER_SIZE];
         char op2_expanded[INPUT_BUFFER_SIZE];
@@ -1668,7 +1529,6 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
         const char* operator_str = tokens[3].text;
         const char* temp_bsh_result_var = "__TEMP_ASSIGN_OP_RES";
 
-        // Expand operand1 (tokens[2])
         if (tokens[2].type == TOKEN_STRING) {
             char unescaped[INPUT_BUFFER_SIZE];
             unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
@@ -1677,7 +1537,6 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
             expand_variables_in_string_advanced(tokens[2].text, op1_expanded, sizeof(op1_expanded));
         }
 
-        // Expand operand2 (tokens[4])
         if (tokens[4].type == TOKEN_STRING) {
             char unescaped[INPUT_BUFFER_SIZE];
             unescape_string(tokens[4].text, unescaped, sizeof(unescaped));
@@ -1686,57 +1545,106 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
             expand_variables_in_string_advanced(tokens[4].text, op2_expanded, sizeof(op2_expanded));
         }
 
-        // Call the BSH dynamic operator handler
+        // Note: invoke_bsh_function_for_op expects BSH func like: (op1, op2, op_str, result_var_name)
+        // Ensure your __dynamic_op_handler matches this or adjust the C call.
         if (invoke_bsh_function_for_op("__dynamic_op_handler",
-                                    op1_expanded, op2_expanded, operator_str, /* op is 3rd for func */
+                                    op1_expanded, op2_expanded, operator_str, 
                                     temp_bsh_result_var,
                                     temp_result_val_c, sizeof(temp_result_val_c))) {
-            // Successfully got result from BSH handler
             if (is_array_assignment) {
                 set_array_element_scoped(base_var_name, index_str_raw, temp_result_val_c);
             } else {
                 set_variable_scoped(base_var_name, temp_result_val_c, false);
             }
-            return; // Assignment handled
+            return; 
         } else {
             fprintf(stderr, "Error executing dynamic operation for assignment RHS.\n");
-            // Fall through to old logic (command execution) or set error for var?
-            // For safety, let's make it an error and not fall through to command execution for "op1 op op2".
             if (is_array_assignment) set_array_element_scoped(base_var_name, index_str_raw, "ASSIGN_OP_ERROR");
             else set_variable_scoped(base_var_name, "ASSIGN_OP_ERROR", false);
             return;
         }
     }
 
-    if (is_rhs_command) {
-        char *cmd_args[MAX_ARGS + 1]; char expanded_cmd_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE]; int cmd_arg_count = 0;
+    if (is_rhs_command) { 
+        char *cmd_args[MAX_ARGS + 1]; 
+        char expanded_cmd_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE]; 
+        int cmd_arg_count = 0;
+
         for (int i = 2; i < num_tokens; i++) {
-            if (tokens[i].type == TOKEN_WORD || tokens[i].type == TOKEN_STRING || tokens[i].type == TOKEN_VARIABLE) {
-                if (tokens[i].type == TOKEN_STRING) { char unescaped_val[INPUT_BUFFER_SIZE]; unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val)); expand_variables_in_string_advanced(unescaped_val, expanded_cmd_args_storage[cmd_arg_count], INPUT_BUFFER_SIZE);
-                } else { expand_variables_in_string_advanced(tokens[i].text, expanded_cmd_args_storage[cmd_arg_count], INPUT_BUFFER_SIZE); }
-                cmd_args[cmd_arg_count] = expanded_cmd_args_storage[cmd_arg_count]; cmd_arg_count++;
+            if (tokens[i].type == TOKEN_COMMENT) break; 
+
+            if (cmd_arg_count < MAX_ARGS) {
+                 if (tokens[i].type == TOKEN_STRING) { 
+                    char unescaped_val[INPUT_BUFFER_SIZE]; 
+                    unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val)); 
+                    expand_variables_in_string_advanced(unescaped_val, expanded_cmd_args_storage[cmd_arg_count], INPUT_BUFFER_SIZE);
+                } else { 
+                    expand_variables_in_string_advanced(tokens[i].text, expanded_cmd_args_storage[cmd_arg_count], INPUT_BUFFER_SIZE); 
+                }
+                cmd_args[cmd_arg_count] = expanded_cmd_args_storage[cmd_arg_count]; 
+                cmd_arg_count++;
+            } else {
+                fprintf(stderr, "Warning: Too many arguments for RHS command in assignment. Max %d allowed.\n", MAX_ARGS);
+                break;
             }
-        } cmd_args[cmd_arg_count] = NULL;
+        } 
+        cmd_args[cmd_arg_count] = NULL; 
+
         if (cmd_arg_count > 0) {
-            bool is_user_func_rhs = false; UserFunction* user_func_check = function_list; while(user_func_check){ if(strcmp(cmd_args[0], user_func_check->name) == 0) {is_user_func_rhs = true; break;} user_func_check = user_func_check->next; }
-            if(is_user_func_rhs){ fprintf(stderr, "Assigning output of user-defined functions not directly supported for capture. Execute separately.\n"); }
-            else { char full_cmd_path_check[MAX_FULL_PATH_LEN]; if (find_command_in_path_dynamic(cmd_args[0], full_cmd_path_check)) { execute_external_command(full_cmd_path_check, cmd_args, cmd_arg_count, value_to_set, sizeof(value_to_set)); }
-                   else { fprintf(stderr, "Command for assignment not found: %s\n", cmd_args[0]); }
+            bool is_user_func_rhs_final_check = false; 
+            UserFunction* user_func_check = function_list; 
+            while(user_func_check){ 
+                if(strcmp(cmd_args[0], user_func_check->name) == 0) {
+                    is_user_func_rhs_final_check = true; 
+                    break;
+                } 
+                user_func_check = user_func_check->next; 
+            }
+
+            if(is_user_func_rhs_final_check){ 
+                fprintf(stderr, "Assigning output of user-defined functions to variables is not directly supported for capture. Execute separately and use a result variable set by the function.\n"); 
+                strncpy(value_to_set, "USER_FUNC_ASSIGN_UNSUPPORTED", sizeof(value_to_set) -1);
+            } else { 
+                char full_cmd_path_for_exec[MAX_FULL_PATH_LEN]; 
+                if (find_command_in_path_dynamic(cmd_args[0], full_cmd_path_for_exec)) { 
+                    execute_external_command(full_cmd_path_for_exec, cmd_args, cmd_arg_count, value_to_set, sizeof(value_to_set)); 
+                } else { 
+                    fprintf(stderr, "Command for assignment not found: %s\n", cmd_args[0]); 
+                    strncpy(value_to_set, "CMD_NOT_FOUND_ERROR", sizeof(value_to_set)-1);
+                }
+            }
+        } else { 
+             fprintf(stderr, "Internal error: RHS marked as command but no command arguments found.\n");
+             strncpy(value_to_set, "INTERNAL_ASSIGN_CMD_ERROR", sizeof(value_to_set)-1);
+        }
+    } else { 
+        char combined_value[INPUT_BUFFER_SIZE] = ""; size_t current_len = 0;
+        for (int i = 2; i < num_tokens; i++) { 
+            if (tokens[i].type == TOKEN_COMMENT) break; 
+
+            char expanded_token_val[INPUT_BUFFER_SIZE];
+            if (tokens[i].type == TOKEN_STRING) { 
+                char unescaped_temp[INPUT_BUFFER_SIZE]; 
+                unescape_string(tokens[i].text, unescaped_temp, sizeof(unescaped_temp)); 
+                expand_variables_in_string_advanced(unescaped_temp, expanded_token_val, sizeof(expanded_token_val));
+            } else { 
+                expand_variables_in_string_advanced(tokens[i].text, expanded_token_val, sizeof(expanded_token_val)); 
+            }
+            size_t token_len = strlen(expanded_token_val);
+            if (current_len + token_len + (current_len > 0 && i > 2 ? 1 : 0) < INPUT_BUFFER_SIZE) { 
+                if (current_len > 0 && i > 2) { 
+                    strcat(combined_value, " "); 
+                    current_len++; 
+                }
+                strcat(combined_value, expanded_token_val); 
+                current_len += token_len;
+            } else { 
+                fprintf(stderr, "Value too long for assignment.\n"); 
+                break; 
             }
         }
-    } else { // RHS is a literal value
-        char combined_value[INPUT_BUFFER_SIZE] = ""; size_t current_len = 0;
-        for (int i = 2; i < num_tokens; i++) {
-            char expanded_token_val[INPUT_BUFFER_SIZE];
-            if (tokens[i].type == TOKEN_STRING) { char unescaped_temp[INPUT_BUFFER_SIZE]; unescape_string(tokens[i].text, unescaped_temp, sizeof(unescaped_temp)); expand_variables_in_string_advanced(unescaped_temp, expanded_token_val, sizeof(expanded_token_val));
-            } else { expand_variables_in_string_advanced(tokens[i].text, expanded_token_val, sizeof(expanded_token_val)); }
-            size_t token_len = strlen(expanded_token_val);
-            if (current_len + token_len + (current_len > 0 ? 1 : 0) < INPUT_BUFFER_SIZE) {
-                if (current_len > 0) { strcat(combined_value, " "); current_len++; }
-                strcat(combined_value, expanded_token_val); current_len += token_len;
-            } else { fprintf(stderr, "Value too long for assignment.\n"); break; }
-        }
-        strncpy(value_to_set, combined_value, sizeof(value_to_set) -1); value_to_set[sizeof(value_to_set)-1] = '\0';
+        strncpy(value_to_set, combined_value, sizeof(value_to_set) -1); 
+        value_to_set[sizeof(value_to_set)-1] = '\0';
     }
 
     if (is_array_assignment) set_array_element_scoped(base_var_name, index_str_raw, value_to_set);
@@ -1744,9 +1652,12 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
 }
 
 void handle_echo_advanced(Token *tokens, int num_tokens) {
+    // ... (remains the same)
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     char expanded_arg[INPUT_BUFFER_SIZE];
     for (int i = 1; i < num_tokens; i++) {
+        if (tokens[i].type == TOKEN_COMMENT) break; 
+
         if (tokens[i].type == TOKEN_STRING) {
             char unescaped_val[INPUT_BUFFER_SIZE];
             unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
@@ -1754,14 +1665,14 @@ void handle_echo_advanced(Token *tokens, int num_tokens) {
         } else {
             expand_variables_in_string_advanced(tokens[i].text, expanded_arg, sizeof(expanded_arg));
         }
-        printf("%s%s", expanded_arg, (i == num_tokens - 1) ? "" : " ");
+        printf("%s%s", expanded_arg, (i == num_tokens - 1 || (i+1 < num_tokens && tokens[i+1].type == TOKEN_COMMENT) ) ? "" : " ");
     }
     printf("\n");
 }
 
 bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, Token* operand2_token) {
+    // ... (remains the same)
     if (!operand1_token || !operator_token || !operand2_token) return false;
-    // No STATE_BLOCK_SKIP check here; this function is called only if not skipping.
 
     char val1_expanded[INPUT_BUFFER_SIZE], val2_expanded[INPUT_BUFFER_SIZE];
     if (operand1_token->type == TOKEN_STRING) { char unescaped[INPUT_BUFFER_SIZE]; unescape_string(operand1_token->text, unescaped, sizeof(unescaped)); expand_variables_in_string_advanced(unescaped, val1_expanded, sizeof(val1_expanded));
@@ -1781,7 +1692,7 @@ bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, T
     if (numeric_possible) {
         if (strcmp(op_str, ">") == 0) return num1 > num2; if (strcmp(op_str, "<") == 0) return num1 < num2;
         if (strcmp(op_str, ">=") == 0) return num1 >= num2; if (strcmp(op_str, "<=") == 0) return num1 <= num2;
-    } else { // Fallback to string comparison for >, <, >=, <=
+    } else { 
         if (strcmp(op_str, ">") == 0) return strcmp(val1_expanded, val2_expanded) > 0;
         if (strcmp(op_str, "<") == 0) return strcmp(val1_expanded, val2_expanded) < 0;
         if (strcmp(op_str, ">=") == 0) return strcmp(val1_expanded, val2_expanded) >= 0;
@@ -1792,9 +1703,8 @@ bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, T
 }
 
 void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
-    // Expect: if [!] <VALUE_TOKEN> [{]
-    // VALUE_TOKEN should be a variable $var, or a string "0" or "1" after expansion
-    if (num_tokens < 2) { // At least 'if condition_token'
+    // ... (remains the same)
+    if (num_tokens < 2) { 
         fprintf(stderr, "Syntax error for 'if'. Expected: if [!] <condition_value_or_variable> [{]\n");
         if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
            push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
@@ -1807,9 +1717,9 @@ void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_sou
 
     if (current_exec_state != STATE_BLOCK_SKIP) {
         if (tokens[1].type == TOKEN_OPERATOR && strcmp(tokens[1].text, "!") == 0) {
-            if (num_tokens < 3) { // 'if ! condition_token'
+            if (num_tokens < 3) { 
                 fprintf(stderr, "Syntax error for 'if !'. Expected: if ! <condition_value_or_variable> [{]\n");
-                if (block_stack_top_bf < MAX_NESTING_DEPTH -1) { // Ensure not already skipping before pushing new skip
+                if (block_stack_top_bf < MAX_NESTING_DEPTH -1) { 
                     push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
                 }
                 return;
@@ -1818,77 +1728,71 @@ void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_sou
             condition_token_idx = 2;
         }
 
-        char condition_value_expanded[INPUT_BUFFER_SIZE];
-        // Expand the token that represents the condition's result
-        if (tokens[condition_token_idx].type == TOKEN_STRING) {
-            char unescaped[INPUT_BUFFER_SIZE];
-            unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
-            expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
-        } else {
-            expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+        if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+            condition_result = evaluate_condition_advanced(&tokens[condition_token_idx], &tokens[condition_token_idx+1], &tokens[condition_token_idx+2]);
+        } else { 
+            char condition_value_expanded[INPUT_BUFFER_SIZE];
+            if (tokens[condition_token_idx].type == TOKEN_STRING) {
+                char unescaped[INPUT_BUFFER_SIZE];
+                unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+                expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+            } else {
+                expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+            }
+            condition_result = (strcmp(condition_value_expanded, "1") == 0 || 
+                                (strcmp(condition_value_expanded, "true") == 0) ||
+                                (strlen(condition_value_expanded) > 0 && strcmp(condition_value_expanded,"0") != 0 && strcmp(condition_value_expanded,"false") !=0 ) );
         }
 
-        if (strcmp(condition_value_expanded, "1") == 0) {
-            condition_result = true;
-        } else {
-            condition_result = false; // Any other value including "0" is false.
-        }
 
         if (negate_result) {
             condition_result = !condition_result;
         }
-    } // else, if current_exec_state == STATE_BLOCK_SKIP, condition_result remains false
+    } 
 
     push_block_bf(BLOCK_TYPE_IF, condition_result, 0, current_line_no);
-    if (condition_result && current_exec_state != STATE_BLOCK_SKIP) { // Check current_exec_state again in case it changed during condition eval
+    if (condition_result && current_exec_state != STATE_BLOCK_SKIP) { 
         current_exec_state = STATE_BLOCK_EXECUTE;
     } else {
         current_exec_state = STATE_BLOCK_SKIP;
     }
 
-    // Check for '{' on same line or expect on next
-    // tokens[0] = if, tokens[condition_token_idx] = condition value
-    int expected_brace_idx_after_condition = condition_token_idx + 1;
-    if (num_tokens > expected_brace_idx_after_condition && tokens[num_tokens-1].type == TOKEN_LBRACE) {
-        // '{' is present on the same line
-    } else if (num_tokens == expected_brace_idx_after_condition) {
-        // Only 'if [!] $var', expect '{' on next line
-    } else if (num_tokens > expected_brace_idx_after_condition && tokens[expected_brace_idx_after_condition].type == TOKEN_LBRACE ) {
-        // Handles 'if [!] $var {' correctly where num_tokens-1 is not the brace due to potential comment
+    int brace_expected_after_idx = condition_token_idx;
+    if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+        brace_expected_after_idx = condition_token_idx + 2; 
     }
-     else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == expected_brace_idx_after_condition){
-        // if $var # comment, brace on next line
+    int last_substantive_token_idx_before_brace_or_comment = brace_expected_after_idx;
+
+    if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1 && tokens[last_substantive_token_idx_before_brace_or_comment+1].type == TOKEN_LBRACE) {
+    } else if (num_tokens == last_substantive_token_idx_before_brace_or_comment + 1) {
+    } else if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1 && tokens[num_tokens-1].type == TOKEN_LBRACE) {
+    } else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == last_substantive_token_idx_before_brace_or_comment +1){
     }
-    else if (num_tokens > expected_brace_idx_after_condition) { // Unexpected tokens after condition and no brace
-         fprintf(stderr, "Syntax error for 'if': Unexpected tokens after condition value. '{' expected.\n");
+    else if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1) { 
+         fprintf(stderr, "Syntax error for 'if': Unexpected tokens after condition/expression. '{' expected or end of line.\n");
     }
-    // If no brace on the same line, it's expected on the next. No error if only condition is present.
 }
 
 void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
-    // Expect: while [!] <VALUE_TOKEN> [{]
+    // ... (remains the same)
     if (num_tokens < 2) {
-        fprintf(stderr, "Syntax error for 'while'. Expected: while [!] <condition_value_or_variable> [{]\n");
+        fprintf(stderr, "Syntax error for 'while'. Expected: while [!] <condition_value_or_variable_or_expr> [{]\n");
         if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
-           push_block_bf(BLOCK_TYPE_WHILE, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+           push_block_bf(BLOCK_TYPE_WHILE, false, get_file_pos(input_source), current_line_no); current_exec_state = STATE_BLOCK_SKIP;
         } return;
     }
 
     bool condition_result = false;
     bool negate_result = false;
     int condition_token_idx = 1;
-    long loop_fpos_at_while_line = -1; // Placeholder, see notes in thought process
-
-    // TODO: Capture file position for fseek based loops correctly if input_source is a file.
-    // The current_line_no is used as a fallback or for non-file sources.
-    // loop_fpos_at_while_line = get_file_pos_before_line_was_read(input_source); // Conceptual
-
+    long loop_fpos_at_while_line = get_file_pos(input_source); 
+    
     if (current_exec_state != STATE_BLOCK_SKIP) {
         if (tokens[1].type == TOKEN_OPERATOR && strcmp(tokens[1].text, "!") == 0) {
             if (num_tokens < 3) {
-                fprintf(stderr, "Syntax error for 'while !'. Expected: while ! <condition_value_or_variable> [{]\n");
+                fprintf(stderr, "Syntax error for 'while !'. Expected: while ! <condition_value_or_variable_or_expr> [{]\n");
                  if (block_stack_top_bf < MAX_NESTING_DEPTH -1) {
-                    push_block_bf(BLOCK_TYPE_WHILE, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+                    push_block_bf(BLOCK_TYPE_WHILE, false, loop_fpos_at_while_line, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
                 }
                 return;
             }
@@ -1896,19 +1800,20 @@ void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_
             condition_token_idx = 2;
         }
 
-        char condition_value_expanded[INPUT_BUFFER_SIZE];
-        if (tokens[condition_token_idx].type == TOKEN_STRING) {
-            char unescaped[INPUT_BUFFER_SIZE];
-            unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
-            expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
-        } else {
-            expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
-        }
-
-        if (strcmp(condition_value_expanded, "1") == 0) {
-            condition_result = true;
-        } else {
-            condition_result = false;
+        if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+             condition_result = evaluate_condition_advanced(&tokens[condition_token_idx], &tokens[condition_token_idx+1], &tokens[condition_token_idx+2]);
+        } else { 
+            char condition_value_expanded[INPUT_BUFFER_SIZE];
+            if (tokens[condition_token_idx].type == TOKEN_STRING) {
+                char unescaped[INPUT_BUFFER_SIZE];
+                unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+                expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+            } else {
+                expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+            }
+            condition_result = (strcmp(condition_value_expanded, "1") == 0 || 
+                                (strcmp(condition_value_expanded, "true") == 0) ||
+                                (strlen(condition_value_expanded) > 0 && strcmp(condition_value_expanded,"0") != 0 && strcmp(condition_value_expanded,"false") !=0 ) );
         }
 
         if (negate_result) {
@@ -1922,108 +1827,113 @@ void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_
     } else {
         current_exec_state = STATE_BLOCK_SKIP;
     }
+    
+    int brace_expected_after_idx = condition_token_idx;
+    if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+        brace_expected_after_idx = condition_token_idx + 2; 
+    }
 
-    int expected_brace_idx_after_condition = condition_token_idx + 1;
-    if (num_tokens > expected_brace_idx_after_condition && tokens[num_tokens-1].type == TOKEN_LBRACE) {}
-    else if (num_tokens == expected_brace_idx_after_condition) {}
-    else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == expected_brace_idx_after_condition){}
-    else if (num_tokens > expected_brace_idx_after_condition) {
-         fprintf(stderr, "Syntax error for 'while': Unexpected tokens after condition. '{' expected.\n");
+    int last_substantive_token_idx_before_brace_or_comment = brace_expected_after_idx;
+
+    if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1 && tokens[last_substantive_token_idx_before_brace_or_comment+1].type == TOKEN_LBRACE) {}
+    else if (num_tokens == last_substantive_token_idx_before_brace_or_comment + 1) {}
+    else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == last_substantive_token_idx_before_brace_or_comment +1){}
+    else if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1) {
+         fprintf(stderr, "Syntax error for 'while': Unexpected tokens after condition/expression. '{' expected or end of line.\n");
     }
 }
 
 void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
+    // ... (remains the same)
     BlockFrame* prev_block_frame = peek_block_bf();
     if (!prev_block_frame || (prev_block_frame->type != BLOCK_TYPE_IF && prev_block_frame->type != BLOCK_TYPE_ELSE)) {
-        fprintf(stderr, "Error: 'else' without a preceding 'if' or 'else if' block.\n");
-        if (current_exec_state != STATE_BLOCK_SKIP) { // Avoid pushing skip if already skipping
-            current_exec_state = STATE_BLOCK_SKIP; push_block_bf(BLOCK_TYPE_ELSE, false, 0, current_line_no);
+        fprintf(stderr, "Error: 'else' without a preceding 'if' or 'else if' block on line %d.\n", current_line_no);
+        if (current_exec_state != STATE_BLOCK_SKIP) { 
+            current_exec_state = STATE_BLOCK_SKIP; 
         } return;
     }
 
-    BlockFrame closed_if_or_else_if = *pop_block_bf();
+    BlockFrame closed_if_or_else_if = *pop_block_bf(); 
     bool execute_this_else_branch = false;
 
-    if (closed_if_or_else_if.condition_true) {
+    if (closed_if_or_else_if.condition_true) { 
         execute_this_else_branch = false;
-    } else {
-        // tokens[0] is 'else'
-        if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { // "else if [!] <condition_value>"
-            // Minimum: else if $var (3 tokens) or else if ! $var (4 tokens)
-            if (num_tokens < 3) {
-                fprintf(stderr, "Syntax error for 'else if'. Expected: else if [!] <condition_value_or_variable> [{]\n");
-                execute_this_else_branch = false; // Fall through to push block with false condition
-            } else {
-                 bool negate_result = false;
-                 int condition_token_idx = 2; // After 'else if'
+    } else { 
+        if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { 
+            int condition_token_idx = 2; 
+            bool negate_result = false;
 
-                if (tokens[2].type == TOKEN_OPERATOR && strcmp(tokens[2].text, "!") == 0) { // else if ! $var
-                    if (num_tokens < 4) { // 'else if ! condition'
-                        fprintf(stderr, "Syntax error for 'else if !'. Expected: else if ! <condition_value_or_variable> [{]\n");
+            if (num_tokens < 3) { 
+                fprintf(stderr, "Syntax error for 'else if'. Expected: else if [!] <condition_value_or_variable_or_expr> [{]\n");
+                execute_this_else_branch = false; 
+            } else {
+                if (tokens[2].type == TOKEN_OPERATOR && strcmp(tokens[2].text, "!") == 0) { 
+                    if (num_tokens < 4) { 
+                        fprintf(stderr, "Syntax error for 'else if !'. Expected: else if ! <condition_value_or_variable_or_expr> [{]\n");
                         execute_this_else_branch = false;
                     } else {
                         negate_result = true;
-                        condition_token_idx = 3;
+                        condition_token_idx = 3; 
                     }
                 }
-                // Check if we should even evaluate or if execute_this_else_branch is already decided false
-                if (execute_this_else_branch == false && !(negate_result && num_tokens <4) && !(num_tokens <3) ) { // if not error already
-                    if (current_exec_state != STATE_BLOCK_SKIP) {
-                        char condition_value_expanded[INPUT_BUFFER_SIZE];
-                        if (tokens[condition_token_idx].type == TOKEN_STRING) {
-                            char unescaped[INPUT_BUFFER_SIZE];
-                            unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
-                            expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
-                        } else {
-                            expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+                if (execute_this_else_branch == false && !(negate_result && num_tokens <4) && !(num_tokens <3) ) { 
+                    if (current_exec_state != STATE_BLOCK_SKIP) { 
+                        if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+                             execute_this_else_branch = evaluate_condition_advanced(&tokens[condition_token_idx], &tokens[condition_token_idx+1], &tokens[condition_token_idx+2]);
+                        } else { 
+                            char condition_value_expanded[INPUT_BUFFER_SIZE];
+                            if (tokens[condition_token_idx].type == TOKEN_STRING) {
+                                char unescaped[INPUT_BUFFER_SIZE];
+                                unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+                                expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+                            } else {
+                                expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+                            }
+                             execute_this_else_branch = (strcmp(condition_value_expanded, "1") == 0 || 
+                                (strcmp(condition_value_expanded, "true") == 0) ||
+                                (strlen(condition_value_expanded) > 0 && strcmp(condition_value_expanded,"0") != 0 && strcmp(condition_value_expanded,"false") !=0 ) );
                         }
-
-                        bool current_cond_val = false;
-                        if (strcmp(condition_value_expanded, "1") == 0) {
-                            current_cond_val = true;
-                        }
-
-                        if (negate_result) {
-                            execute_this_else_branch = !current_cond_val;
-                        } else {
-                            execute_this_else_branch = current_cond_val;
-                        }
-                    } else { // Already skipping from outer scope
+                        if (negate_result) execute_this_else_branch = !execute_this_else_branch;
+                    } else { 
                         execute_this_else_branch = false;
                     }
                 }
             }
-        } else { // Simple "else"
-            execute_this_else_branch = true;
+        } else { 
+            execute_this_else_branch = true; 
         }
     }
 
     push_block_bf(BLOCK_TYPE_ELSE, execute_this_else_branch, 0, current_line_no);
-    if (execute_this_else_branch && current_exec_state != STATE_BLOCK_SKIP) {
+    if (execute_this_else_branch && current_exec_state != STATE_BLOCK_SKIP) { 
         current_exec_state = STATE_BLOCK_EXECUTE;
     } else {
         current_exec_state = STATE_BLOCK_SKIP;
     }
 
-    // Syntax check for '{'
-    int base_token_count = 1; // For 'else'
-    if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { // else if ...
-        base_token_count = 2; // After 'else if'
-        if (num_tokens > 2 && tokens[2].type == TOKEN_OPERATOR && strcmp(tokens[2].text, "!") == 0) { // else if ! ...
-             base_token_count = 3; // After 'else if !'
+    int base_token_count_for_brace_check = 1; 
+    if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { 
+        base_token_count_for_brace_check = 2; 
+        if (num_tokens > 2 && tokens[2].type == TOKEN_OPERATOR && strcmp(tokens[2].text, "!") == 0) { 
+             base_token_count_for_brace_check = 3; 
         }
-        base_token_count++; // For the condition token itself
+        if (num_tokens >= base_token_count_for_brace_check + 3 && tokens[base_token_count_for_brace_check + 1].type == TOKEN_OPERATOR) {
+            base_token_count_for_brace_check += 2; 
+        }
+        base_token_count_for_brace_check++; 
     }
 
-    if (num_tokens > base_token_count && tokens[num_tokens-1].type == TOKEN_LBRACE) { /* ok */ }
-    else if (num_tokens == base_token_count) { /* ok, brace on next line */ }
-    else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == base_token_count){}
-    else if (num_tokens > base_token_count) {
-        fprintf(stderr, "Syntax error for 'else'/'else if': Unexpected tokens after condition. '{' expected.\n");
+    if (num_tokens > base_token_count_for_brace_check && tokens[base_token_count_for_brace_check].type == TOKEN_LBRACE) {  }
+    else if (num_tokens == base_token_count_for_brace_check) {  }
+    else if (num_tokens > base_token_count_for_brace_check && tokens[num_tokens-1].type == TOKEN_LBRACE) {  }
+    else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == base_token_count_for_brace_check){}
+    else if (num_tokens > base_token_count_for_brace_check && tokens[base_token_count_for_brace_check].type != TOKEN_COMMENT) { 
+        fprintf(stderr, "Syntax error for 'else'/'else if' on line %d: Unexpected tokens after condition/expression. '{' expected or end of line.\n", current_line_no);
     }
 }
 
 void handle_defunc_statement_advanced(Token *tokens, int num_tokens) {
+    // ... (remains the same)
     if (num_tokens < 2 || tokens[1].type != TOKEN_WORD) {
         fprintf(stderr, "Syntax: defunc <funcname> [(param1 ...)] [{]\n"); return;
     }
@@ -2031,7 +1941,7 @@ void handle_defunc_statement_advanced(Token *tokens, int num_tokens) {
         fprintf(stderr, "Error: Cannot nest function definitions during normal execution.\n"); return;
     }
     if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) {
-        push_block_bf(BLOCK_TYPE_FUNCTION_DEF, false, 0, 0); return; // Skip body
+        push_block_bf(BLOCK_TYPE_FUNCTION_DEF, false, 0, 0); return; 
     }
 
     current_function_definition = (UserFunction*)malloc(sizeof(UserFunction));
@@ -2041,27 +1951,33 @@ void handle_defunc_statement_advanced(Token *tokens, int num_tokens) {
 
     int token_idx = 2;
     if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_LPAREN) {
-        token_idx++; // Skip '('
+        token_idx++; 
         while(token_idx < num_tokens && tokens[token_idx].type != TOKEN_RPAREN) {
             if (tokens[token_idx].type == TOKEN_WORD) {
                 if (current_function_definition->param_count < MAX_FUNC_PARAMS) {
                     strncpy(current_function_definition->params[current_function_definition->param_count++], tokens[token_idx].text, MAX_VAR_NAME_LEN -1);
                 } else { fprintf(stderr, "Too many parameters for function %s.\n", current_function_definition->name); free(current_function_definition); current_function_definition = NULL; return; }
-            } else { fprintf(stderr, "Syntax error in function parameters: Expected word for %s.\n", current_function_definition->name); free(current_function_definition); current_function_definition = NULL; return; }
+            } else if (tokens[token_idx].type == TOKEN_COMMENT) { 
+                break; 
+            }else { fprintf(stderr, "Syntax error in function parameters: Expected word for %s, got '%s'.\n", current_function_definition->name, tokens[token_idx].text); free(current_function_definition); current_function_definition = NULL; return; }
             token_idx++;
         }
-        if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_RPAREN) token_idx++; // Skip ')'
-        else { fprintf(stderr, "Syntax error in function parameters: missing ')' for %s.\n", current_function_definition->name); free(current_function_definition); current_function_definition = NULL; return; }
+        if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_RPAREN) token_idx++; 
+        else if (!(token_idx < num_tokens && tokens[token_idx].type == TOKEN_COMMENT)) { 
+             fprintf(stderr, "Syntax error in function parameters: missing ')' for %s.\n", current_function_definition->name); free(current_function_definition); current_function_definition = NULL; return; 
+        }
+    }
+    while(token_idx < num_tokens && tokens[token_idx].type == TOKEN_COMMENT) {
+        token_idx++;
     }
 
-    if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_LBRACE) { // '{' on same line
+    if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_LBRACE) { 
         is_defining_function = true;
         if (current_exec_state != STATE_IMPORT_PARSING) current_exec_state = STATE_DEFINE_FUNC_BODY;
-        push_block_bf(BLOCK_TYPE_FUNCTION_DEF, true, 0, 0); // True = collect body
-    } else if (token_idx == num_tokens) { // Expect '{' on next line
+        push_block_bf(BLOCK_TYPE_FUNCTION_DEF, true, 0, 0); 
+    } else if (token_idx == num_tokens) { 
         is_defining_function = true;
         if (current_exec_state != STATE_IMPORT_PARSING) current_exec_state = STATE_DEFINE_FUNC_BODY;
-        // The '{' on next line will call handle_opening_brace_token which should push the block.
     } else {
         fprintf(stderr, "Syntax error in function definition: '{' expected for %s, got '%s'.\n", current_function_definition->name, tokens[token_idx].text);
         free(current_function_definition); current_function_definition = NULL;
@@ -2069,6 +1985,7 @@ void handle_defunc_statement_advanced(Token *tokens, int num_tokens) {
 }
 
 void handle_inc_dec_statement_advanced(Token *tokens, int num_tokens, bool increment) {
+    // ... (remains the same, this is for 'inc'/'dec' keywords)
     if (num_tokens != 2 || (tokens[1].type != TOKEN_VARIABLE && tokens[1].type != TOKEN_WORD)) {
         fprintf(stderr, "Syntax: %s <$varname_or_varname | $arr[idx]>\n", increment ? "inc" : "dec"); return;
     }
@@ -2079,13 +1996,13 @@ void handle_inc_dec_statement_advanced(Token *tokens, int num_tokens, bool incre
     bool is_array_op = false;
     char index_raw[MAX_VAR_NAME_LEN] = "";
 
-    if (tokens[1].type == TOKEN_VARIABLE) { // $var or $arr[idx]
-        char temp_text[MAX_VAR_NAME_LEN * 2]; // For $arr[idx] form
+    if (tokens[1].type == TOKEN_VARIABLE) { 
+        char temp_text[MAX_VAR_NAME_LEN * 2]; 
         strncpy(temp_text, var_name_token_text + 1, sizeof(temp_text)-1); temp_text[sizeof(temp_text)-1] = '\0';
         char* bracket = strchr(temp_text, '[');
         if (bracket) {
             char* end_bracket = strrchr(bracket, ']');
-            if (end_bracket && end_bracket > bracket + 1) {
+            if (end_bracket && end_bracket > bracket + 1) { 
                 is_array_op = true;
                 size_t base_len = bracket - temp_text;
                 strncpy(var_name_or_base, temp_text, base_len); var_name_or_base[base_len] = '\0';
@@ -2093,44 +2010,70 @@ void handle_inc_dec_statement_advanced(Token *tokens, int num_tokens, bool incre
                 strncpy(index_raw, bracket + 1, index_len); index_raw[index_len] = '\0';
             } else { fprintf(stderr, "Malformed array index in %s: %s\n", increment ? "inc" : "dec", var_name_token_text); return; }
         } else { strncpy(var_name_or_base, temp_text, MAX_VAR_NAME_LEN -1); var_name_or_base[MAX_VAR_NAME_LEN-1] = '\0'; }
-    } else { // var (unquoted word, cannot be array for inc/dec directly this way)
+    } else { 
         strncpy(var_name_or_base, var_name_token_text, MAX_VAR_NAME_LEN -1); var_name_or_base[MAX_VAR_NAME_LEN-1] = '\0';
     }
 
     char* current_val_str;
-    if (is_array_op) current_val_str = get_array_element_scoped(var_name_or_base, index_raw);
-    else current_val_str = get_variable_scoped(var_name_or_base);
+    char expanded_index_for_array_op[INPUT_BUFFER_SIZE]; 
+
+    if (is_array_op) {
+        if (index_raw[0] == '"' && index_raw[strlen(index_raw)-1] == '"') {
+            char unescaped_idx[INPUT_BUFFER_SIZE];
+            unescape_string(index_raw, unescaped_idx, sizeof(unescaped_idx));
+            expand_variables_in_string_advanced(unescaped_idx, expanded_index_for_array_op, sizeof(expanded_index_for_array_op));
+        } else if (index_raw[0] == '$') {
+            expand_variables_in_string_advanced(index_raw, expanded_index_for_array_op, sizeof(expanded_index_for_array_op));
+        } else { 
+            strncpy(expanded_index_for_array_op, index_raw, sizeof(expanded_index_for_array_op)-1);
+            expanded_index_for_array_op[sizeof(expanded_index_for_array_op)-1] = '\0';
+        }
+        current_val_str = get_array_element_scoped(var_name_or_base, expanded_index_for_array_op);
+    } else { 
+        current_val_str = get_variable_scoped(var_name_or_base);
+    }
 
     long current_val = 0;
     if (current_val_str) {
         char *endptr; errno = 0;
         current_val = strtol(current_val_str, &endptr, 10);
         if (errno != 0 || *current_val_str == '\0' || *endptr != '\0') {
-            fprintf(stderr, "Warning: Variable/element '%s%s%s%s' ('%s') is not a valid integer for %s. Treating as 0.\n",
-                tokens[1].type == TOKEN_VARIABLE ? "$" : "", var_name_or_base, is_array_op ? "[" : "", is_array_op ? index_raw : "",
+            fprintf(stderr, "Warning: Variable/element '%s%s%s%s%s' ('%s') is not a valid integer for %s. Treating as 0.\n",
+                tokens[1].type == TOKEN_VARIABLE ? "$" : "", var_name_or_base, 
+                is_array_op ? "[" : "", is_array_op ? expanded_index_for_array_op : "", is_array_op ? "]" : "",
                 current_val_str ? current_val_str : "NULL", increment ? "inc" : "dec");
             current_val = 0;
         }
     }
     current_val += (increment ? 1 : -1);
-    char new_val_str[MAX_VAR_NAME_LEN]; // Sufficient for long
+    char new_val_str[MAX_VAR_NAME_LEN]; 
     snprintf(new_val_str, sizeof(new_val_str), "%ld", current_val);
 
-    if (is_array_op) set_array_element_scoped(var_name_or_base, index_raw, new_val_str);
+    if (is_array_op) set_array_element_scoped(var_name_or_base, expanded_index_for_array_op, new_val_str);
     else set_variable_scoped(var_name_or_base, new_val_str, false);
 }
 
 void handle_loadlib_statement(Token *tokens, int num_tokens) {
+    // ... (remains the same)
     if (num_tokens != 3) { fprintf(stderr, "Syntax: loadlib <path_or_$var> <alias_or_$var>\n"); return; }
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     char lib_path[MAX_FULL_PATH_LEN], alias[MAX_VAR_NAME_LEN];
-    char temp_val_holder[INPUT_BUFFER_SIZE];
-
-    expand_variables_in_string_advanced(tokens[1].text, temp_val_holder, sizeof(temp_val_holder));
-    if(tokens[1].type == TOKEN_STRING) unescape_string(temp_val_holder, lib_path, sizeof(lib_path)); else strncpy(lib_path, temp_val_holder, sizeof(lib_path)-1); lib_path[sizeof(lib_path)-1] = '\0';
-
-    expand_variables_in_string_advanced(tokens[2].text, temp_val_holder, sizeof(temp_val_holder));
-    if(tokens[2].type == TOKEN_STRING) unescape_string(temp_val_holder, alias, sizeof(alias)); else strncpy(alias, temp_val_holder, sizeof(alias)-1); alias[sizeof(alias)-1] = '\0';
+    
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, lib_path, sizeof(lib_path));
+    } else { 
+        expand_variables_in_string_advanced(tokens[1].text, lib_path, sizeof(lib_path));
+    }
+    
+    if (tokens[2].type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, alias, sizeof(alias));
+    } else { 
+        expand_variables_in_string_advanced(tokens[2].text, alias, sizeof(alias));
+    }
 
     if (strlen(lib_path) == 0 || strlen(alias) == 0) { fprintf(stderr, "loadlib error: Path or alias is empty.\n"); return; }
     DynamicLib* current_lib = loaded_libs; while(current_lib) { if (strcmp(current_lib->alias, alias) == 0) { fprintf(stderr, "Error: Lib alias '%s' in use.\n", alias); return; } current_lib = current_lib->next; }
@@ -2140,20 +2083,29 @@ void handle_loadlib_statement(Token *tokens, int num_tokens) {
     if (!new_lib_entry) { perror("malloc for new_lib_entry failed"); dlclose(handle); return; }
     strncpy(new_lib_entry->alias, alias, MAX_VAR_NAME_LEN -1); new_lib_entry->alias[MAX_VAR_NAME_LEN-1] = '\0';
     new_lib_entry->handle = handle; new_lib_entry->next = loaded_libs; loaded_libs = new_lib_entry;
-    // printf("Library '%s' loaded as alias '%s'.\n", lib_path, alias);
 }
 
 void handle_calllib_statement(Token *tokens, int num_tokens) {
+    // ... (remains the same)
     if (num_tokens < 3) { fprintf(stderr, "Syntax: calllib <alias> <func_name> [args...]\n"); return; }
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     char alias[MAX_VAR_NAME_LEN], func_name[MAX_VAR_NAME_LEN];
-    char temp_val_holder[INPUT_BUFFER_SIZE];
 
-    expand_variables_in_string_advanced(tokens[1].text, temp_val_holder, sizeof(temp_val_holder));
-    if(tokens[1].type == TOKEN_STRING) unescape_string(temp_val_holder, alias, sizeof(alias)); else strncpy(alias, temp_val_holder, sizeof(alias)-1); alias[sizeof(alias)-1] = '\0';
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, alias, sizeof(alias));
+    } else { 
+        expand_variables_in_string_advanced(tokens[1].text, alias, sizeof(alias));
+    }
 
-    expand_variables_in_string_advanced(tokens[2].text, temp_val_holder, sizeof(temp_val_holder));
-    if(tokens[2].type == TOKEN_STRING) unescape_string(temp_val_holder, func_name, sizeof(func_name)); else strncpy(func_name, temp_val_holder, sizeof(func_name)-1); func_name[sizeof(func_name)-1] = '\0';
+    if (tokens[2].type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, func_name, sizeof(func_name));
+    } else { 
+        expand_variables_in_string_advanced(tokens[2].text, func_name, sizeof(func_name));
+    }
 
     if (strlen(alias) == 0 || strlen(func_name) == 0) { fprintf(stderr, "calllib error: Alias or func name empty.\n"); return; }
     DynamicLib* lib_entry = loaded_libs; void* lib_handle = NULL;
@@ -2163,7 +2115,7 @@ void handle_calllib_statement(Token *tokens, int num_tokens) {
     if (dlsym_error != NULL) { fprintf(stderr, "Error finding func '%s' in lib '%s': %s\n", func_name, alias, dlsym_error); return; }
     if (!func_ptr) { fprintf(stderr, "Error finding func '%s' (ptr NULL, no dlerror).\n", func_name); return; }
 
-    typedef int (*lib_func_sig_t)(int, char**, char*, int); // Expected signature
+    typedef int (*lib_func_sig_t)(int, char**, char*, int); 
     lib_func_sig_t target_func = (lib_func_sig_t)func_ptr;
     int lib_argc = num_tokens - 3;
     char* lib_argv_expanded_storage[MAX_ARGS][INPUT_BUFFER_SIZE]; char* lib_argv[MAX_ARGS + 1];
@@ -2179,8 +2131,147 @@ void handle_calllib_statement(Token *tokens, int num_tokens) {
     set_variable_scoped("LAST_LIB_CALL_OUTPUT", lib_output_buffer, false);
 }
 
+void handle_import_statement(Token *tokens, int num_tokens) {
+    // ... (remains the same)
+    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) { 
+        return;
+    }
+
+    if (num_tokens < 2) {
+        fprintf(stderr, "Syntax: import <module_name_or_path>\n");
+        return;
+    }
+
+    char module_spec_expanded[MAX_FULL_PATH_LEN];
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped_module_spec[MAX_FULL_PATH_LEN];
+        unescape_string(tokens[1].text, unescaped_module_spec, sizeof(unescaped_module_spec));
+        expand_variables_in_string_advanced(unescaped_module_spec, module_spec_expanded, sizeof(module_spec_expanded));
+    } else { 
+        expand_variables_in_string_advanced(tokens[1].text, module_spec_expanded, sizeof(module_spec_expanded));
+    }
+    
+    if (strlen(module_spec_expanded) == 0) {
+        fprintf(stderr, "Error: import statement received an empty module path/name after expansion.\n");
+        return;
+    }
+
+    char full_module_path[MAX_FULL_PATH_LEN];
+    if (find_module_in_path(module_spec_expanded, full_module_path)) {
+        ExecutionState previous_exec_state = current_exec_state;
+        current_exec_state = STATE_IMPORT_PARSING; 
+
+        execute_script(full_module_path, true, false); 
+
+        current_exec_state = previous_exec_state; 
+    } else {
+        fprintf(stderr, "Error: Module '%s' not found for import.\n", module_spec_expanded);
+    }
+}
+
+void handle_update_cwd_statement(Token *tokens, int num_tokens) {
+    // ... (remains the same)
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    if (num_tokens != 1) {
+        fprintf(stderr, "Syntax: update_cwd (takes no arguments)\n");
+        return;
+    }
+
+    char cwd_buffer[PATH_MAX];
+    if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL) {
+        set_variable_scoped("CWD", cwd_buffer, false);
+    } else {
+        perror("bsh: update_cwd: getcwd() error");
+        set_variable_scoped("CWD", "", false); 
+    }
+}
+
+// New handler for unary operations like $var++ or ++$var
+void handle_unary_op_statement(Token* var_token, Token* op_token, bool is_prefix) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    char var_name_clean[MAX_VAR_NAME_LEN];
+    // The var_token->text for a TOKEN_VARIABLE will be like "$myvar" or "${myvar}" or "$arr[idx]"
+    // We need to extract the actual variable name part for the BSH handler.
+    // For simplicity, this example will focus on simple variables like "$myvar".
+    // Handling "$arr[idx]++" would require parsing the base name and index here.
+    if (var_token->text[0] == '$') {
+        if (var_token->text[1] == '{') { // ${varname}
+            const char* end_brace = strchr(var_token->text + 2, '}');
+            if (end_brace) {
+                size_t len = end_brace - (var_token->text + 2);
+                if (len < MAX_VAR_NAME_LEN) {
+                    strncpy(var_name_clean, var_token->text + 2, len);
+                    var_name_clean[len] = '\0';
+                } else {
+                    fprintf(stderr, "Error: Variable name in ${...} too long for unary op.\n");
+                    return;
+                }
+            } else { // Malformed ${...
+                fprintf(stderr, "Error: Malformed ${...} in unary op.\n");
+                return;
+            }
+        } else { // $varname
+             // Check for array access $var[index] - this part needs more robust parsing if to be supported directly.
+            char* bracket_ptr = strchr(var_token->text + 1, '[');
+            if (bracket_ptr) {
+                fprintf(stderr, "Error: Unary operator on array element (e.g., $arr[idx]++) is not directly supported by this simple handler. Use 'inc $arr[idx]' or a BSH function.\n");
+                // For a full implementation, you'd parse base_var_name and index_str_raw here,
+                // then the BSH handler would need to be more complex or you'd have specialized BSH handlers.
+                return;
+            }
+            strncpy(var_name_clean, var_token->text + 1, MAX_VAR_NAME_LEN - 1);
+            var_name_clean[MAX_VAR_NAME_LEN - 1] = '\0';
+        }
+    } else {
+        fprintf(stderr, "Error: Unary operator expected a variable (e.g., $var), got '%s'.\n", var_token->text);
+        return;
+    }
+    
+    if (strlen(var_name_clean) == 0) {
+        fprintf(stderr, "Error: Empty variable name in unary operation.\n");
+        return;
+    }
+
+
+    const char* op_str = op_token->text;
+    char bsh_handler_name[MAX_VAR_NAME_LEN];
+
+    if (is_prefix) {
+        if (strcmp(op_str, "++") == 0) strncpy(bsh_handler_name, "__bsh_prefix_increment", sizeof(bsh_handler_name)-1);
+        else if (strcmp(op_str, "--") == 0) strncpy(bsh_handler_name, "__bsh_prefix_decrement", sizeof(bsh_handler_name)-1);
+        else { fprintf(stderr, "Internal error: Unknown prefix unary operator '%s'.\n", op_str); return; }
+    } else { // Postfix
+        if (strcmp(op_str, "++") == 0) strncpy(bsh_handler_name, "__bsh_postfix_increment", sizeof(bsh_handler_name)-1);
+        else if (strcmp(op_str, "--") == 0) strncpy(bsh_handler_name, "__bsh_postfix_decrement", sizeof(bsh_handler_name)-1);
+        else { fprintf(stderr, "Internal error: Unknown postfix unary operator '%s'.\n", op_str); return; }
+    }
+    bsh_handler_name[sizeof(bsh_handler_name)-1] = '\0';
+
+    char c_result_buffer[INPUT_BUFFER_SIZE];
+    const char* bsh_temp_result_var_name = "__TEMP_UNARY_OP_EXPR_RES"; // BSH var to hold expression's value
+
+    // Call the BSH handler.
+    // BSH handler signature: function handler_name (var_to_modify_name_str, result_holder_var_name_str)
+    if (invoke_bsh_unary_op_call(bsh_handler_name, 
+                                 var_name_clean,          // Pass the clean variable name (e.g., "myvar")
+                                 bsh_temp_result_var_name, 
+                                 c_result_buffer, sizeof(c_result_buffer))) {
+        // The BSH handler performs the side effect (modifies var_name_clean)
+        // AND sets bsh_temp_result_var_name to the "value" of the expression.
+        set_variable_scoped("LAST_OP_RESULT", c_result_buffer, false);
+        // If these operations should print their result when standalone:
+        // printf("%s\n", c_result_buffer); 
+    } else {
+        fprintf(stderr, "Error executing BSH unary op handler '%s' for variable '%s'.\n", bsh_handler_name, var_name_clean);
+        set_variable_scoped("LAST_OP_RESULT", "UNARY_OP_HANDLER_ERROR", false);
+    }
+}
+
 
 // --- Block Management ---
+// ... (push_block_bf, pop_block_bf, peek_block_bf, handle_opening_brace_token, handle_closing_brace_token remain the same)
 void push_block_bf(BlockType type, bool condition_true, long loop_start_fpos, int loop_start_line_no) {
     if (block_stack_top_bf >= MAX_NESTING_DEPTH - 1) { fprintf(stderr, "Max block nesting depth exceeded.\n"); return; }
     block_stack_top_bf++;
@@ -2192,7 +2283,7 @@ void push_block_bf(BlockType type, bool condition_true, long loop_start_fpos, in
 }
 
 BlockFrame* pop_block_bf() {
-    if (block_stack_top_bf < 0) { /*fprintf(stderr, "Warning: Block stack underflow (pop_block_bf).\n");*/ return NULL; }
+    if (block_stack_top_bf < 0) { return NULL; }
     return &block_stack[block_stack_top_bf--];
 }
 
@@ -2203,15 +2294,15 @@ BlockFrame* peek_block_bf() {
 
 void handle_opening_brace_token(Token token) {
     BlockFrame* current_block_frame = peek_block_bf();
-    if (!current_block_frame) {
+    if (!current_block_frame) { 
         if (is_defining_function && current_function_definition && current_exec_state != STATE_BLOCK_SKIP) {
-            push_block_bf(BLOCK_TYPE_FUNCTION_DEF, true, 0, 0); // True = collect body
-            // current_exec_state is already STATE_DEFINE_FUNC_BODY or STATE_IMPORT_PARSING
+            push_block_bf(BLOCK_TYPE_FUNCTION_DEF, true, 0, 0); 
             return;
         }
         fprintf(stderr, "Error: '{' found without a preceding statement expecting it.\n"); return;
     }
-    if (current_block_frame->type == BLOCK_TYPE_FUNCTION_DEF) { /* Already handled by defunc */ }
+    if (current_block_frame->type == BLOCK_TYPE_FUNCTION_DEF) { 
+    }
     else if (current_block_frame->condition_true && current_exec_state != STATE_BLOCK_SKIP) current_exec_state = STATE_BLOCK_EXECUTE;
     else current_exec_state = STATE_BLOCK_SKIP;
 }
@@ -2221,55 +2312,68 @@ void handle_closing_brace_token(Token token, FILE* input_source) {
     if (!closed_block_frame) { fprintf(stderr, "Error: '}' found without a matching open block.\n"); current_exec_state = STATE_NORMAL; return; }
 
     ExecutionState state_before_closed_block = closed_block_frame->prev_exec_state;
-    BlockFrame* parent_block = peek_block_bf(); // Parent block AFTER popping current one
+    BlockFrame* parent_block = peek_block_bf(); 
 
-    if (closed_block_frame->type == BLOCK_TYPE_WHILE && closed_block_frame->condition_true && current_exec_state != STATE_BLOCK_SKIP) {
-        bool can_loop = false;
-        if (input_source && input_source != stdin && closed_block_frame->loop_start_fpos != -1 && closed_block_frame->loop_start_fpos >= 0) {
-            if (fseek(input_source, closed_block_frame->loop_start_fpos, SEEK_SET) == 0) can_loop = true;
-            else perror("fseek failed for while loop");
-        } else if (closed_block_frame->loop_start_line_no > 0 && !input_source) { // e.g. inside a function
-             fprintf(stderr, "Warning: 'while' loop repetition inside function (line %d) requires memory-based re-evaluation (not fully implemented).\n", closed_block_frame->loop_start_line_no);
-        } // Else cannot loop (interactive, or no valid loop point)
-
-        if (can_loop) { current_exec_state = STATE_NORMAL; return; /* Allow execute_script to re-read */ }
+    if (closed_block_frame->type == BLOCK_TYPE_WHILE && closed_block_frame->condition_true && 
+        (current_exec_state == STATE_BLOCK_EXECUTE || current_exec_state == STATE_NORMAL || current_exec_state == STATE_IMPORT_PARSING) ) { 
+        
+        bool can_loop_via_fseek = false;
+        if (input_source_is_file(input_source) && closed_block_frame->loop_start_fpos != -1) {
+             // Before seeking, re-evaluate the condition. This requires re-tokenizing the while header.
+             // This is a complex part. A simpler (but less flexible) model is to just seek.
+             // For now, we'll stick to the seek model, assuming the condition might change due to side effects in the loop.
+            if (fseek(input_source, closed_block_frame->loop_start_fpos, SEEK_SET) == 0) {
+                can_loop_via_fseek = true;
+                current_exec_state = STATE_NORMAL; // Allow re-processing of the while line by execute_script
+                return; 
+            } else { 
+                perror("fseek failed for while loop"); 
+            }
+        } else if (!input_source_is_file(input_source) && closed_block_frame->loop_start_line_no > 0) { 
+             // This case is for loops inside function bodies (not read from file)
+             // True looping here would require re-executing the function lines from the loop header.
+             // This is not implemented by simple fseek.
+             fprintf(stderr, "Warning: 'while' loop repetition for non-file input (e.g. function body, line %d) is not supported by fseek. Loop will terminate.\n", closed_block_frame->loop_start_line_no);
+        }
     }
 
-    // General state restoration
-    if (!parent_block) current_exec_state = STATE_NORMAL; // Back to top level
-    else { // Inside another block
-        if (parent_block->type == BLOCK_TYPE_FUNCTION_DEF && is_defining_function) current_exec_state = STATE_DEFINE_FUNC_BODY;
-        else if (parent_block->condition_true) current_exec_state = STATE_BLOCK_EXECUTE;
-        else current_exec_state = STATE_BLOCK_SKIP;
+    if (!parent_block) { 
+        current_exec_state = STATE_NORMAL;
+    } else { 
+        if (parent_block->type == BLOCK_TYPE_FUNCTION_DEF && is_defining_function) {
+            current_exec_state = STATE_DEFINE_FUNC_BODY; 
+        } else if (parent_block->condition_true) {
+            current_exec_state = STATE_BLOCK_EXECUTE; 
+        } else {
+            current_exec_state = STATE_BLOCK_SKIP; 
+        }
     }
 
     if (closed_block_frame->type == BLOCK_TYPE_FUNCTION_DEF) {
-        if (current_function_definition) { // This '}' closes the current function definition
-            current_function_definition->next = function_list; function_list = current_function_definition;
-            if (current_exec_state != STATE_IMPORT_PARSING && state_before_closed_block != STATE_IMPORT_PARSING) {
-                 // printf("Function '%s' defined.\n", current_function_definition->name);
-            }
-            current_function_definition = NULL;
+        if (current_function_definition) { 
+            current_function_definition->next = function_list; 
+            function_list = current_function_definition;
+            current_function_definition = NULL; 
         }
-        is_defining_function = false;
-        current_exec_state = state_before_closed_block; // Restore state from before defunc started
-        // If defunc was top-level, state_before_closed_block would be NORMAL.
-        // If defunc was nested (not allowed usually, but for import parsing), restore outer import state.
-        if (!parent_block && current_exec_state == STATE_DEFINE_FUNC_BODY) { // Exited top-level func def
+        is_defining_function = false; 
+        current_exec_state = state_before_closed_block; 
+        
+        if (!parent_block && current_exec_state == STATE_DEFINE_FUNC_BODY) {
             current_exec_state = STATE_NORMAL;
         }
     }
-    // If after all popping, stack is empty and we are not in middle of defining a function, go to normal.
+    
     if (block_stack_top_bf == -1 && current_exec_state != STATE_DEFINE_FUNC_BODY) {
         current_exec_state = STATE_NORMAL;
     }
 }
 
 // --- Utility Implementations ---
+// ... (trim_whitespace, free_function_list, free_operator_list, free_loaded_libs, get_file_pos, unescape_string, input_source_is_file remain the same)
 char* trim_whitespace(char *str) {
     if (!str) return NULL; char *end;
     while (isspace((unsigned char)*str)) str++;
-    if (*str == 0) return str; // All spaces?
+    if (*str == 0) return str; 
     end = str + strlen(str) - 1;
     while (end > str && isspace((unsigned char)*end)) end--;
     *(end + 1) = 0;
@@ -2305,83 +2409,82 @@ void free_loaded_libs() {
 long get_file_pos(FILE* f) {
     if (!f || f == stdin || f == stdout || f == stderr) return -1L;
     long pos = ftell(f);
-    if (pos == -1L) { /* perror("ftell failed"); */ return -1L; }
+    if (pos == -1L) { return -1L; }
     return pos;
 }
 
 char* unescape_string(const char* input_raw, char* output_buffer, size_t buffer_size) {
     char* out = output_buffer; const char* p = input_raw; size_t out_len = 0;
-    if (*p == '"') p++; // Skip leading quote if present in token text
+    bool in_quotes = false;
+
+    if (*p == '"') { 
+        p++; 
+        in_quotes = true;
+    }
 
     while (*p && out_len < buffer_size - 1) {
-        // Stop at closing quote if not escaped and it's not the very first char (already skipped)
-        if (*p == '"' && !(p > input_raw && *(p-1) == '\\' && (p-2 < input_raw || *(p-2) != '\\'))) {
-             break;
+        if (in_quotes && *p == '"' && !(p > input_raw && *(p-1) == '\\' && (p-2 < input_raw || *(p-2) != '\\'))) {
+             break; 
         }
         if (*p == '\\') {
-            p++; if (!*p) break; // Dangling escape
+            p++; if (!*p) break; 
             switch (*p) {
                 case 'n': *out++ = '\n'; break; case 't': *out++ = '\t'; break;
                 case '"': *out++ = '"'; break;  case '\\': *out++ = '\\'; break;
-                case '$': *out++ = '$'; break;  default: *out++ = '\\'; *out++ = *p; break;
+                case '$': *out++ = '$'; break;  default: *out++ = '\\'; *out++ = *p; break; 
             }
         } else { *out++ = *p; }
-        if (*p) p++; // Move to next char in input
+        if (*p) p++; 
         out_len++;
     }
     *out = '\0';
     return output_buffer;
 }
 
-// --- execute_script (ensure it handles startup script context correctly) ---
+bool input_source_is_file(FILE* f) {
+    if (!f || f == stdin || f == stdout || f == stderr) return false;
+    int fd = fileno(f);
+    if (fd == -1) return false; 
+    return (fd != STDIN_FILENO && fd != STDOUT_FILENO && fd != STDERR_FILENO);
+}
+
 void execute_script(const char *filename, bool is_import_call, bool is_startup_script) {
+    // ... (remains largely the same, ensure loop_start_fpos is correctly passed if used by while)
     FILE *script_file = fopen(filename, "r");
     if (!script_file) {
-        if (!is_startup_script || errno != ENOENT) { // Report error unless it's a non-existent optional startup script
+        if (!is_startup_script || errno != ENOENT) { 
             fprintf(stderr, "Error opening script '%s': %s\n", filename, strerror(errno));
         }
         return;
     }
-
-    if (is_startup_script) printf("Executing startup script: %s\n", filename);
-    // else if (is_import_call) printf("Importing from script: %s\n", filename); // Can be verbose
-
+    
     char line_buffer[INPUT_BUFFER_SIZE]; int line_no = 0;
     ExecutionState script_exec_mode = is_import_call ? STATE_IMPORT_PARSING : STATE_NORMAL;
 
-    // Save outer context only for non-startup, non-import script calls that might be nested
     ExecutionState outer_exec_state_backup = current_exec_state;
     int outer_block_stack_top_bf_backup = block_stack_top_bf;
     bool restore_context = (!is_import_call && !is_startup_script);
 
-
-    long current_fpos = -1; // For potential fseek in while loops
-
     while (true) {
-        if (input_source_is_file(script_file)) current_fpos = get_file_pos(script_file); // Get fpos *before* reading line
-
         if (!fgets(line_buffer, sizeof(line_buffer), script_file)) {
-            if (feof(script_file)) break; // End of file
+            if (feof(script_file)) break; 
             if (ferror(script_file)) { perror("Error reading script file"); break; }
         }
         line_no++;
-        // Pass current_fpos to process_line if it's to be used by while for fseek
-        // For now, process_line uses current_line_no primarily.
         process_line(line_buffer, script_file, line_no, script_exec_mode);
-
-        // If a 'while' loop in this script file just decided to loop (via fseek in handle_closing_brace),
-        // the file pointer is already repositioned. The next fgets will read from there.
     }
     fclose(script_file);
 
-    if (is_import_call) { // Cleanup after import
+    if (is_import_call) { 
         if (is_defining_function && current_function_definition) {
             fprintf(stderr, "Warning: Unterminated function definition '%s' at end of imported file '%s'.\n", current_function_definition->name, filename);
             for(int i=0; i < current_function_definition->line_count; ++i) if(current_function_definition->body[i]) free(current_function_definition->body[i]);
             free(current_function_definition); current_function_definition = NULL; is_defining_function = false;
-            if (block_stack_top_bf >=0 && peek_block_bf() && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF) pop_block_bf();
+            if (block_stack_top_bf >=0 && peek_block_bf() && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF) {
+                pop_block_bf();
+            }
         }
-    } else if (restore_context) { // Restore context for normal nested script execution
+    } else if (restore_context) { 
         current_exec_state = outer_exec_state_backup;
         while(block_stack_top_bf > outer_block_stack_top_bf_backup) {
             BlockFrame* bf = pop_block_bf();
@@ -2389,21 +2492,19 @@ void execute_script(const char *filename, bool is_import_call, bool is_startup_s
         }
     }
 
-    // For startup script, its state changes (vars, functions) persist.
-    // Ensure execution state and block stack are clean for subsequent interactive session.
     if (is_startup_script) {
         current_exec_state = STATE_NORMAL;
-        while(block_stack_top_bf > -1) { pop_block_bf(); } // Clear any blocks opened by startup script
+        while(block_stack_top_bf > -1) { 
+             BlockFrame* bf = pop_block_bf();
+             if (bf && bf->type == BLOCK_TYPE_FUNCTION_DEF && is_defining_function) {
+                fprintf(stderr, "Warning: Startup script ended with unterminated function definition.\n");
+                if(current_function_definition) {
+                    for(int i=0; i < current_function_definition->line_count; ++i) if(current_function_definition->body[i]) free(current_function_definition->body[i]);
+                    free(current_function_definition); current_function_definition = NULL;
+                }
+                is_defining_function = false;
+             }
+        }
     }
-}
-
-// Helper to check if FILE* is a regular file (and not stdin etc.)
-// This is a simple check; a more robust one might involve fstat.
-bool input_source_is_file(FILE* f) {
-    if (!f || f == stdin || f == stdout || f == stderr) return false;
-    // A simple heuristic: if fileno() is valid and not one of the standard streams.
-    int fd = fileno(f);
-    if (fd == -1) return false; // Error or not a stream with a descriptor
-    return (fd != STDIN_FILENO && fd != STDOUT_FILENO && fd != STDERR_FILENO);
 }
 

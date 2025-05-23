@@ -224,6 +224,59 @@ register_operator_handler "." "" "INTEGER" "bsh_decimal_constructor_handler"
 
 echo "Number Framework operator handlers registered."
 
+# --- BSH Unary Operator Handlers ---
+# These functions are called by the C core for $var++, ++$var, etc.
+
+# BSH Function Signature: handler_name (var_to_modify_name_str, result_holder_var_name_str)
+# - var_to_modify_name_str: The name of the variable (e.g., "myCounter") as a string.
+# - result_holder_var_name_str: The name of a temporary BSH variable (e.g., "__TEMP_UNARY_OP_EXPR_RES")
+#                               where this function should store the "value of the expression".
+
+function __bsh_postfix_increment (target_var_name_str result_holder_var_name) {
+    # Get the current value of the variable whose name is in target_var_name_str
+    $original_value = $($target_var_name_str)
+
+    # Perform increment (using existing math_add or a C lib call directly if preferred)
+    math_add "$original_value" "1" __temp_inc_new_val # math_add stores result in its 3rd arg var name
+
+    # Update the original variable itself using its name
+    $($target_var_name_str) = $__temp_inc_new_val
+
+    # For postfix, the "result of the expression" is the original value
+    $($result_holder_var_name) = "$original_value"
+
+    # Optional: echo for debugging or if standalone ops should print
+    # echo "Postfix Inc: Variable '$target_var_name_str' was '$original_value', now '$($target_var_name_str)'. Expression value: '$original_value'."
+}
+
+function __bsh_prefix_increment (target_var_name_str result_holder_var_name) {
+    $original_value = $($target_var_name_str)
+    math_add "$original_value" "1" __temp_inc_new_val
+    $($target_var_name_str) = $__temp_inc_new_val
+
+    # For prefix, the "result of the expression" is the new value
+    $($result_holder_var_name) = "$__temp_inc_new_val"
+
+    # Optional: echo
+    # echo "Prefix Inc: Variable '$target_var_name_str' was '$original_value', now '$($target_var_name_str)'. Expression value: '$($target_var_name_str)'."
+}
+
+function __bsh_postfix_decrement (target_var_name_str result_holder_var_name) {
+    $original_value = $($target_var_name_str)
+    math_sub "$original_value" "1" __temp_dec_new_val
+    $($target_var_name_str) = $__temp_dec_new_val
+    $($result_holder_var_name) = "$original_value"
+}
+
+function __bsh_prefix_decrement (target_var_name_str result_holder_var_name) {
+    $original_value = $($target_var_name_str)
+    math_sub "$original_value" "1" __temp_dec_new_val
+    $($target_var_name_str) = $__temp_dec_new_val
+    $($result_holder_var_name) = "$__temp_dec_new_val"
+}
+
+echo "Unary operator BSH handlers (__bsh_postfix_increment, etc.) defined."
+
 echo "Number Framework loaded. '-' before digits may now be tokenized as part of a number by bsh.c."
 echo "The '.' operator can be used in 'calc' for decimal construction (e.g., calc var1 \".\" var2 result)."
 # --- Example Usage Update ---
