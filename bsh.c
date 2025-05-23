@@ -248,6 +248,7 @@ void handle_calllib_statement(Token *tokens, int num_tokens);
 void handle_import_statement(Token *tokens, int num_tokens);
 void handle_update_cwd_statement(Token *tokens, int num_tokens);
 void handle_unary_op_statement(Token* var_token, Token* op_token, bool is_prefix); // For ++$var, $var++
+void handle_exit_statement(Token *tokens, int num_tokens);
 
 // Block Management (for if/while etc.)
 void push_block_bf(BlockType type, bool condition_true, long loop_start_fpos, int loop_start_line_no);
@@ -275,7 +276,9 @@ bool invoke_bsh_unary_op_call(const char* func_name_to_call, // For unary ops li
                                 char* c_result_buffer, size_t c_result_buffer_size);
 bool is_comparison_or_assignment_operator(const char* op_str);
 
+// object: management
 void parse_and_flatten_bsh_object_string(const char* data_string, const char* base_var_name, const char* data_type_prefix, int current_scope_id);
+bool stringify_bsh_object_to_string(const char* base_var_name, char* output_buffer, size_t buffer_size);
 
 // --- Main ---
 int main(int argc, char *argv[]) {
@@ -571,7 +574,9 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
         } else if (strcmp(command_name, "defoperator") == 0) {
             handle_defoperator_statement(tokens, num_tokens);
         } else if (strcmp(command_name, "update_cwd") == 0) {
-            handle_update_cwd_statement(tokens, num_tokens);
+            handle_update_cwd_statement(tokens, num_tokens);        
+        } else if (strcmp(command_name, "exit") == 0) {
+            handle_exit_statement(tokens, num_tokens);
         }
         else {            
             UserFunction* func_to_run = function_list;
@@ -2045,25 +2050,6 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
     else set_variable_scoped(base_var_name, value_to_set, false);
 }
 
-void handle_echo_advanced(Token *tokens, int num_tokens) {
-    // ... (remains the same)
-    if (current_exec_state == STATE_BLOCK_SKIP) return;
-    char expanded_arg[INPUT_BUFFER_SIZE];
-    for (int i = 1; i < num_tokens; i++) {
-        if (tokens[i].type == TOKEN_COMMENT) break; 
-
-        if (tokens[i].type == TOKEN_STRING) {
-            char unescaped_val[INPUT_BUFFER_SIZE];
-            unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
-            expand_variables_in_string_advanced(unescaped_val, expanded_arg, sizeof(expanded_arg));
-        } else {
-            expand_variables_in_string_advanced(tokens[i].text, expanded_arg, sizeof(expanded_arg));
-        }
-        printf("%s%s", expanded_arg, (i == num_tokens - 1 || (i+1 < num_tokens && tokens[i+1].type == TOKEN_COMMENT) ) ? "" : " ");
-    }
-    printf("\n");
-}
-
 bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, Token* operand2_token) {
     // ... (remains the same)
     if (!operand1_token || !operator_token || !operand2_token) return false;
@@ -2762,6 +2748,47 @@ void handle_closing_brace_token(Token token, FILE* input_source) {
     }
 }
 
+void handle_exit_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) {
+         // If skipping, an exit within that block context might also be skipped,
+         // or it might immediately terminate the script. Forcing termination is common.
+    }
+
+    // For now, 'exit' without args means exit current script/function with status 0.
+    // If it's the main interactive shell, it exits the shell.
+    // A more advanced 'exit' could take a status code.
+    // And distinguish between exiting a function vs. exiting the whole script.
+
+    // This simple version sets the return request state,
+    // which will stop current script/function processing.
+    // If called from the top-level interactive loop, main() would handle it.
+    bsh_last_return_value[0] = '\0'; // 'exit' itself doesn't set a printable return value here
+    bsh_return_value_is_set = false; // 'exit' is about termination status, not typical 'return value' for echo
+
+    if (num_tokens > 1) { // exit <status_code>
+        char expanded_status[INPUT_BUFFER_SIZE];
+        expand_variables_in_string_advanced(tokens[1].text, expanded_status, sizeof(expanded_status));
+        long exit_code = strtol(expanded_status, NULL, 10);
+        // Store this exit_code somewhere if the shell needs to propagate it as actual process exit status.
+        // For now, we'll just use it to signal return.
+        snprintf(bsh_last_return_value, sizeof(bsh_last_return_value), "%ld", exit_code);
+        bsh_return_value_is_set = true; // For script result capture
+    }
+
+    current_exec_state = STATE_RETURN_REQUESTED; // Use the same state to stop execution
+                                                 // The main loop or script executor needs to check this
+                                                 // and decide if it's a full shell exit or script/func exit.
+
+    // If this is the top-level interactive shell, the main loop in main()
+    // would see STATE_RETURN_REQUESTED and then decide to actually exit the bsh process.
+    // If in a script, execute_script() would stop.
+    // If in a function, execute_user_function() would stop.
+}
+
+/////
+/////
+/////
+
 // --- Utility Implementations ---
 // ... (trim_whitespace, free_function_list, free_operator_list, free_loaded_libs, get_file_pos, unescape_string, input_source_is_file remain the same)
 char* trim_whitespace(char *str) {
@@ -3050,4 +3077,250 @@ void parse_and_flatten_bsh_object_string(const char* object_data_string, const c
         fprintf(stderr, "BSH Object Parse Warning: Extra characters found after main object structure. At: %s\n", p);
     }
     fprintf(stdout, "[BSH_DEBUG] Flattening complete for base var '%s'.\n", base_var_name);
+}
+
+/// Stringify object
+
+// Helper for stringification: find all variables prefixed by base_var_name_
+// This is a conceptual helper, actual iteration would be over variable_list_head.
+typedef struct VarPair { char key[MAX_VAR_NAME_LEN]; char* value; char type_info[MAX_VAR_NAME_LEN]; struct VarPair* next; } VarPair;
+
+// Recursive helper
+bool build_object_string_recursive(const char* current_base_name, char** p_out, size_t* remaining_size, int scope_id) {
+    char prefix_pattern[MAX_VAR_NAME_LEN * 2];
+    snprintf(prefix_pattern, sizeof(prefix_pattern), "%s_", current_base_name);
+    size_t prefix_len = strlen(prefix_pattern);
+
+    VarPair* pairs_head = NULL;
+    VarPair* pairs_tail = NULL;
+    int element_count = 0;
+
+    // Step 1: Collect all direct children of current_base_name in the current scope
+    Variable* var_node = variable_list_head;
+    while (var_node) {
+        if (var_node->scope_id == scope_id && strncmp(var_node->name, prefix_pattern, prefix_len) == 0) {
+            const char* sub_key_full = var_node->name + prefix_len;
+            // Ensure this is a direct child, not a grandchild (e.g., base_key1_subkey vs base_key1)
+            if (strchr(sub_key_full, '_') == NULL || 
+                (strstr(sub_key_full, "_BSH_STRUCT_TYPE") != NULL && strchr(sub_key_full, '_') == strstr(sub_key_full, "_BSH_STRUCT_TYPE")) ) {
+                
+                char actual_key[MAX_VAR_NAME_LEN];
+                strncpy(actual_key, sub_key_full, sizeof(actual_key)-1);
+                actual_key[sizeof(actual_key)-1] = '\0';
+                
+                char* type_suffix_ptr = strstr(actual_key, "_BSH_STRUCT_TYPE");
+                if (type_suffix_ptr) { // It's a type variable for a sub-object, not a direct value itself (unless it's the root)
+                    *type_suffix_ptr = '\0'; // Get the key name before "_BSH_STRUCT_TYPE"
+                }
+
+                // Avoid adding duplicates if we process type var and value var separately
+                bool key_already_added = false;
+                for(VarPair* vp = pairs_head; vp; vp = vp->next) { if(strcmp(vp->key, actual_key) == 0) {key_already_added = true; break;}}
+                if(key_already_added && !type_suffix_ptr) continue; // If value var and key is added from type, skip
+                if(key_already_added && type_suffix_ptr) { // Update type if key exists
+                     for(VarPair* vp = pairs_head; vp; vp = vp->next) { if(strcmp(vp->key, actual_key) == 0) { strncpy(vp->type_info, var_node->value, sizeof(vp->type_info)-1); break;}}
+                     continue;
+                }
+
+
+                VarPair* new_pair = (VarPair*)malloc(sizeof(VarPair));
+                if (!new_pair) { /* error */ return false; }
+                strncpy(new_pair->key, actual_key, sizeof(new_pair->key)-1);
+                new_pair->key[sizeof(new_pair->key)-1] = '\0';
+                new_pair->value = NULL; // Will be filled if it's a direct value
+                new_pair->type_info[0] = '\0'; // Default no specific type
+                new_pair->next = NULL;
+
+                if (type_suffix_ptr) { // This was a *_BSH_STRUCT_TYPE variable
+                    strncpy(new_pair->type_info, var_node->value, sizeof(new_pair->type_info)-1);
+                } else { // This is a direct value variable
+                    new_pair->value = var_node->value;
+                }
+                
+                if (!pairs_head) pairs_head = pairs_tail = new_pair;
+                else { pairs_tail->next = new_pair; pairs_tail = new_pair; }
+                element_count++;
+            }
+        }
+        var_node = var_node->next;
+    }
+    
+    // Step 1b: For keys found via _BSH_STRUCT_TYPE, find their actual value if they are simple
+    // (This logic might need refinement if a key is ONLY defined by its _BSH_STRUCT_TYPE but has no direct value, implying it's purely a container)
+    for(VarPair* vp = pairs_head; vp; vp = vp->next) {
+        if (vp->value == NULL && strlen(vp->type_info) == 0) { // No value and no type, try to get direct value
+             char direct_value_var_name[MAX_VAR_NAME_LEN *2];
+             snprintf(direct_value_var_name, sizeof(direct_value_var_name), "%s_%s", current_base_name, vp->key);
+             vp->value = get_variable_scoped(direct_value_var_name); // Relies on correct scope
+        }
+    }
+
+
+    // Step 2: Append '['
+    if (*remaining_size < 2) return false;
+    **p_out = '['; (*p_out)++; (*remaining_size)--;
+
+    // Step 3: Iterate through collected pairs and stringify them
+    // TODO: Sort pairs if necessary (e.g., numeric keys for array-like objects)
+    bool first = true;
+    VarPair* current_pair = pairs_head;
+    while (current_pair) {
+        if (!first) {
+            if (*remaining_size < 2) { /* free VarPairs */ return false; }
+            **p_out = ','; (*p_out)++;
+            **p_out = ' '; (*p_out)++; // Optional space
+            (*remaining_size) -= 2;
+        }
+        first = false;
+
+        // Append key (quoted)
+        if (*remaining_size < strlen(current_pair->key) + 3) { /* free VarPairs */ return false; }
+        **p_out = '"'; (*p_out)++; (*remaining_size)--;
+        strcpy(*p_out, current_pair->key); (*p_out) += strlen(current_pair->key); (*remaining_size) -= strlen(current_pair->key);
+        **p_out = '"'; (*p_out)++; (*remaining_size)--;
+
+        // Append ':'
+        if (*remaining_size < 2) { /* free VarPairs */ return false; }
+        **p_out = ':'; (*p_out)++;
+        **p_out = ' '; (*p_out)++; // Optional space
+        (*remaining_size) -= 2;
+
+        // Append value
+        char next_level_base_name[MAX_VAR_NAME_LEN * 2];
+        snprintf(next_level_base_name, sizeof(next_level_base_name), "%s_%s", current_base_name, current_pair->key);
+
+        if (strcmp(current_pair->type_info, "BSH_OBJECT") == 0 || strcmp(current_pair->type_info, "BSH_OBJECT_ROOT") == 0) { // It's a nested object
+            if (!build_object_string_recursive(next_level_base_name, p_out, remaining_size, scope_id)) {
+                 /* free VarPairs */ return false;
+            }
+        } else if (current_pair->value) { // Simple string value
+            if (*remaining_size < strlen(current_pair->value) + 3) { /* free VarPairs */ return false; }
+            **p_out = '"'; (*p_out)++; (*remaining_size)--;
+            // TODO: Escape special characters in current_pair->value before strcpy
+            strcpy(*p_out, current_pair->value);
+            (*p_out) += strlen(current_pair->value);
+            (*remaining_size) -= strlen(current_pair->value);
+            **p_out = '"'; (*p_out)++; (*remaining_size)--;
+        } else { // Should have a value or be a known container type
+            if (*remaining_size < 3) { /* free VarPairs */ return false; }
+            strcpy(*p_out, "\"\""); (*p_out) += 2; (*remaining_size) -=2; // Empty string if no value found
+        }
+        current_pair = current_pair->next;
+    }
+
+    // Step 4: Append ']'
+    if (*remaining_size < 2) { /* free VarPairs */ return false; }
+    **p_out = ']'; (*p_out)++; (*remaining_size)--;
+    **p_out = '\0';
+
+    // Free the collected VarPair list
+    current_pair = pairs_head;
+    while(current_pair) {
+        VarPair* next = current_pair->next;
+        free(current_pair);
+        current_pair = next;
+    }
+    return true;
+}
+
+
+bool stringify_bsh_object_to_string(const char* base_var_name, char* output_buffer, size_t buffer_size) {
+    output_buffer[0] = '\0';
+    if (buffer_size < strlen("object:[]") + 1) return false; // Min possible output
+
+    strcpy(output_buffer, "object:");
+    char* p_out = output_buffer + strlen("object:");
+    size_t remaining_size = buffer_size - strlen("object:") -1 /* for null terminator */;
+    
+    int current_scope = (scope_stack_top >= 0) ? scope_stack[scope_stack_top].scope_id : GLOBAL_SCOPE_ID;
+
+    if (!build_object_string_recursive(base_var_name, &p_out, &remaining_size, current_scope)) {
+        // Append error marker if something went wrong during build
+        strcat(output_buffer, "[ERROR_DURING_STRINGIFY]");
+        return false;
+    }
+    
+    return true;
+}
+
+// echo definition moved here for helpers
+
+void handle_echo_advanced(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    char expanded_arg_buffer[INPUT_BUFFER_SIZE]; // Buffer for general argument expansion
+    char object_stringified_buffer[INPUT_BUFFER_SIZE * 2]; // Potentially larger for object stringification
+
+    for (int i = 1; i < num_tokens; i++) {
+        if (tokens[i].type == TOKEN_COMMENT) break;
+
+        const char* string_to_print = NULL;
+        bool is_bsh_object_to_stringify = false;
+
+        // First, determine if the argument is a variable that might be a BSH object
+        if (tokens[i].type == TOKEN_VARIABLE) {
+            char var_name_raw[MAX_VAR_NAME_LEN];
+            // Extract clean variable name (without '$' or '${}')
+            // This part needs to be robust as in handle_assignment_advanced or handle_unary_op_statement
+            if (tokens[i].text[0] == '$') {
+                if (tokens[i].text[1] == '{') {
+                    const char* end_brace = strchr(tokens[i].text + 2, '}');
+                    if (end_brace) {
+                        size_t len = end_brace - (tokens[i].text + 2);
+                        if (len < MAX_VAR_NAME_LEN) {
+                            strncpy(var_name_raw, tokens[i].text + 2, len);
+                            var_name_raw[len] = '\0';
+                        } else { /* var name too long, handle error or truncate */ var_name_raw[0] = '\0'; }
+                    } else { /* malformed */ var_name_raw[0] = '\0'; }
+                } else {
+                    // Simple $var or $var[index] - for echo, we care about the base var for type check
+                    char* bracket_ptr = strchr(tokens[i].text + 1, '[');
+                    if (bracket_ptr) {
+                        size_t base_len = bracket_ptr - (tokens[i].text + 1);
+                        if (base_len < MAX_VAR_NAME_LEN) {
+                            strncpy(var_name_raw, tokens[i].text + 1, base_len);
+                            var_name_raw[base_len] = '\0';
+                        } else { var_name_raw[0] = '\0';}
+                    } else {
+                        strncpy(var_name_raw, tokens[i].text + 1, MAX_VAR_NAME_LEN - 1);
+                        var_name_raw[MAX_VAR_NAME_LEN - 1] = '\0';
+                    }
+                }
+
+                if (strlen(var_name_raw) > 0) {
+                    char object_type_var_name[MAX_VAR_NAME_LEN + 30];
+                    snprintf(object_type_var_name, sizeof(object_type_var_name), "%s_BSH_STRUCT_TYPE", var_name_raw);
+                    char* struct_type = get_variable_scoped(object_type_var_name);
+
+                    if (struct_type && strcmp(struct_type, "BSH_OBJECT_ROOT") == 0) {
+                        // It's a BSH object, attempt to stringify it
+                        if (stringify_bsh_object_to_string(var_name_raw, object_stringified_buffer, sizeof(object_stringified_buffer))) {
+                            string_to_print = object_stringified_buffer;
+                            is_bsh_object_to_stringify = true;
+                        } else {
+                            // Stringification failed, print an error marker or the raw variable token
+                            snprintf(expanded_arg_buffer, sizeof(expanded_arg_buffer), "[Error stringifying object: %s]", var_name_raw);
+                            string_to_print = expanded_arg_buffer;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!is_bsh_object_to_stringify) {
+            // Not a BSH object or not a variable, so expand normally
+            if (tokens[i].type == TOKEN_STRING) {
+                char unescaped_val[INPUT_BUFFER_SIZE];
+                unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
+                expand_variables_in_string_advanced(unescaped_val, expanded_arg_buffer, sizeof(expanded_arg_buffer));
+            } else {
+                expand_variables_in_string_advanced(tokens[i].text, expanded_arg_buffer, sizeof(expanded_arg_buffer));
+            }
+            string_to_print = expanded_arg_buffer;
+        }
+
+        printf("%s%s", string_to_print,
+               (i == num_tokens - 1 || (i + 1 < num_tokens && tokens[i + 1].type == TOKEN_COMMENT)) ? "" : " ");
+    }
+    printf("\n");
 }
