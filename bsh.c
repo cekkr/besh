@@ -230,6 +230,7 @@ int execute_external_command(char *command_path, char **args, int arg_count, cha
 void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context);
 
 // Built-in Commands & Operation Handlers
+void handle_defoperator_statement(Token *tokens, int num_tokens) 
 void handle_defkeyword_statement(Token *tokens, int num_tokens);
 void handle_assignment_advanced(Token *tokens, int num_tokens);
 void handle_echo_advanced(Token *tokens, int num_tokens);
@@ -346,6 +347,86 @@ int main(int argc, char *argv[]) {
 
 // --- Core Implementations ---
 
+// bsh.c (snippet)
+
+// MODIFIED/RENAMED from invoke_bsh_function_for_op
+// Can now be used for binary (op1, op2, op_str), 
+// prefix (var_name, op_str, "prefix"), 
+// or postfix (var_name, op_str, "postfix") calls to BSH __dynamic_op_handler.
+bool invoke_bsh_dynamic_op_handler(
+    const char* bsh_func_name_to_call, // Should be "__dynamic_op_handler"
+    const char* arg1_val_or_var_name,  // For binary: operand1 value. For unary: variable name.
+    const char* arg2_val_or_op_str,    // For binary: operand2 value. For unary prefix/postfix: operator string.
+    const char* arg3_op_str_or_context,// For binary: operator string. For unary: "prefix" or "postfix" or type.
+    const char* bsh_result_var_name,   // BSH variable where the BSH handler should store its result.
+    char* c_result_buffer, size_t c_result_buffer_size) {
+
+    UserFunction* func = function_list;
+    while (func) {
+        if (strcmp(func->name, bsh_func_name_to_call) == 0) break;
+        func = func->next;
+    }
+    if (!func) {
+        fprintf(stderr, "Error: BSH internal handler function '%s' not found.\n", bsh_func_name_to_call);
+        snprintf(c_result_buffer, c_result_buffer_size, "NO_HANDLER_ERROR");
+        return false;
+    }
+
+    // __dynamic_op_handler is expected to handle various argument counts or use placeholders.
+    // Let's assume it expects 4 arguments: (arg1, arg2, arg3/op, result_var_name)
+    // For unary: arg1=var_name, arg2=op_str, arg3="prefix"/"postfix", result_var_name
+    // For binary: arg1=val1, arg2=val2, arg3=op_str, result_var_name
+    if (func->param_count != 4) {
+         fprintf(stderr, "Error: BSH function '%s' has incorrect param count (expected 4, got %d) for dynamic op handling.\n", bsh_func_name_to_call, func->param_count);
+         snprintf(c_result_buffer, c_result_buffer_size, "HANDLER_PARAM_ERROR");
+        return false;
+    }
+
+    Token call_tokens[4];
+    char token_storage_arg1[INPUT_BUFFER_SIZE];
+    char token_storage_arg2[INPUT_BUFFER_SIZE];
+    char token_storage_arg3[INPUT_BUFFER_SIZE]; // op_str or context
+    char token_storage_arg4_res_var[MAX_VAR_NAME_LEN];
+
+    // Argument 1
+    strncpy(token_storage_arg1, arg1_val_or_var_name, INPUT_BUFFER_SIZE -1); token_storage_arg1[INPUT_BUFFER_SIZE-1] = '\0';
+    call_tokens[0].type = TOKEN_STRING; // Pass as string, BSH handler will know if it's a var name or value
+    call_tokens[0].text = token_storage_arg1;
+    call_tokens[0].len = strlen(token_storage_arg1);
+
+    // Argument 2
+    strncpy(token_storage_arg2, arg2_val_or_op_str, INPUT_BUFFER_SIZE -1); token_storage_arg2[INPUT_BUFFER_SIZE-1] = '\0';
+    call_tokens[1].type = TOKEN_STRING;
+    call_tokens[1].text = token_storage_arg2;
+    call_tokens[1].len = strlen(token_storage_arg2);
+    
+    // Argument 3
+    strncpy(token_storage_arg3, arg3_op_str_or_context, INPUT_BUFFER_SIZE -1); token_storage_arg3[INPUT_BUFFER_SIZE-1] = '\0';
+    call_tokens[2].type = TOKEN_STRING;
+    call_tokens[2].text = token_storage_arg3;
+    call_tokens[2].len = strlen(token_storage_arg3);
+
+    // Argument 4 (result holder variable name)
+    strncpy(token_storage_arg4_res_var, bsh_result_var_name, MAX_VAR_NAME_LEN -1); token_storage_arg4_res_var[MAX_VAR_NAME_LEN-1] = '\0';
+    call_tokens[3].type = TOKEN_WORD; // Name of variable to set
+    call_tokens[3].text = token_storage_arg4_res_var;
+    call_tokens[3].len = strlen(token_storage_arg4_res_var);
+
+    execute_user_function(func, call_tokens, 4, NULL);
+
+    char* result_from_bsh = get_variable_scoped(bsh_result_var_name);
+    if (result_from_bsh) {
+        strncpy(c_result_buffer, result_from_bsh, c_result_buffer_size - 1);
+        c_result_buffer[c_result_buffer_size - 1] = '\0';
+    } else {
+        snprintf(c_result_buffer, c_result_buffer_size, "OP_HANDLER_NO_RESULT_VAR<%s>", bsh_result_var_name);
+        // This might be an error or might be acceptable if the operation has side effects only
+        // and doesn't produce a distinct "expression value" (e.g. some BSH handler designs).
+        // For typical math ops or assignments, a result is expected.
+    }
+    return true;
+}
+
 void process_line(char *line_raw, FILE *input_source, int current_line_no, ExecutionState exec_mode_param) {
     char line[MAX_LINE_LENGTH];
     strncpy(line, line_raw, MAX_LINE_LENGTH -1);
@@ -434,7 +515,7 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
             if (!current_block) { // Should not happen if LBRACE follows a skipped if/while/defunc
                  fprintf(stderr, "Syntax error: Unmatched '{' on line %d while skipping.\n", current_line_no);
             }
-        }
+        }        
         return;
     }
 
@@ -483,10 +564,12 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
             handle_calllib_statement(tokens, num_tokens);
         } else if (strcmp(command_name, "import") == 0) {
             handle_import_statement(tokens, num_tokens);
+        } else if (strcmp(command_name, "defoperator") == 0) {
+            handle_defoperator_statement(tokens, num_tokens);
         } else if (strcmp(command_name, "update_cwd") == 0) {
             handle_update_cwd_statement(tokens, num_tokens);
         }
-        else {
+        else {            
             UserFunction* func_to_run = function_list;
             bool found_user_func = false;
             while(func_to_run) {
@@ -544,35 +627,165 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                             set_variable_scoped("LAST_OP_RESULT", "STANDALONE_OP_ERROR", false);
                         }
                 } else {
-                    // External command
-                    char command_path[MAX_FULL_PATH_LEN];
-                    if (find_command_in_path_dynamic(command_name, command_path)) {
-                        char *args[MAX_ARGS + 1];
-                        char expanded_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
-                        args[0] = command_path; 
-                        int arg_count = 1;
-
-                        for (int i = 1; i < num_tokens; ++i) {
-                            if (tokens[i].type == TOKEN_COMMENT) break; 
-                            if (arg_count < MAX_ARGS) {
-                                if (tokens[i].type == TOKEN_STRING) {
-                                    char unescaped_val[INPUT_BUFFER_SIZE];
-                                    unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
-                                    expand_variables_in_string_advanced(unescaped_val, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
-                                } else {
-                                    expand_variables_in_string_advanced(tokens[i].text, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
-                                }
-                                args[arg_count++] = expanded_args_storage[arg_count-1];
+                    // New: Check for standalone unary prefix operations: e.g., ++$var or --$var
+                    if (num_tokens == 2 &&
+                        tokens[0].type == TOKEN_OPERATOR &&
+                        (strcmp(tokens[0].text, "++") == 0 || strcmp(tokens[0].text, "--") == 0) &&
+                        tokens[1].type == TOKEN_VARIABLE) {
+                        
+                        char var_name_clean[MAX_VAR_NAME_LEN];
+                        // Extract clean variable name from tokens[1].text (e.g., "$myvar" -> "myvar")
+                        // This logic needs to be robust for $var, ${var}
+                        if (tokens[1].text[0] == '$') {
+                            if (tokens[1].text[1] == '{') {
+                                const char* end_brace = strchr(tokens[1].text + 2, '}');
+                                if (end_brace && (end_brace - (tokens[1].text + 2) < MAX_VAR_NAME_LEN)) {
+                                    strncpy(var_name_clean, tokens[1].text + 2, end_brace - (tokens[1].text + 2));
+                                    var_name_clean[end_brace - (tokens[1].text + 2)] = '\0';
+                                } else { /* error or malformed */ strcpy(var_name_clean, ""); }
                             } else {
-                                fprintf(stderr, "Warning: Too many arguments for command '%s'. Max %d allowed.\n", command_name, MAX_ARGS);
-                                break;
+                                strncpy(var_name_clean, tokens[1].text + 1, MAX_VAR_NAME_LEN - 1);
+                                var_name_clean[MAX_VAR_NAME_LEN - 1] = '\0';
                             }
-                        }
-                        args[arg_count] = NULL; 
+                            // Note: Array element unary ops like ++$arr[idx] are complex to parse here simply.
+                            // The BSH __dynamic_op_handler would need to handle var_name_clean if it's "arr[idx]".
+                        } else { strcpy(var_name_clean, ""); /* Should not happen if TOKEN_VARIABLE */ }
 
-                        execute_external_command(command_path, args, arg_count, NULL, 0); 
+
+                        if (strlen(var_name_clean) > 0) {
+                            char result_c_buffer[INPUT_BUFFER_SIZE];
+                            const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES";
+                            
+                            // Call BSH __dynamic_op_handler: (var_name, op_str, "prefix", result_holder)
+                            if (invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                                        var_name_clean,         // Variable Name
+                                                        tokens[0].text,         // Operator "++" or "--"
+                                                        "prefix",               // Context
+                                                        temp_bsh_result_var,
+                                                        result_c_buffer, sizeof(result_c_buffer))) {
+                                if (strlen(result_c_buffer) > 0 && strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0) {
+                                    printf("%s\n", result_c_buffer); // Print result of standalone prefix op
+                                }
+                                set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
+                            } else {
+                                fprintf(stderr, "Error executing standalone prefix operation for: %s %s\n", tokens[0].text, var_name_clean);
+                                set_variable_scoped("LAST_OP_RESULT", "STANDALONE_OP_ERROR", false);
+                            }
+                        } else {
+                            fprintf(stderr, "Error: Malformed variable for prefix operation: %s\n", tokens[1].text);
+                        }
+
+                    } // Check for standalone unary postfix operations: e.g., $var++ or $var--
+                    else if (num_tokens == 2 &&
+                            tokens[0].type == TOKEN_VARIABLE &&
+                            tokens[1].type == TOKEN_OPERATOR &&
+                            (strcmp(tokens[1].text, "++") == 0 || strcmp(tokens[1].text, "--") == 0)) {
+
+                        char var_name_clean[MAX_VAR_NAME_LEN];
+                        // Extract clean variable name from tokens[0].text
+                        if (tokens[0].text[0] == '$') {
+                            if (tokens[0].text[1] == '{') {
+                                // Similar to prefix block
+                                const char* end_brace = strchr(tokens[0].text + 2, '}');
+                                if (end_brace && (end_brace - (tokens[0].text + 2) < MAX_VAR_NAME_LEN)) {
+                                    strncpy(var_name_clean, tokens[0].text + 2, end_brace - (tokens[0].text + 2));
+                                    var_name_clean[end_brace - (tokens[0].text + 2)] = '\0';
+                                } else { strcpy(var_name_clean, ""); }
+                            } else {
+                                strncpy(var_name_clean, tokens[0].text + 1, MAX_VAR_NAME_LEN - 1);
+                                var_name_clean[MAX_VAR_NAME_LEN - 1] = '\0';
+                            }
+                        } else { strcpy(var_name_clean, "");}
+
+                        if (strlen(var_name_clean) > 0) {
+                            char result_c_buffer[INPUT_BUFFER_SIZE];
+                            const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES";
+
+                            // Call BSH __dynamic_op_handler: (var_name, op_str, "postfix", result_holder)
+                            if (invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                                        var_name_clean,         // Variable Name
+                                                        tokens[1].text,         // Operator "++" or "--"
+                                                        "postfix",              // Context
+                                                        temp_bsh_result_var,
+                                                        result_c_buffer, sizeof(result_c_buffer))) {
+                                if (strlen(result_c_buffer) > 0 && strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0) {
+                                    printf("%s\n", result_c_buffer); // Print result of standalone postfix op
+                                }
+                                set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
+                            } else {
+                                fprintf(stderr, "Error executing standalone postfix operation for: %s %s\n", var_name_clean, tokens[1].text);
+                                set_variable_scoped("LAST_OP_RESULT", "STANDALONE_OP_ERROR", false);
+                            }
+                        } else {
+                            fprintf(stderr, "Error: Malformed variable for postfix operation: %s\n", tokens[0].text);
+                        }
+                    }
+                    // Standalone dynamic binary operator pattern: val1 op val2 (e.g. 10 + 5 at prompt)
+                    // This was the existing logic.
+                    else if ( (num_tokens == 3 || (num_tokens == 4 && tokens[3].type == TOKEN_COMMENT)) &&
+                        (tokens[0].type == TOKEN_VARIABLE || tokens[0].type == TOKEN_NUMBER || tokens[0].type == TOKEN_STRING || tokens[0].type == TOKEN_WORD) && 
+                        tokens[1].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[1].text) && // keep this check
+                        (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING || tokens[2].type == TOKEN_WORD) 
+                    ) {
+                            char op1_expanded[INPUT_BUFFER_SIZE];
+                            char op2_expanded[INPUT_BUFFER_SIZE];
+                            char result_c_buffer[INPUT_BUFFER_SIZE];
+                            const char* operator_str = tokens[1].text;
+                            const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES"; 
+
+                            // ... (expansion of op1_expanded, op2_expanded as before)
+                            if (tokens[0].type == TOKEN_STRING) { /* ... */ } else { /* ... */ }
+                            expand_variables_in_string_advanced(tokens[0].text, op1_expanded, sizeof(op1_expanded)); // Simplified for snippet
+                            if (tokens[2].type == TOKEN_STRING) { /* ... */ } else { /* ... */ }
+                            expand_variables_in_string_advanced(tokens[2].text, op2_expanded, sizeof(op2_expanded)); // Simplified for snippet
+                            
+                            // Call BSH __dynamic_op_handler: (val1, val2, op_str, result_holder)
+                            if (invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                                        op1_expanded, op2_expanded, operator_str, 
+                                                        temp_bsh_result_var,
+                                                        result_c_buffer, sizeof(result_c_buffer))) {
+                                if (strlen(result_c_buffer) > 0 &&
+                                    strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0 &&
+                                    /* ... other error checks ... */ ) {
+                                    printf("%s\n", result_c_buffer); 
+                                }
+                                set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
+                            } else {
+                                fprintf(stderr, "Error executing standalone dynamic binary operation for: %s %s %s\n", op1_expanded, operator_str, op2_expanded);
+                                set_variable_scoped("LAST_OP_RESULT", "STANDALONE_OP_ERROR", false);
+                            }
                     } else {
-                        fprintf(stderr, "Command not found: %s (line %d)\n", command_name, current_line_no);
+
+                        // External command
+                        char command_path[MAX_FULL_PATH_LEN];
+                        if (find_command_in_path_dynamic(command_name, command_path)) {
+                            char *args[MAX_ARGS + 1];
+                            char expanded_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
+                            args[0] = command_path; 
+                            int arg_count = 1;
+
+                            for (int i = 1; i < num_tokens; ++i) {
+                                if (tokens[i].type == TOKEN_COMMENT) break; 
+                                if (arg_count < MAX_ARGS) {
+                                    if (tokens[i].type == TOKEN_STRING) {
+                                        char unescaped_val[INPUT_BUFFER_SIZE];
+                                        unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
+                                        expand_variables_in_string_advanced(unescaped_val, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
+                                    } else {
+                                        expand_variables_in_string_advanced(tokens[i].text, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
+                                    }
+                                    args[arg_count++] = expanded_args_storage[arg_count-1];
+                                } else {
+                                    fprintf(stderr, "Warning: Too many arguments for command '%s'. Max %d allowed.\n", command_name, MAX_ARGS);
+                                    break;
+                                }
+                            }
+                            args[arg_count] = NULL; 
+
+                            execute_external_command(command_path, args, arg_count, NULL, 0); 
+                        } else {
+                            fprintf(stderr, "Command not found: %s (line %d)\n", command_name, current_line_no);
+                        }
                     }
                 }
             }
@@ -692,23 +905,28 @@ void initialize_module_path() {
 }
 
 // --- Tokenizer & Keyword Aliasing ---
+
 void initialize_operators_dynamic() {
-    // Order for matching: longest first if not using a more complex matching like Trie
-    add_operator_dynamic("++", TOKEN_OPERATOR); // Added for unary ops
-    add_operator_dynamic("--", TOKEN_OPERATOR); // Added for unary ops
-    add_operator_dynamic("==", TOKEN_OPERATOR); add_operator_dynamic("!=", TOKEN_OPERATOR);
-    add_operator_dynamic(">=", TOKEN_OPERATOR); add_operator_dynamic("<=", TOKEN_OPERATOR);
-    add_operator_dynamic("&&", TOKEN_OPERATOR); add_operator_dynamic("||", TOKEN_OPERATOR);
-    add_operator_dynamic("=", TOKEN_ASSIGN);   add_operator_dynamic(">", TOKEN_OPERATOR);
-    add_operator_dynamic("<", TOKEN_OPERATOR);  add_operator_dynamic("+", TOKEN_OPERATOR);
-    add_operator_dynamic("-", TOKEN_OPERATOR);  add_operator_dynamic("*", TOKEN_OPERATOR);
-    add_operator_dynamic("/", TOKEN_OPERATOR);  add_operator_dynamic("%", TOKEN_OPERATOR);
-    add_operator_dynamic("!", TOKEN_OPERATOR);  add_operator_dynamic("(", TOKEN_LPAREN);
-    add_operator_dynamic(")", TOKEN_RPAREN);  add_operator_dynamic("{", TOKEN_LBRACE);
-    add_operator_dynamic("}", TOKEN_RBRACE);  add_operator_dynamic("[", TOKEN_LBRACKET);
-    add_operator_dynamic("]", TOKEN_RBRACKET);add_operator_dynamic(";", TOKEN_SEMICOLON);
-    add_operator_dynamic("|", TOKEN_PIPE);    add_operator_dynamic("&", TOKEN_AMPERSAND);
-    add_operator_dynamic(".", TOKEN_OPERATOR);
+    // Only define absolutely essential structural operators/tokens in C.
+    // All other "operational" symbols (+, *, ++, --, .) will be defined by BSH scripts
+    // using the 'defoperator' built-in command.
+
+    add_operator_dynamic("=", TOKEN_ASSIGN);   // Essential for assignment
+    add_operator_dynamic("(", TOKEN_LPAREN);   // Essential for grouping/syntax
+    add_operator_dynamic(")", TOKEN_RPAREN);
+    add_operator_dynamic("{", TOKEN_LBRACE);   // Essential for blocks
+    add_operator_dynamic("}", TOKEN_RBRACE);
+    add_operator_dynamic("[", TOKEN_LBRACKET); // Essential for array syntax
+    add_operator_dynamic("]", TOKEN_RBRACKET);
+    add_operator_dynamic(";", TOKEN_SEMICOLON); // Command separator
+    add_operator_dynamic("|", TOKEN_PIPE);      // Pipe
+    add_operator_dynamic("&", TOKEN_AMPERSAND);  // Background
+
+    // Note: "!", "&&", "||" could also be here if considered core syntactic elements
+    // for conditions, or they too could be defined by scripts. For now, let's
+    // assume they might be common enough for C, or can be added by init.bsh.
+    // Let's keep it minimal for this example.
+    // Comparison operators like "==" will be defined by scripts via 'defoperator'.
 }
 
 void add_operator_dynamic(const char* op_str, TokenType type) {
@@ -787,140 +1005,185 @@ void free_keyword_alias_list() {
 }
 
 int advanced_tokenize_line(const char *line, Token *tokens, int max_tokens, char *token_storage, size_t storage_size) {
-    int token_count = 0; const char *p = line; char *storage_ptr = token_storage;
+    int token_count = 0;
+    const char *p = line;
+    char *storage_ptr = token_storage;
     size_t remaining_storage = storage_size;
+
     while (*p && token_count < max_tokens) {
-        while (isspace((unsigned char)*p)) p++; 
-        if (!*p) break; 
-        if (*p == '#') {tokens[token_count].type = TOKEN_COMMENT; tokens[token_count].text = p; tokens[token_count].len = strlen(p); token_count++; break;} 
+        while (isspace((unsigned char)*p)) p++; // Skip leading whitespace
+        if (!*p) break; // End of line
 
-         const char *p_original = p; 
+        const char *p_token_start = p; // Mark the beginning of the potential token
 
-        bool is_negative_candidate = false;
-        if (*p == '-') {
-            if (isdigit((unsigned char)*(p + 1))) {
-                is_negative_candidate = true;
-                p++; 
-            }
+        // 1. Handle Comments
+        if (*p == '#') {
+            tokens[token_count].type = TOKEN_COMMENT;
+            tokens[token_count].text = p_token_start; // Store from '#'
+            tokens[token_count].len = strlen(p_token_start);
+            p += tokens[token_count].len; // Consume the rest of the line
+            // No need to copy to token_storage if text points directly to line
+            // but if copying: strncpy(storage_ptr, p_token_start, tokens[token_count].len); ...
+            token_count++;
+            break; // Comment ends line processing for tokens
         }
 
-        if (isdigit((unsigned char)*p)) { 
-            const char *num_val_start = p; 
-            while (isdigit((unsigned char)*p)) {
-                p++; 
-            }
+        // 2. Attempt to Parse as TOKEN_NUMBER (handles negative, positive, float)
+        // This logic needs to be comprehensive.
+        const char *p_after_num_parse = p; // Will be updated if a number is parsed
+        bool is_num = false;
+        // --- BEGIN Number Parsing Logic ---
+        bool is_negative_num = false;
+        const char* p_current_num_char = p;
+        if (*p_current_num_char == '-') {
+            is_negative_num = true;
+            p_current_num_char++;
+        }
 
-            if (p > num_val_start) {
-                tokens[token_count].type = TOKEN_NUMBER;
-                tokens[token_count].text = storage_ptr;
-                tokens[token_count].len = p - p_original;
+        const char* p_num_digits_start = p_current_num_char; // Where digits/decimal point should start
 
-                if (remaining_storage > (size_t)tokens[token_count].len) {
-                    strncpy(storage_ptr, p_original, tokens[token_count].len);
-                    storage_ptr[tokens[token_count].len] = '\0';
-                    storage_ptr += (tokens[token_count].len + 1);
-                    remaining_storage -= (tokens[token_count].len + 1);
-                    token_count++;
-                    continue; 
-                } else {
-                    tokens[token_count].type = TOKEN_ERROR; 
-                    fprintf(stderr, "Tokenizer error: Out of token storage.\n");
-                    break; 
+        // Check for digits before decimal or just decimal point if starting with it (e.g. .5)
+        if (isdigit((unsigned char)*p_current_num_char) || (*p_current_num_char == '.' && isdigit((unsigned char)*(p_current_num_char + 1)))) {
+            if (*p_current_num_char != '.') { // If not starting with '.', consume integer part
+                while (isdigit((unsigned char)*p_current_num_char)) {
+                    p_current_num_char++;
                 }
-            } else if (is_negative_candidate) {
-                p = p_original;
             }
-        } else if (is_negative_candidate) {
-            p = p_original;
+            if (*p_current_num_char == '.') { // Consume decimal and fractional part
+                p_current_num_char++; // Consume '.'
+                while (isdigit((unsigned char)*p_current_num_char)) {
+                    p_current_num_char++;
+                }
+            }
+            // Ensure at least one digit was part of the number structure
+            // (e.g. prevent "-" or "-." from being TOKEN_NUMBER)
+            bool has_digits = false;
+            for (const char* ch = p_num_digits_start; ch < p_current_num_char; ++ch) {
+                if (isdigit((unsigned char)*ch)) { has_digits = true; break; }
+            }
+
+            if (has_digits) {
+                is_num = true;
+                p_after_num_parse = p_current_num_char;
+            }
         }
+        // --- END Number Parsing Logic ---
 
-        tokens[token_count].text = storage_ptr; 
+        if (is_num) {
+            tokens[token_count].type = TOKEN_NUMBER;
+            tokens[token_count].text = storage_ptr;
+            tokens[token_count].len = p_after_num_parse - p_token_start;
+            // ... (copy to storage_ptr, increment storage_ptr, decrement remaining_storage, check bounds) ...
+            strncpy(storage_ptr, p_token_start, tokens[token_count].len);
+            storage_ptr[tokens[token_count].len] = '\0';
+            storage_ptr += (tokens[token_count].len + 1);
+            remaining_storage -= (tokens[token_count].len + 1);
 
-        const char *matched_op_text = NULL; TokenType matched_op_type = TOKEN_OPERATOR; 
+            p = p_after_num_parse;
+            token_count++;
+            continue;
+        }
+        // p remains p_token_start if not a number
+
+        // 3. Attempt to Match Script-Defined Operators
+        const char *matched_op_text = NULL;
+        TokenType matched_op_type = TOKEN_OPERATOR;
         int op_len = match_operator_dynamic(p, &matched_op_text, &matched_op_type);
-
-        if (op_len > 0) { 
-            tokens[token_count].type = matched_op_type;
+        if (op_len > 0) {
+            tokens[token_count].type = matched_op_type; // Type from add_operator_dynamic
+            tokens[token_count].text = storage_ptr;
             tokens[token_count].len = op_len;
-            if (remaining_storage > op_len) {
-                strncpy(storage_ptr, p, op_len); 
-                storage_ptr[op_len] = '\0';
-                storage_ptr += (op_len + 1); 
-                remaining_storage -= (op_len + 1);
-            } else { tokens[token_count].type = TOKEN_ERROR; break; }
-            p += op_len; 
-        } else if (*p == '"') { 
-            tokens[token_count].type = TOKEN_STRING;
-            const char *start = p; 
-            p++; 
-            while (*p && (*p != '"' || (*(p-1) == '\\' && (p-2 < start || *(p-2) != '\\' )))) { 
-                p++;
-            }
-            if (*p == '"') p++; 
-            tokens[token_count].len = p - start;
-            if (remaining_storage > (size_t)tokens[token_count].len) {
-                strncpy(storage_ptr, start, tokens[token_count].len);
-                storage_ptr[tokens[token_count].len] = '\0';
-                storage_ptr += (tokens[token_count].len + 1);
-                remaining_storage -= (tokens[token_count].len + 1);
-            } else { tokens[token_count].type = TOKEN_ERROR; break; }
-        } else if (*p == '$') { 
-            tokens[token_count].type = TOKEN_VARIABLE;
-            const char *start = p; p++; 
-            if (*p == '{') { 
-                p++; 
-                while (*p && *p != '}') { p++; } 
-                if (*p == '}') p++; 
-            } else { 
-                while (isalnum((unsigned char)*p) || *p == '_') p++;
-                if (*p == '[') { 
-                    p++; 
-                    int bracket_depth = 1;
-                    while(*p && bracket_depth > 0) {
-                        if (*p == '[') bracket_depth++; else if (*p == ']') bracket_depth--;
-                        if (bracket_depth == 0 && *(p) == ']') { p++; break; } 
-                        p++;
-                    }
-                }
-            }
-            tokens[token_count].len = p - start;
-            if (remaining_storage > (size_t)tokens[token_count].len) {
-                strncpy(storage_ptr, start, tokens[token_count].len);
-                storage_ptr[tokens[token_count].len] = '\0';
-                storage_ptr += (tokens[token_count].len + 1);
-                remaining_storage -= (tokens[token_count].len + 1);
-            } else { tokens[token_count].type = TOKEN_ERROR; break; }
-        } else { 
-            tokens[token_count].type = TOKEN_WORD;
-            const char *start = p;
-            while (*p && !isspace((unsigned char)*p)) {
-                const char* temp_op_text_check = NULL; TokenType temp_op_type_check;
-                // Check if the current position matches a defined operator.
-                // This ensures that if "++" or "--" are encountered, they are tokenized separately
-                // rather than being absorbed into a word if they are not separated by space.
-                if (match_operator_dynamic(p, &temp_op_text_check, &temp_op_type_check) > 0) break; 
-                if (*p == '"' || *p == '$' || *p == '#') break; 
-                if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-') break; 
-                p++;
-            }
-            tokens[token_count].len = p - start;
-            if (tokens[token_count].len == 0 && *p) { p++; continue; }
-            if (tokens[token_count].len == 0 && !*p) break; 
+            // ... (copy p to storage_ptr for op_len, check bounds, etc.) ...
+            strncpy(storage_ptr, p, op_len);
+            storage_ptr[op_len] = '\0';
+            storage_ptr += (op_len + 1);
+            remaining_storage -= (op_len + 1);
 
-            if (remaining_storage > (size_t)tokens[token_count].len) {
-                strncpy(storage_ptr, start, tokens[token_count].len);
-                storage_ptr[tokens[token_count].len] = '\0';
-                storage_ptr += (tokens[token_count].len + 1);
-                remaining_storage -= (tokens[token_count].len + 1);
-            } else { tokens[token_count].type = TOKEN_ERROR; break; }
+            p += op_len;
+            token_count++;
+            continue;
         }
-        token_count++;
-    }
-    if (token_count < max_tokens) { 
-        tokens[token_count].type = TOKEN_EOF;
-        tokens[token_count].text = "EOF"; 
-        tokens[token_count].len = 3;
-    }
+
+        // 4. Attempt TOKEN_STRING
+        if (*p == '"') {
+            // ... (string tokenization logic similar to original bsh.c, consuming p)
+            // Remember to handle escapes like \" and \\.
+            // Example:
+            const char *start_str = p;
+            p++; // Skip opening quote
+            while (*p && (*p != '"' || (*(p-1) == '\\' && (p-2 < start_str || *(p-2) != '\\')) ) ) { p++; }
+            if (*p == '"') p++; // Skip closing quote
+            
+            tokens[token_count].type = TOKEN_STRING;
+            tokens[token_count].text = storage_ptr;
+            tokens[token_count].len = p - start_str;
+            // ... (copy to storage_ptr, check bounds, etc.) ...
+            token_count++;
+            continue;
+        }
+
+        // 5. Attempt TOKEN_VARIABLE
+        if (*p == '$') {
+            // ... (variable tokenization logic similar to original bsh.c, consuming p) ...
+            // Example:
+            const char *start_var = p;
+            p++; // Skip '$'
+            if (*p == '{') { p++; while (*p && *p != '}') p++; if (*p == '}') p++; }
+            else { while (isalnum((unsigned char)*p) || *p == '_') p++; }
+            // Add array [index] parsing if needed, like in original bsh.c
+            // if (*p == '[') { ... p++; while (*p && *p != ']') { if (*p == '$' ... ) { /* recurse or expand */ } p++; } if (*p == ']') p++; }
+
+
+            tokens[token_count].type = TOKEN_VARIABLE;
+            tokens[token_token_count].text = storage_ptr;
+            tokens[token_count].len = p - start_var;
+            // ... (copy to storage_ptr, check bounds, etc.) ...
+            token_count++;
+            continue;
+        }
+
+        // 6. Fallback to TOKEN_WORD
+        const char *start_word = p_token_start; // Start from where this token attempt began
+        while (*p && !isspace((unsigned char)*p)) {
+            // Word terminates if any other known token type starts
+            if (*p == '#' || *p == '"' || *p == '$' || match_operator_dynamic(p, NULL, NULL) > 0) {
+                break;
+            }
+            // Define characters allowed in a word (e.g., alphanumeric + underscore)
+            // If '-' is not part of numbers or operators, it could be here.
+            // For this example, words are Alphanum and '_'.
+            if (!isalnum((unsigned char)*p) && *p != '_') {
+                break; // Not a valid word character
+            }
+            p++;
+        }
+
+        if (p > start_word) { // A word was formed
+            tokens[token_count].type = TOKEN_WORD;
+            tokens[token_count].text = storage_ptr;
+            tokens[token_count].len = p - start_word;
+            // ... (copy to storage_ptr, check bounds, etc.) ...
+            strncpy(storage_ptr, start_word, tokens[token_count].len);
+            storage_ptr[tokens[token_count].len] = '\0';
+            storage_ptr += (tokens[token_count].len + 1);
+            remaining_storage -= (tokens[token_count].len + 1);
+
+            token_count++;
+            continue;
+        } else {
+            // No token matched, and p didn't advance. This could be an error or an unsupported character.
+            if (*p) { // Avoid infinite loop on unsupported char
+                fprintf(stderr, "Tokenizer error: Unrecognized character or sequence starting with '%c'\n", *p);
+                p++; // Skip it
+            }
+        }
+    } // End while
+
+    tokens[token_count].type = TOKEN_EOF; // Add EOF token
+    tokens[token_count].text = "EOF";
+    tokens[token_count].len = 3;
+    // No storage needed for EOF text typically if it's a static string
+
     return token_count;
 }
 
@@ -1467,6 +1730,60 @@ bool invoke_bsh_unary_op_call(const char* func_name_to_call,
     return true;
 }
 
+void handle_defoperator_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    if (num_tokens != 2 || tokens[1].type != TOKEN_STRING && tokens[1].type != TOKEN_WORD) {
+        // Allow operator to be a quoted string or a simple word if it contains no special chars
+        fprintf(stderr, "Syntax: defoperator <operator_symbol_string>\n");
+        fprintf(stderr, "Example: defoperator \"++\"  OR  defoperator +\n");
+        return;
+    }
+
+    char op_symbol[MAX_OPERATOR_LEN + 1];
+    if (tokens[1].type == TOKEN_STRING) {
+        // Unescape if it's a BSH string literal (e.g., defoperator "\"\\+\\-\"")
+        // For simplicity, let's assume the text field of TOKEN_STRING for operators
+        // would typically not contain complex escapes, or they are literal.
+        // If "++", tokens[1].text is "\"++\"". We need "++".
+        // The existing unescape_string might be too aggressive if not careful.
+        // A simpler approach for operator symbols:
+        size_t len = tokens[1].len;
+        if (tokens[1].text[0] == '"' && tokens[1].text[len-1] == '"' && len >=2) {
+            if (len - 2 > MAX_OPERATOR_LEN) {
+                fprintf(stderr, "Error: Operator symbol in defoperator is too long: %s\n", tokens[1].text);
+                return;
+            }
+            strncpy(op_symbol, tokens[1].text + 1, len - 2);
+            op_symbol[len - 2] = '\0';
+        } else { // Should not happen if TOKEN_STRING, but as a fallback for WORD
+             if (len > MAX_OPERATOR_LEN) {
+                fprintf(stderr, "Error: Operator symbol in defoperator is too long: %s\n", tokens[1].text);
+                return;
+            }
+            strncpy(op_symbol, tokens[1].text, len);
+            op_symbol[len] = '\0';
+        }
+    } else { // TOKEN_WORD
+        if (tokens[1].len > MAX_OPERATOR_LEN) {
+            fprintf(stderr, "Error: Operator symbol in defoperator is too long: %s\n", tokens[1].text);
+            return;
+        }
+        strncpy(op_symbol, tokens[1].text, tokens[1].len);
+        op_symbol[tokens[1].len] = '\0';
+    }
+
+
+    if (strlen(op_symbol) == 0) {
+        fprintf(stderr, "Error: defoperator cannot define an empty operator symbol.\n");
+        return;
+    }
+
+    // For now, all operators defined this way are generic TOKEN_OPERATOR.
+    // If more specific token types were needed from scripts, the command would need another argument.
+    add_operator_dynamic(op_symbol, TOKEN_OPERATOR);
+    // printf("DEBUG: Defined operator '%s'\n", op_symbol); // Optional debug
+}
 
 void handle_assignment_advanced(Token *tokens, int num_tokens) {
     if (num_tokens < 3 || tokens[0].type != TOKEN_VARIABLE || tokens[1].type != TOKEN_ASSIGN) {
@@ -1514,58 +1831,81 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
         }
     }
 
+    // Check for RHS like: $var = ++$op_var  (num_tokens = 4: $var = ++ $op_var)
+    // or $var = $op_var++ (num_tokens = 4: $var = $op_var ++)
+    bool rhs_is_unary_op = false;
+    if (num_tokens == 4 && !is_rhs_command) { // $var = op $op_var OR $var = $op_var op
+        if (tokens[2].type == TOKEN_OPERATOR && (strcmp(tokens[2].text,"++")==0 || strcmp(tokens[2].text,"--")==0) && tokens[3].type == TOKEN_VARIABLE) {
+            // Prefix: $var = ++ $op_var
+            rhs_is_unary_op = true;
+            char op_var_name_clean[MAX_VAR_NAME_LEN];
+            // Extract clean name from tokens[3].text (as in process_line)
+            // ... (extraction logic for op_var_name_clean) ...
+             if (tokens[3].text[0] == '$') { /* ... extract ... */ } else {strcpy(op_var_name_clean, "");}
 
-    if (num_tokens >= 5 && 
-        (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING || tokens[2].type == TOKEN_WORD) &&
-        tokens[3].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[3].text) &&
-        (tokens[4].type == TOKEN_VARIABLE || tokens[4].type == TOKEN_NUMBER || tokens[4].type == TOKEN_STRING || tokens[4].type == TOKEN_WORD) &&
-        (num_tokens == 5 || (num_tokens == 6 && tokens[5].type == TOKEN_COMMENT)) 
-        ) {
-        if (current_exec_state == STATE_BLOCK_SKIP) return; 
 
-        char op1_expanded[INPUT_BUFFER_SIZE];
-        char op2_expanded[INPUT_BUFFER_SIZE];
-        char temp_result_val_c[INPUT_BUFFER_SIZE];
-        const char* operator_str = tokens[3].text;
-        const char* temp_bsh_result_var = "__TEMP_ASSIGN_OP_RES";
+            if (strlen(op_var_name_clean) > 0) {
+                const char* temp_bsh_result_var = "__TEMP_ASSIGN_OP_RES";
+                // Call BSH __dynamic_op_handler: (var_name, op_str, "prefix", result_holder)
+                invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                               op_var_name_clean, tokens[2].text, "prefix",
+                                               temp_bsh_result_var,
+                                               value_to_set, sizeof(value_to_set));
+            } else { /* error */ strncpy(value_to_set, "ASSIGN_OP_ERROR", sizeof(value_to_set)-1); }
 
-        if (tokens[2].type == TOKEN_STRING) {
-            char unescaped[INPUT_BUFFER_SIZE];
-            unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
-            expand_variables_in_string_advanced(unescaped, op1_expanded, sizeof(op1_expanded));
-        } else {
-            expand_variables_in_string_advanced(tokens[2].text, op1_expanded, sizeof(op1_expanded));
-        }
+        } else if (tokens[2].type == TOKEN_VARIABLE && tokens[3].type == TOKEN_OPERATOR && (strcmp(tokens[3].text,"++")==0 || strcmp(tokens[3].text,"--")==0)) {
+            // Postfix: $var = $op_var ++
+            rhs_is_unary_op = true;
+            char op_var_name_clean[MAX_VAR_NAME_LEN];
+            // Extract clean name from tokens[2].text (as in process_line)
+            // ... (extraction logic for op_var_name_clean) ...
+            if (tokens[2].text[0] == '$') { /* ... extract ... */ } else {strcpy(op_var_name_clean, "");}
 
-        if (tokens[4].type == TOKEN_STRING) {
-            char unescaped[INPUT_BUFFER_SIZE];
-            unescape_string(tokens[4].text, unescaped, sizeof(unescaped));
-            expand_variables_in_string_advanced(unescaped, op2_expanded, sizeof(op2_expanded));
-        } else {
-            expand_variables_in_string_advanced(tokens[4].text, op2_expanded, sizeof(op2_expanded));
-        }
 
-        // Note: invoke_bsh_function_for_op expects BSH func like: (op1, op2, op_str, result_var_name)
-        // Ensure your __dynamic_op_handler matches this or adjust the C call.
-        if (invoke_bsh_function_for_op("__dynamic_op_handler",
-                                    op1_expanded, op2_expanded, operator_str, 
-                                    temp_bsh_result_var,
-                                    temp_result_val_c, sizeof(temp_result_val_c))) {
-            if (is_array_assignment) {
-                set_array_element_scoped(base_var_name, index_str_raw, temp_result_val_c);
-            } else {
-                set_variable_scoped(base_var_name, temp_result_val_c, false);
-            }
-            return; 
-        } else {
-            fprintf(stderr, "Error executing dynamic operation for assignment RHS.\n");
-            if (is_array_assignment) set_array_element_scoped(base_var_name, index_str_raw, "ASSIGN_OP_ERROR");
-            else set_variable_scoped(base_var_name, "ASSIGN_OP_ERROR", false);
-            return;
+            if (strlen(op_var_name_clean) > 0) {
+                const char* temp_bsh_result_var = "__TEMP_ASSIGN_OP_RES";
+                // Call BSH __dynamic_op_handler: (var_name, op_str, "postfix", result_holder)
+                invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                               op_var_name_clean, tokens[3].text, "postfix",
+                                               temp_bsh_result_var,
+                                               value_to_set, sizeof(value_to_set));
+            } else { /* error */ strncpy(value_to_set, "ASSIGN_OP_ERROR", sizeof(value_to_set)-1); }
         }
     }
 
-    if (is_rhs_command) { 
+   // Original binary expression assignment: $var = $op1 + $op2
+    // (num_tokens >= 5 for $var = op1 op op2)
+    if (!rhs_is_unary_op && num_tokens >= 5 && !is_rhs_command &&
+        /* ... original conditions for binary op ... */
+        tokens[3].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[3].text) 
+        /* ... */
+        ) {
+        if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+        char op1_expanded[INPUT_BUFFER_SIZE];
+        char op2_expanded[INPUT_BUFFER_SIZE];
+        // char temp_result_val_c[INPUT_BUFFER_SIZE]; // Now value_to_set directly
+        const char* operator_str = tokens[3].text;
+        const char* temp_bsh_result_var = "__TEMP_ASSIGN_OP_RES";
+
+        // ... (expansion of op1_expanded, op2_expanded as before)
+        expand_variables_in_string_advanced(tokens[2].text, op1_expanded, sizeof(op1_expanded));
+        expand_variables_in_string_advanced(tokens[4].text, op2_expanded, sizeof(op2_expanded));
+
+
+        // Call BSH __dynamic_op_handler: (val1, val2, op_str, result_holder)
+        if (invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                    op1_expanded, op2_expanded, operator_str,
+                                    temp_bsh_result_var,
+                                    value_to_set, sizeof(value_to_set))) {
+            // value_to_set is now populated
+        } else {
+            fprintf(stderr, "Error executing dynamic binary operation for assignment RHS.\n");
+            strncpy(value_to_set, "ASSIGN_OP_ERROR", sizeof(value_to_set)-1);
+        }
+    }
+
+    if (!rhs_is_unary_op && is_rhs_command) { 
         char *cmd_args[MAX_ARGS + 1]; 
         char expanded_cmd_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE]; 
         int cmd_arg_count = 0;
@@ -1617,7 +1957,7 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
              fprintf(stderr, "Internal error: RHS marked as command but no command arguments found.\n");
              strncpy(value_to_set, "INTERNAL_ASSIGN_CMD_ERROR", sizeof(value_to_set)-1);
         }
-    } else { 
+    } else if(!rhs_is_unary_op) { 
         char combined_value[INPUT_BUFFER_SIZE] = ""; size_t current_len = 0;
         for (int i = 2; i < num_tokens; i++) { 
             if (tokens[i].type == TOKEN_COMMENT) break; 
@@ -1647,6 +1987,7 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
         value_to_set[sizeof(value_to_set)-1] = '\0';
     }
 
+    // Finally, assign value_to_set to the LHS variable
     if (is_array_assignment) set_array_element_scoped(base_var_name, index_str_raw, value_to_set);
     else set_variable_scoped(base_var_name, value_to_set, false);
 }

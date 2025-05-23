@@ -1,107 +1,143 @@
+# core_operators.bsh
+# Defines standard operator symbols to the C tokenizer and provides the
+# central BSH __dynamic_op_handler for processing them.
+# Loaded by .bshrc
 
-# This is the central BSH function called by bsh.c to handle dynamic operators.
-# It determines types, looks up the specific handler, and calls it.
-# The result of the operation is stored in the variable named by result_var_name.
-function __dynamic_op_handler (operand1_val op_str operand2_val result_var_name) {
-    $type1 = ""
-    get_type "$operand1_val" type1
-    $type2 = ""
-    get_type "$operand2_val" type2
+echo "Loading Core Operators Framework (core_operators.bsh)..."
 
-    $op_name_safe = $op_str
-    if $op_str == "+" { $op_name_safe = "PLUS" }
-    else if $op_str == "-" { $op_name_safe = "MINUS" }
-    else if $op_str == "*" { $op_name_safe = "MUL" }
-    else if $op_str == "/" { $op_name_safe = "DIV" }
-    else if $op_str == "%" { $op_name_safe = "MOD" }
-    else if $op_str == "." { $op_name_safe = "DOT" }
+# --- Define Core Operator Symbols for the C Tokenizer ---
+# The 'defoperator' built-in tells bsh.c to recognize these strings as TOKEN_OPERATOR.
+# The C tokenizer will then pass these strings to __dynamic_op_handler.
 
-    # Priority-based handler lookup:
-    # 1. Specific match: type1 op type2
-    # 2. Left operand priority: type1 op ANY
-    # 3. Right operand priority: ANY op type2
-    # 4. Generic fallback: ANY op ANY (less common)
-    # 5. String coercion priority: If one is STRING, it often becomes string operation.
+# Arithmetic and Decimal
+defoperator "+"
+defoperator "-"  # For subtraction. Negative numbers are handled by C tokenizer directly.
+defoperator "*"
+defoperator "/"
+defoperator "%"
+defoperator "."  # For decimal construction or other BSH-defined uses
 
-    $handler_func = ""
-    $handler_key_specific = "BSH_OP_HANDLER_${op_name_safe}_${type1}_${type2}"
-    $handler_key_str_any = "BSH_OP_HANDLER_${op_name_safe}_STRING_ANY"
-    $handler_key_any_str = "BSH_OP_HANDLER_${op_name_safe}_ANY_STRING"
-    $handler_key_left_any = "BSH_OP_HANDLER_${op_name_safe}_${type1}_ANY"
-    $handler_key_any_right = "BSH_OP_HANDLER_${op_name_safe}_ANY_${type2}"
+# Unary Increment/Decrement
+defoperator "++"
+defoperator "--"
 
-    # Rule: String operations take precedence if one operand is a string for '+'
-    if $op_name_safe == "PLUS" {
-        if $type1 == "STRING" {
-            $handler_func = $($handler_key_str_any)
+# Comparison (will be handled by __dynamic_op_handler and number.bsh)
+defoperator "=="
+defoperator "!="
+defoperator ">"
+defoperator "<"
+defoperator ">="
+defoperator "<="
+
+# Logical (if not handled as special keywords by C parser for if/while)
+# Assuming for now 'if ! var' is handled by 'if' keyword parsing the '!'
+# If '!' is a general purpose logical NOT operator, it could be defined here too.
+# defoperator "!"
+# defoperator "&&"
+# defoperator "||"
+
+echo "Core operator symbols defined."
+
+# --- Central Dynamic Operator Handler ---
+# The C core (invoke_bsh_dynamic_op_handler) calls this BSH function when it encounters
+# an operator in an expression (standalone or RHS of assignment).
+#
+# Signature from C: __dynamic_op_handler (arg1, arg2, arg3, result_holder_var_name)
+#
+# For Binary Operations (e.g., VAL1 + VAL2):
+#   arg1: string value of the first operand (e.g., "10")
+#   arg2: string value of the second operand (e.g., "5")
+#   arg3: operator symbol string (e.g., "+")
+#   result_holder_var_name: name of BSH var to store expression result (e.g., "__TEMP_OP_RES")
+#
+# For Unary Operations (e.g., ++VAR or VAR++):
+#   arg1: name of the variable being operated on (e.g., "myCounter")
+#   arg2: operator symbol string (e.g., "++")
+#   arg3: context string ("prefix" or "postfix")
+#   result_holder_var_name: name of BSH var to store expression result (e.g., "__TEMP_OP_RES")
+
+function __dynamic_op_handler (param_arg1 param_arg2 param_arg3 param_result_var_name) {
+    echo "BSH __dynamic_op_handler: Args <$param_arg1> <$param_arg2> <$param_arg3> -> $param_result_var_name"
+
+    # Determine context: Unary or Binary
+    if $param_arg3 == "prefix" {
+        $op_var_name = "$param_arg1"
+        $op_symbol = "$param_arg2"
+        echo "BSH Dispatch: Unary Prefix: $op_symbol on var '$op_var_name'"
+
+        if $op_symbol == "++" {
+            bsh_unary_prefix_increment "$op_var_name" $param_result_var_name # From number.bsh
+        } else if $op_symbol == "--" {
+            bsh_unary_prefix_decrement "$op_var_name" $param_result_var_name # From number.bsh
+        } else {
+            echo "Error (__dynamic_op_handler): Unknown unary prefix operator '$op_symbol'"
+            $($param_result_var_name) = "UNKNOWN_PREFIX_OP_ERROR"
         }
-        if $handler_func == "" && $type2 == "STRING" {
-            $handler_func = $($handler_key_any_str)
+        return
+    } else if $param_arg3 == "postfix" {
+        $op_var_name = "$param_arg1"
+        $op_symbol = "$param_arg2"
+        echo "BSH Dispatch: Unary Postfix: $op_symbol on var '$op_var_name'"
+
+        if $op_symbol == "++" {
+            bsh_unary_postfix_increment "$op_var_name" $param_result_var_name # From number.bsh
+        } else if $op_symbol == "--" {
+            bsh_unary_postfix_decrement "$op_var_name" $param_result_var_name # From number.bsh
+        } else {
+            echo "Error (__dynamic_op_handler): Unknown unary postfix operator '$op_symbol'"
+            $($param_result_var_name) = "UNKNOWN_POSTFIX_OP_ERROR"
         }
+        return
     }
 
-    # Specific match
-    if $handler_func == "" {
-        $handler_func = $($handler_key_specific)
-    }
-    # Fallback to type1_ANY
-    if $handler_func == "" {
-        $handler_func = $($handler_key_left_any)
-    }
-    # Fallback to ANY_type2
-    if $handler_func == "" {
-        $handler_func = $($handler_key_any_right)
-    }
+    # Assume Binary Operation if context is not "prefix" or "postfix"
+    # Here, param_arg3 is the operator symbol itself.
+    $val1_str = "$param_arg1"
+    $val2_str = "$param_arg2"
+    $op_symbol_binary = "$param_arg3"
+    echo "BSH Dispatch: Binary: '$val1_str' $op_symbol_binary '$val2_str'"
 
-    if $handler_func != "" {
-        # The registered handler functions should expect:
-        # (val1_str, type1_str, val2_str, type2_str, result_var_to_set)
-        # This requires a consistent interface for all registered math/string op handlers.
-        # We will need to create BSH wrapper functions for existing math_add, string_concat etc.
+    # Here, a more sophisticated system might use the 'type.bsh' framework
+    # to get types of val1_str and val2_str and dispatch to a registered handler
+    # (like the old register_operator_handler system).
+    # For this example, we'll do a direct switch based on the operator symbol,
+    # calling functions from number.bsh.
 
-        # This is a placeholder for how to call a function whose name is in a variable.
-        # BSH does not have a direct "call $variable_name args..."
-        # This typically requires an if/else chain or a C-level helper.
-        # For minimal C changes, we'll use an if/else chain here for now.
-        # (This part is a known limitation of pure BSH for this pattern)
-
-        # echo "Debug: Dispatching to $handler_func for $operand1_val ($type1) $op_str $operand2_val ($type2)"
-
-        # --- Simplified Call (assuming handlers take val1, val2, result_var) ---
-        # This means the logic for type-based behavior for integer+float must be
-        # within the C implementation of math_add, or the BSH handler itself.
-        # Example: bsh_core_math_add_handler will be called, which then calls math_add.
-
-        # The following is a conceptual direct call.
-        # The actual implementation will be an if-else block based on $handler_func string value.
-        # call_indirect "$handler_func" "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
-        # --- End Simplified Call ---
-
-        # BEGIN EXPANDED IF/ELSE DISPATCH (Workaround for lack of indirect call)
-        if $handler_func == "bsh_core_math_add_handler" {
-            bsh_core_math_add_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
-        } else if $handler_func == "bsh_core_math_sub_handler" {
-            bsh_core_math_sub_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
-        } else if $handler_func == "bsh_core_math_mul_handler" {
-            bsh_core_math_mul_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
-        } else if $handler_func == "bsh_core_math_div_handler" {
-            bsh_core_math_div_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
-        } else if $handler_func == "bsh_core_math_mod_handler" {
-            bsh_core_math_mod_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
-        } else if $handler_func == "bsh_core_string_concat_handler" {
-            bsh_core_string_concat_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
-        } else if $handler_func == "bsh_decimal_constructor_handler" {
-            bsh_decimal_constructor_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+    if $op_symbol_binary == "+" {
+        math_add "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == "-" {
+        math_sub "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == "*" {
+        math_mul "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == "/" {
+        math_div "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == "%" {
+        math_mod "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == "." { # Decimal construction
+        # This used to be in the 'calc' function.
+        # Assumes val1 is integer part (can be empty), val2 is fractional part.
+        if "$val1_str" == "" { # Handle cases like ".5" -> "0.5"
+            $($param_result_var_name) = "0.$val2_str"
+        } else {
+            $($param_result_var_name) = "$val1_str.$val2_str"
         }
-        # ... Add other registered handlers here ...
-        else {
-            echo "Error: Operator handler '$handler_func' not recognized by __dynamic_op_handler."
-            $($result_var_name) = "UNKNOWN_HANDLER_ERROR"
-        }
-        # END EXPANDED IF/ELSE DISPATCH
-
+        echo "BSH Dispatch: Decimal construct '$val1_str.$val2_str' result: $($param_result_var_name)"
+    } else if $op_symbol_binary == "==" {
+        math_eq "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == "!=" {
+        math_ne "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == ">" {
+        math_gt "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == "<" {
+        math_lt "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == ">=" {
+        math_ge "$val1_str" "$val2_str" $param_result_var_name
+    } else if $op_symbol_binary == "<=" {
+        math_le "$val1_str" "$val2_str" $param_result_var_name
     } else {
-        echo "Error: No operator handler defined for '$op_str' with types '$type1' and '$type2'."
-        $($result_var_name) = "NO_HANDLER_ERROR"
+        echo "Error (__dynamic_op_handler): Unknown or unsupported binary operator '$op_symbol_binary'"
+        $($param_result_var_name) = "UNKNOWN_BINARY_OP_ERROR"
     }
 }
+
+echo "Core Operators Framework loaded. __dynamic_op_handler is defined."
