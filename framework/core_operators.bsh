@@ -1,0 +1,107 @@
+
+# This is the central BSH function called by bsh.c to handle dynamic operators.
+# It determines types, looks up the specific handler, and calls it.
+# The result of the operation is stored in the variable named by result_var_name.
+function __dynamic_op_handler (operand1_val op_str operand2_val result_var_name) {
+    $type1 = ""
+    get_type "$operand1_val" type1
+    $type2 = ""
+    get_type "$operand2_val" type2
+
+    $op_name_safe = $op_str
+    if $op_str == "+" { $op_name_safe = "PLUS" }
+    else if $op_str == "-" { $op_name_safe = "MINUS" }
+    else if $op_str == "*" { $op_name_safe = "MUL" }
+    else if $op_str == "/" { $op_name_safe = "DIV" }
+    else if $op_str == "%" { $op_name_safe = "MOD" }
+    else if $op_str == "." { $op_name_safe = "DOT" }
+
+    # Priority-based handler lookup:
+    # 1. Specific match: type1 op type2
+    # 2. Left operand priority: type1 op ANY
+    # 3. Right operand priority: ANY op type2
+    # 4. Generic fallback: ANY op ANY (less common)
+    # 5. String coercion priority: If one is STRING, it often becomes string operation.
+
+    $handler_func = ""
+    $handler_key_specific = "BSH_OP_HANDLER_${op_name_safe}_${type1}_${type2}"
+    $handler_key_str_any = "BSH_OP_HANDLER_${op_name_safe}_STRING_ANY"
+    $handler_key_any_str = "BSH_OP_HANDLER_${op_name_safe}_ANY_STRING"
+    $handler_key_left_any = "BSH_OP_HANDLER_${op_name_safe}_${type1}_ANY"
+    $handler_key_any_right = "BSH_OP_HANDLER_${op_name_safe}_ANY_${type2}"
+
+    # Rule: String operations take precedence if one operand is a string for '+'
+    if $op_name_safe == "PLUS" {
+        if $type1 == "STRING" {
+            $handler_func = $($handler_key_str_any)
+        }
+        if $handler_func == "" && $type2 == "STRING" {
+            $handler_func = $($handler_key_any_str)
+        }
+    }
+
+    # Specific match
+    if $handler_func == "" {
+        $handler_func = $($handler_key_specific)
+    }
+    # Fallback to type1_ANY
+    if $handler_func == "" {
+        $handler_func = $($handler_key_left_any)
+    }
+    # Fallback to ANY_type2
+    if $handler_func == "" {
+        $handler_func = $($handler_key_any_right)
+    }
+
+    if $handler_func != "" {
+        # The registered handler functions should expect:
+        # (val1_str, type1_str, val2_str, type2_str, result_var_to_set)
+        # This requires a consistent interface for all registered math/string op handlers.
+        # We will need to create BSH wrapper functions for existing math_add, string_concat etc.
+
+        # This is a placeholder for how to call a function whose name is in a variable.
+        # BSH does not have a direct "call $variable_name args..."
+        # This typically requires an if/else chain or a C-level helper.
+        # For minimal C changes, we'll use an if/else chain here for now.
+        # (This part is a known limitation of pure BSH for this pattern)
+
+        # echo "Debug: Dispatching to $handler_func for $operand1_val ($type1) $op_str $operand2_val ($type2)"
+
+        # --- Simplified Call (assuming handlers take val1, val2, result_var) ---
+        # This means the logic for type-based behavior for integer+float must be
+        # within the C implementation of math_add, or the BSH handler itself.
+        # Example: bsh_core_math_add_handler will be called, which then calls math_add.
+
+        # The following is a conceptual direct call.
+        # The actual implementation will be an if-else block based on $handler_func string value.
+        # call_indirect "$handler_func" "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+        # --- End Simplified Call ---
+
+        # BEGIN EXPANDED IF/ELSE DISPATCH (Workaround for lack of indirect call)
+        if $handler_func == "bsh_core_math_add_handler" {
+            bsh_core_math_add_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+        } else if $handler_func == "bsh_core_math_sub_handler" {
+            bsh_core_math_sub_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+        } else if $handler_func == "bsh_core_math_mul_handler" {
+            bsh_core_math_mul_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+        } else if $handler_func == "bsh_core_math_div_handler" {
+            bsh_core_math_div_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+        } else if $handler_func == "bsh_core_math_mod_handler" {
+            bsh_core_math_mod_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+        } else if $handler_func == "bsh_core_string_concat_handler" {
+            bsh_core_string_concat_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+        } else if $handler_func == "bsh_decimal_constructor_handler" {
+            bsh_decimal_constructor_handler "$operand1_val" "$type1" "$operand2_val" "$type2" $result_var_name
+        }
+        # ... Add other registered handlers here ...
+        else {
+            echo "Error: Operator handler '$handler_func' not recognized by __dynamic_op_handler."
+            $($result_var_name) = "UNKNOWN_HANDLER_ERROR"
+        }
+        # END EXPANDED IF/ELSE DISPATCH
+
+    } else {
+        echo "Error: No operator handler defined for '$op_str' with types '$type1' and '$type2'."
+        $($result_var_name) = "NO_HANDLER_ERROR"
+    }
+}

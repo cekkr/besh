@@ -172,6 +172,58 @@ function calc (var1_name op_str var2_name result_var) {
     }
 }
 
+
+# BSH wrapper handlers for core math operations.
+# These adapt the existing math_* functions to the dispatcher's expected signature.
+function bsh_core_math_add_handler (val1 type1 val2 type2 result_var) {
+    # math_add (and underlying C bsh_add_numbers) is expected to:
+    # 1. Parse string inputs val1, val2 to numbers.
+    # 2. Handle integer + float promotion to float.
+    # 3. Store string representation of the result in result_var.
+    math_add "$val1" "$val2" $result_var
+}
+function bsh_core_math_sub_handler (val1 type1 val2 type2 result_var) {
+    math_sub "$val1" "$val2" $result_var
+}
+function bsh_core_math_mul_handler (val1 type1 val2 type2 result_var) {
+    math_mul "$val1" "$val2" $result_var
+}
+function bsh_core_math_div_handler (val1 type1 val2 type2 result_var) {
+    math_div "$val1" "$val2" $result_var
+}
+function bsh_core_math_mod_handler (val1 type1 val2 type2 result_var) {
+    math_mod "$val1" "$val2" $result_var
+}
+function bsh_decimal_constructor_handler (val1 type1 val2 type2 result_var) {
+    # Implements the "val1.val2" decimal construction [cite: 16, 17]
+    if "$val1" == "" { # Handle cases like ".5" -> "0.5"
+        $($result_var) = "0.$val2"
+    } else {
+        $($result_var) = "$val1.$val2"
+    }
+}
+
+
+# Register handlers (assuming type.bsh is already sourced)
+register_operator_handler "+" "INTEGER" "INTEGER" "bsh_core_math_add_handler"
+register_operator_handler "+" "FLOAT" "FLOAT" "bsh_core_math_add_handler"
+register_operator_handler "+" "INTEGER" "FLOAT" "bsh_core_math_add_handler" # C lib handles promotion
+register_operator_handler "+" "FLOAT" "INTEGER" "bsh_core_math_add_handler" # C lib handles promotion
+
+register_operator_handler "-" "INTEGER" "INTEGER" "bsh_core_math_sub_handler"
+# ... register for other combinations and other ops (sub, mul, div, mod) ...
+
+# Register the '.' decimal constructor
+# Typically, both parts are expected to be or represent numbers (digits).
+register_operator_handler "." "INTEGER" "INTEGER" "bsh_decimal_constructor_handler"
+register_operator_handler "." "STRING" "STRING" "bsh_decimal_constructor_handler" # e.g. "10" . "5"
+register_operator_handler "." "INTEGER" "STRING" "bsh_decimal_constructor_handler"
+register_operator_handler "." "STRING" "INTEGER" "bsh_decimal_constructor_handler"
+register_operator_handler "." "" "STRING" "bsh_decimal_constructor_handler" # For ".5" type cases
+register_operator_handler "." "" "INTEGER" "bsh_decimal_constructor_handler"
+
+echo "Number Framework operator handlers registered."
+
 echo "Number Framework loaded. '-' before digits may now be tokenized as part of a number by bsh.c."
 echo "The '.' operator can be used in 'calc' for decimal construction (e.g., calc var1 \".\" var2 result)."
 # --- Example Usage Update ---

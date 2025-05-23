@@ -278,6 +278,341 @@ int main(int argc, char *argv[]) {
 
 // --- Core Implementations ---
 
+C
+// bsh.c (Continued - Add or replace existing stubs with these implementations)
+
+// --- Forward Declarations for functions used in process_line if not already ordered ---
+// (Most are already in the prototype list, this is just for logical completeness here)
+// bool invoke_bsh_function_for_op(...); // From previous turn's suggestion
+// bool is_comparison_or_assignment_operator(...); // From previous turn's suggestion
+
+// --- Implementations ---
+
+// Placeholder for the C helper function discussed in the previous turn
+// This function would call the BSH '__dynamic_op_handler'
+// For now, ensure its prototype is available if you plan to use it directly in process_line.
+// bool invoke_bsh_function_for_op(const char* func_name_to_call,
+//                                 const char* arg1_val, const char* arg2_val, const char* arg3_op,
+//                                 const char* bsh_result_var_name,
+//                                 char* c_result_buffer, size_t c_result_buffer_size);
+
+// Definition for the helper from the previous turn (if not already added)
+// bool is_comparison_or_assignment_operator(const char* op_str) {
+//     if (strcmp(op_str, "==") == 0 || strcmp(op_str, "!=") == 0 ||
+//         strcmp(op_str, ">") == 0  || strcmp(op_str, "<") == 0 ||
+//         strcmp(op_str, ">=") == 0 || strcmp(op_str, "<=") == 0 ||
+//         strcmp(op_str, "=") == 0) {
+//         return true;
+//     }
+//     return false;
+// }
+
+
+void process_line(char *line_raw, FILE *input_source, int current_line_no, ExecutionState exec_mode_param) {
+    char line[MAX_LINE_LENGTH];
+    strncpy(line, line_raw, MAX_LINE_LENGTH -1);
+    line[MAX_LINE_LENGTH-1] = '\0';
+    trim_whitespace(line);
+
+    if (line[0] == '\0') { // Skip empty line
+        return;
+    }
+
+    // If we are defining a function body (and not skipping due to outer block)
+    if (is_defining_function && current_function_definition &&
+        (current_exec_state == STATE_DEFINE_FUNC_BODY || current_exec_state == STATE_IMPORT_PARSING || exec_mode_param == STATE_IMPORT_PARSING) &&
+        block_stack_top_bf >=0 && peek_block_bf() && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF && // Check we are inside the { }
+        strncmp(line, "}", 1) != 0 && strncmp(line, "}", strlen(line)) != 0 ) { // and line is not the closing brace
+
+        if (current_function_definition->line_count < MAX_FUNC_LINES) {
+            current_function_definition->body[current_function_definition->line_count] = strdup(line);
+            if (!current_function_definition->body[current_function_definition->line_count]) {
+                perror("strdup for function body line failed");
+                // Consider error handling: stop defining function?
+            } else {
+                current_function_definition->line_count++;
+            }
+        } else {
+            fprintf(stderr, "Error: Function '%s' exceeds maximum line count of %d.\n",
+                    current_function_definition->name, MAX_FUNC_LINES);
+            // Invalidate current function definition or handle error
+             for(int i=0; i < current_function_definition->line_count; ++i) if(current_function_definition->body[i]) free(current_function_definition->body[i]);
+            free(current_function_definition);
+            current_function_definition = NULL;
+            is_defining_function = false;
+            if (block_stack_top_bf >=0 && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF) pop_block_bf(); // Pop func def block
+            current_exec_state = STATE_NORMAL; // Or restore previous
+        }
+        return; // Line consumed by function definition
+    }
+
+
+    Token tokens[MAX_ARGS];
+    char token_storage[TOKEN_STORAGE_SIZE];
+    int num_tokens = advanced_tokenize_line(line, tokens, MAX_ARGS, token_storage, TOKEN_STORAGE_SIZE);
+
+    if (num_tokens == 0 || tokens[0].type == TOKEN_EMPTY || tokens[0].type == TOKEN_EOF) {
+        return; // Nothing to process
+    }
+
+    if (tokens[0].type == TOKEN_COMMENT) {
+        return; // Skip comment line
+    }
+
+    // Handle '{' (opening brace)
+    if (tokens[0].type == TOKEN_LBRACE && num_tokens == 1) { // Line is just "{"
+        handle_opening_brace_token(tokens[0]);
+        return;
+    }
+    // Handle '}' (closing brace)
+    if (tokens[0].type == TOKEN_RBRACE && num_tokens == 1) { // Line is just "}"
+        handle_closing_brace_token(tokens[0], input_source);
+        return;
+    }
+     // Handle '{' or '}' at the end of other statements if not the only token
+    if (num_tokens > 1 && tokens[num_tokens-1].type == TOKEN_LBRACE) {
+        // The LBRACE will be handled by specific handlers like if, while, defunc if they expect it.
+        // If it's unexpected, it might be an error or handled by a command.
+        // For now, let specific handlers consume it.
+    }
+    if (num_tokens > 1 && tokens[num_tokens-1].type == TOKEN_RBRACE) {
+        // This is less common for '}' to not be standalone, could be syntax error
+        // unless a future command might use it. For now, '}' should mostly be standalone.
+        // If it's the only substantive token before a comment, advanced_tokenize_line might give num_tokens > 1.
+        if (tokens[0].type == TOKEN_RBRACE && (tokens[1].type == TOKEN_COMMENT || tokens[1].type == TOKEN_EOF) ){
+             handle_closing_brace_token(tokens[0], input_source);
+             return;
+        }
+    }
+
+
+    // If we are in STATE_BLOCK_SKIP, only process block-ending '}' or 'else'/'else if'
+    if (current_exec_state == STATE_BLOCK_SKIP && exec_mode_param != STATE_IMPORT_PARSING) {
+        const char* first_token_text_resolved = NULL;
+        if (tokens[0].type == TOKEN_WORD) {
+             first_token_text_resolved = resolve_keyword_alias(tokens[0].text);
+        }
+
+        if (tokens[0].type == TOKEN_RBRACE) { // '}' always processed to manage block stack
+            handle_closing_brace_token(tokens[0], input_source);
+        } else if (first_token_text_resolved &&
+                   (strcmp(first_token_text_resolved, "else") == 0 )) {
+            // 'else' or 'else if' needs to be processed to potentially change exec_state
+            handle_else_statement_advanced(tokens, num_tokens, input_source, current_line_no);
+        } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "if") == 0){
+            // Nested if while skipping: just push another skip block
+            push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no);
+        } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "while") == 0){
+            push_block_bf(BLOCK_TYPE_WHILE, false, 0, current_line_no);
+        } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "defunc") == 0){
+             push_block_bf(BLOCK_TYPE_FUNCTION_DEF, false, 0, current_line_no); // False = don't collect body
+        } else if (tokens[0].type == TOKEN_LBRACE) { // An opening brace while skipping (likely after a skipped if/while header)
+            BlockFrame* current_block = peek_block_bf();
+            if (current_block) { // The LBRACE corresponds to the block we just pushed for skipping
+                // current_exec_state remains STATE_BLOCK_SKIP
+            } else {
+                 fprintf(stderr, "Syntax error: Unmatched '{' on line %d while skipping.\n", current_line_no);
+            }
+        }
+        // Other tokens are ignored during STATE_BLOCK_SKIP
+        return;
+    }
+
+
+    // --- Actual command/statement processing ---
+    if (tokens[0].type == TOKEN_VARIABLE && num_tokens > 1 && tokens[1].type == TOKEN_ASSIGN) {
+        handle_assignment_advanced(tokens, num_tokens);
+    } else if (tokens[0].type == TOKEN_WORD) {
+        const char* command_name = resolve_keyword_alias(tokens[0].text);
+
+        if (strcmp(command_name, "echo") == 0) {
+            handle_echo_advanced(tokens, num_tokens);
+        } else if (strcmp(command_name, "defkeyword") == 0) {
+            handle_defkeyword_statement(tokens, num_tokens);
+        } else if (strcmp(command_name, "if") == 0) {
+            handle_if_statement_advanced(tokens, num_tokens, input_source, current_line_no);
+        } else if (strcmp(command_name, "else") == 0) { // Handles "else" and "else if"
+            handle_else_statement_advanced(tokens, num_tokens, input_source, current_line_no);
+        } else if (strcmp(command_name, "while") == 0) {
+            handle_while_statement_advanced(tokens, num_tokens, input_source, current_line_no);
+        } else if (strcmp(command_name, "defunc") == 0) {
+            handle_defunc_statement_advanced(tokens, num_tokens);
+        } else if (strcmp(command_name, "inc") == 0) {
+            handle_inc_dec_statement_advanced(tokens, num_tokens, true);
+        } else if (strcmp(command_name, "dec") == 0) {
+            handle_inc_dec_statement_advanced(tokens, num_tokens, false);
+        } else if (strcmp(command_name, "loadlib") == 0) {
+            handle_loadlib_statement(tokens, num_tokens);
+        } else if (strcmp(command_name, "calllib") == 0) {
+            handle_calllib_statement(tokens, num_tokens);
+        } else if (strcmp(command_name, "import") == 0) {
+            handle_import_statement(tokens, num_tokens);
+        }
+        // Add other built-in keywords here...
+        else {
+            // Not a known built-in keyword, try user function or external command or dynamic operator
+            UserFunction* func_to_run = function_list;
+            bool found_user_func = false;
+            while(func_to_run) {
+                if (strcmp(func_to_run->name, command_name) == 0) {
+                    found_user_func = true;
+                    break;
+                }
+                func_to_run = func_to_run->next;
+            }
+
+            if (found_user_func) {
+                execute_user_function(func_to_run, &tokens[1], num_tokens - 1, input_source);
+            } else {
+                // Check for standalone dynamic operator pattern: val1 op val2
+                // This relies on the C helper 'invoke_bsh_function_for_op' and 'is_comparison_or_assignment_operator'
+                // from the previous turn's suggestions.
+                if ( (num_tokens == 3 || (num_tokens == 4 && tokens[3].type == TOKEN_COMMENT)) &&
+                     (tokens[0].type == TOKEN_VARIABLE || tokens[0].type == TOKEN_NUMBER || tokens[0].type == TOKEN_STRING) && // Token 0 is the first operand here
+                     tokens[1].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[1].text) && // Token 1 is the operator
+                     (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING) // Token 2 is the second operand
+                   ) {
+                        char op1_expanded[INPUT_BUFFER_SIZE];
+                        char op2_expanded[INPUT_BUFFER_SIZE];
+                        char result_c_buffer[INPUT_BUFFER_SIZE];
+                        const char* operator_str = tokens[1].text;
+                        const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES"; // BSH var for result
+
+                        // Expand operand1 (tokens[0] is the first operand in this context)
+                        if (tokens[0].type == TOKEN_STRING) {
+                            char unescaped[INPUT_BUFFER_SIZE];
+                            unescape_string(tokens[0].text, unescaped, sizeof(unescaped));
+                            expand_variables_in_string_advanced(unescaped, op1_expanded, sizeof(op1_expanded));
+                        } else {
+                            expand_variables_in_string_advanced(tokens[0].text, op1_expanded, sizeof(op1_expanded));
+                        }
+
+                        // Expand operand2 (tokens[2])
+                        if (tokens[2].type == TOKEN_STRING) {
+                            char unescaped[INPUT_BUFFER_SIZE];
+                            unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
+                            expand_variables_in_string_advanced(unescaped, op2_expanded, sizeof(op2_expanded));
+                        } else {
+                            expand_variables_in_string_advanced(tokens[2].text, op2_expanded, sizeof(op2_expanded));
+                        }
+                        // (Ensure invoke_bsh_function_for_op prototype is available)
+                        if (invoke_bsh_function_for_op("__dynamic_op_handler",
+                                                       op1_expanded, op2_expanded, operator_str, /* op is 3rd param to C func */
+                                                       temp_bsh_result_var,
+                                                       result_c_buffer, sizeof(result_c_buffer))) {
+                            if (strlen(result_c_buffer) > 0 &&
+                                strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0 &&
+                                strncmp(result_c_buffer, "NO_HANDLER_ERROR", 16) != 0 &&
+                                strncmp(result_c_buffer, "UNKNOWN_HANDLER_ERROR", 21) != 0 ) {
+                                printf("%s\n", result_c_buffer);
+                            }
+                            set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
+                        } else {
+                            fprintf(stderr, "Error executing standalone dynamic operation for: %s %s %s\n", op1_expanded, operator_str, op2_expanded);
+                            set_variable_scoped("LAST_OP_RESULT", "STANDALONE_OP_ERROR", false);
+                        }
+                } else {
+                    // External command
+                    char command_path[MAX_FULL_PATH_LEN];
+                    if (find_command_in_path_dynamic(command_name, command_path)) {
+                        char *args[MAX_ARGS + 1];
+                        char expanded_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
+                        args[0] = command_path; // First arg is the command itself
+                        int arg_count = 1;
+
+                        for (int i = 1; i < num_tokens; ++i) {
+                            if (tokens[i].type == TOKEN_COMMENT) break; // Stop at comment
+                            if (arg_count < MAX_ARGS) {
+                                if (tokens[i].type == TOKEN_STRING) {
+                                    char unescaped_val[INPUT_BUFFER_SIZE];
+                                    unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
+                                    expand_variables_in_string_advanced(unescaped_val, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
+                                } else {
+                                    expand_variables_in_string_advanced(tokens[i].text, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
+                                }
+                                args[arg_count++] = expanded_args_storage[arg_count-1];
+                            } else {
+                                fprintf(stderr, "Warning: Too many arguments for command '%s'. Max %d allowed.\n", command_name, MAX_ARGS);
+                                break;
+                            }
+                        }
+                        args[arg_count] = NULL; // Null-terminate arg list for execv
+
+                        char output_buffer_ext[INPUT_BUFFER_SIZE]; // For capturing output if needed, not used by default echo
+                        execute_external_command(command_path, args, arg_count, NULL, 0); // No output capture for direct execution for now
+                                                                                        // Or, if output is desired, pass output_buffer_ext and its size
+                    } else {
+                        fprintf(stderr, "Command not found: %s (line %d)\n", command_name, current_line_no);
+                    }
+                }
+            }
+        }
+    } else if (tokens[0].type == TOKEN_LBRACE) { // '{' as the first token on a line with other stuff
+        handle_opening_brace_token(tokens[0]); // Handles if it starts a block
+        // If there are tokens after '{', it might be a syntax error or part of a complex data structure (not supported yet)
+        if (num_tokens > 1 && tokens[1].type != TOKEN_COMMENT && tokens[1].type != TOKEN_EOF) {
+            fprintf(stderr, "Warning: Tokens found after '{' on the same line %d. '{' should ideally be standalone or at the end of if/while/defunc.\n", current_line_no);
+        }
+    } else if (tokens[0].type == TOKEN_RBRACE) { // '}' as the first token on a line with other stuff
+         handle_closing_brace_token(tokens[0], input_source);
+         if (num_tokens > 1 && tokens[1].type != TOKEN_COMMENT && tokens[1].type != TOKEN_EOF) {
+             fprintf(stderr, "Warning: Tokens found after '}' on the same line %d. '}' should ideally be standalone.\n", current_line_no);
+         }
+    } else {
+        fprintf(stderr, "Syntax error or unknown command starting with '%s' (type %d) on line %d.\n", tokens[0].text, tokens[0].type, current_line_no);
+    }
+}
+
+
+// Stub for handle_import_statement
+void handle_import_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) { // Don't import if outer block is skipping, unless we are already in an import
+        // If we are skipping, and an import is encountered, we should also skip the content of the imported file.
+        // This means execute_script needs to correctly handle being called with a "skip" context.
+        // For now, we just don't execute the import.
+        // printf("Skipping import due to current_exec_state = STATE_BLOCK_SKIP\n");
+        return;
+    }
+
+    if (num_tokens < 2) {
+        fprintf(stderr, "Syntax: import <module_name_or_path>\n");
+        return;
+    }
+
+    char module_spec_expanded[MAX_FULL_PATH_LEN];
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped_module_spec[MAX_FULL_PATH_LEN];
+        unescape_string(tokens[1].text, unescaped_module_spec, sizeof(unescaped_module_spec));
+        expand_variables_in_string_advanced(unescaped_module_spec, module_spec_expanded, sizeof(module_spec_expanded));
+    } else { // TOKEN_WORD or TOKEN_VARIABLE
+        expand_variables_in_string_advanced(tokens[1].text, module_spec_expanded, sizeof(module_spec_expanded));
+    }
+    
+    if (strlen(module_spec_expanded) == 0) {
+        fprintf(stderr, "Error: import statement received an empty module path/name after expansion.\n");
+        return;
+    }
+
+    char full_module_path[MAX_FULL_PATH_LEN];
+    if (find_module_in_path(module_spec_expanded, full_module_path)) {
+        // Prevent recursive imports of the same file within the same import chain (simple check)
+        // A more robust solution would involve a stack of currently importing files.
+        // For now, we rely on the user to avoid deep recursion or have a max import depth.
+        // printf("Importing module: %s (resolved to %s)\n", module_spec_expanded, full_module_path);
+
+        // Store current execution state, to be restored after import
+        ExecutionState previous_exec_state = current_exec_state;
+        current_exec_state = STATE_IMPORT_PARSING; // Set special state for import
+
+        execute_script(full_module_path, true, false); // is_import=true, is_startup=false
+
+        current_exec_state = previous_exec_state; // Restore execution state
+    } else {
+        fprintf(stderr, "Error: Module '%s' not found for import.\n", module_spec_expanded);
+    }
+}
+
+// Shell
 void initialize_shell() {
     scope_stack_top = -1; // Initialize scope stack
     enter_scope();        // Enter global scope (scope_id 0)
@@ -1050,6 +1385,89 @@ void handle_defkeyword_statement(Token *tokens, int num_tokens) {
     // printf("Keyword alias defined: '%s' -> '%s'\n", tokens[2].text, tokens[1].text);
 }
 
+
+// Helper to check if an operator is a comparison operator (already handled elsewhere)
+bool is_comparison_or_assignment_operator(const char* op_str) {
+    if (strcmp(op_str, "==") == 0 || strcmp(op_str, "!=") == 0 ||
+        strcmp(op_str, ">") == 0  || strcmp(op_str, "<") == 0 ||
+        strcmp(op_str, ">=") == 0 || strcmp(op_str, "<=") == 0 ||
+        strcmp(op_str, "=") == 0) { // '=' is assignment
+        return true;
+    }
+    return false;
+}
+
+// Function to invoke a BSH user function (like __dynamic_op_handler) from C
+// with string arguments. The result from the BSH function (which it places
+// in the variable named by 'bsh_result_var_name') is copied into 'c_result_buffer'.
+// Returns true on success, false on failure.
+bool invoke_bsh_function_for_op(const char* func_name_to_call,
+                                const char* arg1_val, const char* arg2_val, const char* arg3_op, /* op is 3rd for __dyn_op */
+                                const char* bsh_result_var_name,
+                                char* c_result_buffer, size_t c_result_buffer_size) {
+    UserFunction* func = function_list;
+    while (func) {
+        if (strcmp(func->name, func_name_to_call) == 0) break;
+        func = func->next;
+    }
+    if (!func) {
+        fprintf(stderr, "Error: BSH internal handler function '%s' not found.\n", func_name_to_call);
+        return false;
+    }
+
+    // Max 4 args for __dynamic_op_handler: operand1, operator, operand2, result_var_name
+    if (func->param_count != 4) {
+         fprintf(stderr, "Error: BSH function '%s' has incorrect param count (expected 4, got %d).\n", func_name_to_call, func->param_count);
+        return false;
+    }
+
+    Token call_tokens[4]; // We will pass 4 arguments to __dynamic_op_handler
+    char token_storage_arg1[INPUT_BUFFER_SIZE];
+    char token_storage_arg2[INPUT_BUFFER_SIZE];
+    char token_storage_arg3_op[MAX_OPERATOR_LEN + 1];
+    char token_storage_arg4_res_var[MAX_VAR_NAME_LEN];
+
+    // Arg 1: operand1_val
+    strncpy(token_storage_arg1, arg1_val, INPUT_BUFFER_SIZE -1); token_storage_arg1[INPUT_BUFFER_SIZE-1] = '\0';
+    call_tokens[0].type = TOKEN_STRING; // Pass as string literal to BSH function
+    call_tokens[0].text = token_storage_arg1;
+    call_tokens[0].len = strlen(token_storage_arg1);
+
+    // Arg 2: op_str
+    strncpy(token_storage_arg3_op, arg3_op, MAX_OPERATOR_LEN); token_storage_arg3_op[MAX_OPERATOR_LEN] = '\0';
+    call_tokens[1].type = TOKEN_STRING;
+    call_tokens[1].text = token_storage_arg3_op;
+    call_tokens[1].len = strlen(token_storage_arg3_op);
+
+    // Arg 3: operand2_val
+    strncpy(token_storage_arg2, arg2_val, INPUT_BUFFER_SIZE -1); token_storage_arg2[INPUT_BUFFER_SIZE-1] = '\0';
+    call_tokens[2].type = TOKEN_STRING;
+    call_tokens[2].text = token_storage_arg2;
+    call_tokens[2].len = strlen(token_storage_arg2);
+
+    // Arg 4: bsh_result_var_name (where the BSH function will store its output)
+    strncpy(token_storage_arg4_res_var, bsh_result_var_name, MAX_VAR_NAME_LEN -1); token_storage_arg4_res_var[MAX_VAR_NAME_LEN-1] = '\0';
+    call_tokens[3].type = TOKEN_WORD; // Pass as a variable name
+    call_tokens[3].text = token_storage_arg4_res_var;
+    call_tokens[3].len = strlen(token_storage_arg4_res_var);
+
+    // Temporarily suppress output from the function call if desired
+    // This is complex; for now, assume echo within __dynamic_op_handler is for debugging.
+    execute_user_function(func, call_tokens, 4, NULL); // NULL for input_source_for_context
+
+    // Retrieve the result from the BSH variable
+    char* result_from_bsh = get_variable_scoped(bsh_result_var_name);
+    if (result_from_bsh) {
+        strncpy(c_result_buffer, result_from_bsh, c_result_buffer_size - 1);
+        c_result_buffer[c_result_buffer_size - 1] = '\0';
+    } else {
+        // If result var is not set, it could be an error or intended (e.g. empty string)
+        snprintf(c_result_buffer, c_result_buffer_size, "OP_HANDLER_NO_RESULT_VAR<%s>", bsh_result_var_name);
+        return false; // Indicate potential issue
+    }
+    return true;
+}
+
 void handle_assignment_advanced(Token *tokens, int num_tokens) {
     if (num_tokens < 3 || tokens[0].type != TOKEN_VARIABLE || tokens[1].type != TOKEN_ASSIGN) {
         fprintf(stderr, "Assignment syntax: $variable = value | $array[index] = value\n"); return;
@@ -1080,6 +1498,63 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
         expand_variables_in_string_advanced(tokens[2].text, expanded_first_rhs_token, sizeof(expanded_first_rhs_token));
         UserFunction* func = function_list; while(func) { if (strcmp(expanded_first_rhs_token, func->name) == 0) { is_rhs_command = true; break; } func = func->next; }
         if (!is_rhs_command) { char full_cmd_path_check[MAX_FULL_PATH_LEN]; if (find_command_in_path_dynamic(expanded_first_rhs_token, full_cmd_path_check)) is_rhs_command = true; }
+    }
+
+    // Check if RHS is a potential dynamic binary operation: val1 op val2
+    // E.g. $var = $operand1 + $operand2
+    // Tokens: $var, =, $operand1, +, $operand2. num_tokens here would be 5.
+    // tokens[0] is var, tokens[1] is =, tokens[2] is op1, tokens[3] is op, tokens[4] is op2.
+    if (num_tokens == 5 && // Simplest case: var = op1 op op2 (no further tokens)
+        (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING) &&
+        tokens[3].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[3].text) &&
+        (tokens[4].type == TOKEN_VARIABLE || tokens[4].type == TOKEN_NUMBER || tokens[4].type == TOKEN_STRING)
+        ) {
+        if (current_exec_state == STATE_BLOCK_SKIP) return; // Still respect skipping
+
+        char op1_expanded[INPUT_BUFFER_SIZE];
+        char op2_expanded[INPUT_BUFFER_SIZE];
+        char temp_result_val_c[INPUT_BUFFER_SIZE];
+        const char* operator_str = tokens[3].text;
+        const char* temp_bsh_result_var = "__TEMP_ASSIGN_OP_RES";
+
+        // Expand operand1 (tokens[2])
+        if (tokens[2].type == TOKEN_STRING) {
+            char unescaped[INPUT_BUFFER_SIZE];
+            unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
+            expand_variables_in_string_advanced(unescaped, op1_expanded, sizeof(op1_expanded));
+        } else {
+            expand_variables_in_string_advanced(tokens[2].text, op1_expanded, sizeof(op1_expanded));
+        }
+
+        // Expand operand2 (tokens[4])
+        if (tokens[4].type == TOKEN_STRING) {
+            char unescaped[INPUT_BUFFER_SIZE];
+            unescape_string(tokens[4].text, unescaped, sizeof(unescaped));
+            expand_variables_in_string_advanced(unescaped, op2_expanded, sizeof(op2_expanded));
+        } else {
+            expand_variables_in_string_advanced(tokens[4].text, op2_expanded, sizeof(op2_expanded));
+        }
+
+        // Call the BSH dynamic operator handler
+        if (invoke_bsh_function_for_op("__dynamic_op_handler",
+                                    op1_expanded, op2_expanded, operator_str, /* op is 3rd for func */
+                                    temp_bsh_result_var,
+                                    temp_result_val_c, sizeof(temp_result_val_c))) {
+            // Successfully got result from BSH handler
+            if (is_array_assignment) {
+                set_array_element_scoped(base_var_name, index_str_raw, temp_result_val_c);
+            } else {
+                set_variable_scoped(base_var_name, temp_result_val_c, false);
+            }
+            return; // Assignment handled
+        } else {
+            fprintf(stderr, "Error executing dynamic operation for assignment RHS.\n");
+            // Fall through to old logic (command execution) or set error for var?
+            // For safety, let's make it an error and not fall through to command execution for "op1 op op2".
+            if (is_array_assignment) set_array_element_scoped(base_var_name, index_str_raw, "ASSIGN_OP_ERROR");
+            else set_variable_scoped(base_var_name, "ASSIGN_OP_ERROR", false);
+            return;
+        }
     }
 
     if (is_rhs_command) {

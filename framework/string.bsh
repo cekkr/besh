@@ -220,6 +220,21 @@ function string_len (str_val result_var) {
     }
 }
 
+function bsh_core_string_concat_handler (val1 type1 val2 type2 result_var) {
+    # string_concat C function expects two strings.
+    # Type conversion (e.g. number to string) is implicit as BSH variables are strings.
+    string_concat "$val1" "$val2" $result_var
+}
+
+# Register handlers
+# String concatenation should often take precedence if one operand is a string.
+register_operator_handler "+" "STRING" "ANY" "bsh_core_string_concat_handler"
+register_operator_handler "+" "ANY" "STRING" "bsh_core_string_concat_handler"
+# A more specific STRING+STRING can be added if ANY is too broad for other future ops.
+register_operator_handler "+" "STRING" "STRING" "bsh_core_string_concat_handler"
+
+echo "String Framework operator handlers registered."
+
 echo "String Framework loaded with concat, char_at_index, and split."
 # --- Example Usage (commented out) ---
 # $s1 = "hello"

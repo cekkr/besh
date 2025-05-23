@@ -17,10 +17,19 @@ echo "Defined keyword aliases: 'function' for 'defunc', 'when' for 'if'."
 # Import core framework modules
 # Assumes c_compiler.bsh and number.bsh are in a 'framework' directory
 # accessible via BSH_MODULE_PATH (e.g., ./framework/c_compiler.bsh)
+
 echo "Importing c_compiler module (framework.c_compiler)..."
-import framework.c_compiler
+import framework.c_compiler #todo: check if framework. suffix is needed
+
+import core_operators
+
+import framework.string
+
 echo "Importing number module (framework.number)..."
 import framework.number
+
+import type
+
 echo "------------------------------------"
 
 # --- Utility Functions (Leveraging Lexical Scoping) ---
