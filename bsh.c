@@ -1,3 +1,120 @@
+/*
+ * bsh - The Extensible Shell
+ * Version: 0.5 (Lexical Scoping and Dynamic Operators)
+ * Copyright: Riccardo Cecchini <rcecchini.ds@gmail.com>
+ *
+ * This is an extensible shell designed to be lightweight yet powerful,
+ * allowing much of its functionality to be defined and extended through
+ * BSH scripts themselves, rather than being hardcoded in C.
+ *
+ * --- How Extensible BSH Scripts Work ---
+ *
+ * bsh achieves extensibility through several key mechanisms:
+ *
+ * 1.  **Dynamic PATH and Module Resolution:** Commands and BSH modules (framework scripts)
+ * are resolved dynamically by searching predefined paths (`PATH` for executables,
+ * `BSH_MODULE_PATH` for BSH scripts). This means new commands or frameworks
+ * can be added simply by placing them in an appropriate directory and
+ * updating the shell's path variables.
+ *
+ * 2.  **Keyword Aliasing:** The `defkeyword` built-in command allows users to create
+ * aliases for existing keywords or commands. For example, `defkeyword defunc function`
+ * makes `function` an alias for `defunc`[cite: 34]. This enhances script readability
+ * and allows for personalized syntax.
+ *
+ * 3.  **User-Defined Functions (Script-level Logic):** The `defunc` (or `function`)
+ * keyword allows users to define custom shell functions entirely within BSH script.
+ * These functions support lexical scoping, meaning variables defined within a function
+ * are local to that function's execution[cite: 37]. This enables complex logic and
+ * code reuse directly in BSH, like the `for_loop` [cite: 38] or `json_get` [cite: 53] functions
+ * defined in `.bshrc`.
+ *
+ * 4.  **Dynamic Library Loading (`loadlib` & `calllib`):** bsh can load shared C libraries
+ * at runtime using `loadlib`[cite: 87]. Once loaded, functions within these libraries
+ * can be invoked from BSH scripts using `calllib`[cite: 87]. This is crucial for
+ * extending the shell with high-performance operations or accessing system APIs
+ * that are impractical to implement in pure BSH script (e.g., mathematical
+ * operations [cite: 63, 70, 75]).
+ *
+ * 5.  **Dynamic Operator Handling (Infix Operations):** This is a powerful feature
+ * that allows BSH scripts to define how arbitrary infix operators (like `+`, `-`, `*`, `/`)
+ * are processed. When the C core encounters an expression like `$a + $b` or `val1 . val2`,
+ * it doesn't have built-in arithmetic. Instead, it calls a special BSH function
+ * (by convention, `__dynamic_op_handler` [cite: 19]).
+ * This BSH function (defined in `init.bsh` or similar framework scripts)
+ * then determines the operand types and calls the appropriate underlying C library
+ * functions (e.g., `bsh_add_numbers` for `+` [cite: 63]) to perform the actual operation.
+ * The result is then passed back to the C core to complete the assignment or evaluation.
+ * This makes arithmetic and other complex data manipulations extensible at the script level.
+ *
+ * --- Basic Example of Extensibility in Action ---
+ *
+ * Imagine you want to perform arithmetic operations or concatenate numbers using a decimal point.
+ * Without extensibility, this would require hardcoded C logic. With bsh:
+ *
+ * 1.  **C Library (`bshmath.so`):** A C library is compiled (using `c_compiler.bsh` [cite: 87])
+ * and loaded, providing core numeric functions:
+ * ```c
+ * // Example from bsh_math_c_code in .bshrc
+ * int bsh_add_numbers(int argc, char* argv[], char* obuf, int obuf_size) {
+ * // ... converts argv[0] and argv[1] to doubles, adds them, stores in obuf ...
+ * snprintf(obuf, obuf_size, "%g", n1 + n2); [cite: 63]
+ * return 0;
+ * }
+ * // Similar functions for subtract, multiply, divide, modulo, type checks [cite: 66, 70, 75, 80, 83]
+ * ```
+ * This C code is stored in a BSH variable `$bsh_math_c_code` [cite: 62] and compiled
+ * into a shared library, then loaded with the alias `bshmath`[cite: 87].
+ *
+ * 2.  **BSH Number Framework (`number.bsh`):** This script provides BSH functions
+ * that wrap the C library calls. For example:
+ * ```bsh
+ * # In number.bsh
+ * function math_add (num1_str num2_str result_var) {
+ * _math_binary_op "add" "bsh_add_numbers" "$num1_str" "$num2_str" $result_var [cite: 19, 21]
+ * }
+ * # ... other math_* functions [cite: 20]
+ *
+ * # And a special handler for decimal concatenation like "10" . "5" -> "10.5"
+ * function bsh_decimal_constructor_handler (val1 type1 val2 type2 result_var) {
+ * if "$val1" == "" { $($result_var) = "0.$val2" } [cite: 22]
+ * else { $($result_var) = "$val1.$val2" } [cite: 17]
+ * }
+ * ```
+ *
+ * 3.  **Dynamic Operator Handler (`__dynamic_op_handler` in `init.bsh`):**
+ * This central dispatcher function determines which `math_` function to call
+ * based on the operator encountered in an infix expression:
+ * ```bsh
+ * # In init.bsh (which is imported by .bshrc)
+ * function __dynamic_op_handler (operand1_val operand2_val operator result_var_name) {
+ * # ... logic to determine operand types (e.g., using is_integer, is_float) ...
+ * if $operator == "+" {
+ * math_add "$operand1_val" "$operand2_val" $result_var_name [cite: 19, 21]
+ * } else if $operator == "." {
+ * bsh_decimal_constructor_handler "$operand1_val" "$op1_type" "$operand2_val" "$op2_type" $result_var_name [cite: 22]
+ * }
+ * # ... other operators ...
+ * }
+ * ```
+ *
+ * Now, from the `bsh` prompt or in any BSH script (after `.bshrc` and `init.bsh` are sourced):
+ * ```bsh
+ * $my_var = 10 + 5            # Calls __dynamic_op_handler, which calls math_add, which calls bsh_add_numbers
+ * echo "Sum: $my_var"        # Output: Sum: 15
+ *
+ * $int_part = 20
+ * $frac_part = 25
+ * $combined = $int_part . $frac_part # Calls __dynamic_op_handler, which calls bsh_decimal_constructor_handler
+ * echo "Combined: $combined" # Output: Combined: 20.25
+ * ```
+ *
+ * This layered approach demonstrates how the C core provides minimal primitives (tokenization,
+ * variable handling, dynamic library loading, and the `__dynamic_op_handler` hook), while
+ * the vast majority of practical functionality, including complex arithmetic, is built
+ * atop these primitives using BSH scripts and dynamically loaded C libraries.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -173,6 +290,7 @@ int execute_external_command(char *command_path, char **args, int arg_count, cha
 void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context);
 
 // Built-in Commands
+void handle_update_cwd_statement(Token *tokens, int num_tokens);
 void handle_defkeyword_statement(Token *tokens, int num_tokens);
 void handle_assignment_advanced(Token *tokens, int num_tokens);
 void handle_echo_advanced(Token *tokens, int num_tokens);
@@ -447,7 +565,9 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
             handle_calllib_statement(tokens, num_tokens);
         } else if (strcmp(command_name, "import") == 0) {
             handle_import_statement(tokens, num_tokens);
-        }
+        } else if (strcmp(command_name, "update_cwd") == 0) { 
+            handle_update_cwd_statement(tokens, num_tokens);  
+        }    
         // Add other built-in keywords here...
         else {
             // Not a known built-in keyword, try user function or external command or dynamic operator
@@ -644,6 +764,15 @@ void initialize_shell() {
         initial_module_path_env = DEFAULT_MODULE_PATH;
     }
     set_variable_scoped("BSH_MODULE_PATH", initial_module_path_env, false);
+
+    // Initialize and set CWD variable
+    char cwd_buffer[PATH_MAX];
+    if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL) {
+        set_variable_scoped("CWD", cwd_buffer, false);
+    } else {
+        perror("bsh: getcwd() error on init");
+        set_variable_scoped("CWD", "", false); // Set to empty if error
+    }
 }
 
 void cleanup_shell() {
@@ -1376,6 +1505,28 @@ void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_
 }
 
 // --- Built-in Commands ---
+
+void handle_update_cwd_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    if (num_tokens != 1) {
+        fprintf(stderr, "Syntax: update_cwd (takes no arguments)\n");
+        return;
+    }
+
+    char cwd_buffer[PATH_MAX];
+    if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL) {
+        set_variable_scoped("CWD", cwd_buffer, false);
+        // Optionally, you might want to echo the new CWD or store it in LAST_LIB_CALL_OUTPUT
+        // for consistency if other commands do so, but for a simple update, setting the var is enough.
+        // For example: set_variable_scoped("LAST_OPERATION_RESULT", cwd_buffer, false);
+    } else {
+        perror("bsh: update_cwd: getcwd() error");
+        set_variable_scoped("CWD", "", false); // Set to empty on error
+        // set_variable_scoped("LAST_OPERATION_RESULT", "ERROR_UPDATING_CWD", false);
+    }
+}
+
 void handle_defkeyword_statement(Token *tokens, int num_tokens) {
     if (num_tokens != 3 || tokens[1].type != TOKEN_WORD || tokens[2].type != TOKEN_WORD) {
         fprintf(stderr, "Syntax: defkeyword <original_keyword> <new_alias>\n"); return;
