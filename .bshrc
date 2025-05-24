@@ -326,6 +326,21 @@ if $bshmath_COMPILE_STATUS == "success" {
 }
 echo "------------------------------------"
 
+# Function to simulate return: echoes value and exits current script/function context.
+# Usage: return [value_or_$variable]
+function return (value_to_return) {
+    if $ARG_COUNT > 0 { # ARG_COUNT would be a special BSH var indicating num args passed
+        echo $value_to_return # This will now stringify objects automatically
+    }
+    # 'exit' here would terminate the current script or function.
+    # If 'exit' can take a status that becomes the script's output for $(),
+    # then echo might not be strictly needed if the stringified object is passed to exit.
+    # For simplicity, echo handles stringification for stdout, exit handles termination.
+    exit # Or exit with a specific status if needed
+}
+
+echo "BSH 'return' function defined."
+
 # --- End of .bshrc ---
 echo ".bshrc execution finished." # [cite: 29]
 echo ""
