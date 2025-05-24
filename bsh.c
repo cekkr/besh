@@ -1586,7 +1586,7 @@ int main(int argc, char *argv[]) {
 
 
 void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
-    // ... (remains the same)
+    // ... (remains the same) (is it missing something? pt 2)
     if (num_tokens < 2) { 
         fprintf(stderr, "Syntax error for 'if'. Expected: if [!] <condition_value_or_variable> [{]\n");
         if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
@@ -1657,7 +1657,7 @@ void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_sou
 }
 
 void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
-    // ... (remains the same)
+    // ... (remains the same) (is it missing something? pt 2)
     if (num_tokens < 2) {
         fprintf(stderr, "Syntax error for 'while'. Expected: while [!] <condition_value_or_variable_or_expr> [{]\n");
         if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
