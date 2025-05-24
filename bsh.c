@@ -308,6 +308,7 @@ void handle_import_statement(Token *tokens, int num_tokens);
 void handle_update_cwd_statement(Token *tokens, int num_tokens);
 void handle_unary_op_statement(Token* var_token, Token* op_token, bool is_prefix); // For ++$var, $var++
 void handle_exit_statement(Token *tokens, int num_tokens);
+void handle_eval_statement(Token *tokens, int num_tokens);
 
 // Block Management (for if/while etc.)
 void push_block_bf(BlockType type, bool condition_true, long loop_start_fpos, int loop_start_line_no);
@@ -634,6 +635,8 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
             handle_defoperator_statement(tokens, num_tokens);
         } else if (strcmp(command_name, "update_cwd") == 0) {
             handle_update_cwd_statement(tokens, num_tokens);        
+        } else if (strcmp(command_name, "eval") == 0) { 
+            handle_eval_statement(tokens, num_tokens);
         } else if (strcmp(command_name, "exit") == 0) {
             handle_exit_statement(tokens, num_tokens);
         }
@@ -2839,6 +2842,74 @@ void handle_exit_statement(Token *tokens, int num_tokens) {
     // would see STATE_RETURN_REQUESTED and then decide to actually exit the bsh process.
     // If in a script, execute_script() would stop.
     // If in a function, execute_user_function() would stop.
+}
+
+void handle_eval_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) {
+        return; // Don't eval if in a skipped block (unless it's an import context that allows it)
+    }
+
+    if (num_tokens < 2) {
+        // 'eval' with no arguments is typically a no-op or might return success.
+        // Some shells might error; for now, let's make it a no-op.
+        set_variable_scoped("LAST_COMMAND_STATUS", "0", false);
+        return;
+    }
+
+    char code_to_eval[MAX_LINE_LENGTH * 2]; // Buffer for the string to be evaluated
+                                           // Potentially needs to be larger if eval arguments are very long
+    code_to_eval[0] = '\0';
+    size_t current_eval_code_len = 0;
+
+    // Concatenate all arguments to 'eval' into a single string, expanding them.
+    for (int i = 1; i < num_tokens; i++) {
+        if (tokens[i].type == TOKEN_COMMENT) break;
+
+        char expanded_arg_part[INPUT_BUFFER_SIZE];
+        if (tokens[i].type == TOKEN_STRING) {
+            char unescaped_val[INPUT_BUFFER_SIZE];
+            unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val)); // From your bsh.c
+            expand_variables_in_string_advanced(unescaped_val, expanded_arg_part, sizeof(expanded_arg_part)); // From your bsh.c
+        } else {
+            expand_variables_in_string_advanced(tokens[i].text, expanded_arg_part, sizeof(expanded_arg_part)); // From your bsh.c
+        }
+
+        size_t part_len = strlen(expanded_arg_part);
+        if (current_eval_code_len + part_len + (i > 1 ? 1 : 0) < sizeof(code_to_eval)) {
+            if (i > 1) { // Add space between arguments
+                strcat(code_to_eval, " ");
+                current_eval_code_len++;
+            }
+            strcat(code_to_eval, expanded_arg_part);
+            current_eval_code_len += part_len;
+        } else {
+            fprintf(stderr, "eval: Constructed code string too long.\n");
+            set_variable_scoped("LAST_COMMAND_STATUS", "1", false); // Indicate error
+            return;
+        }
+    }
+
+    if (strlen(code_to_eval) > 0) {
+        // printf("[DEBUG eval: Executing: \"%s\"]\n", code_to_eval); // Optional debug
+
+        // Store current line number and input source, as eval provides its own "line"
+        // FILE* original_input_source = input_source; // from process_line params (if needed)
+        // int original_line_no = current_line_no;     // from process_line params (if needed)
+
+        // Execute the constructed string.
+        // The `process_line` function is designed to handle a single line of BSH code.
+        // `input_source` is NULL because this code doesn't come from a seekable file stream for `while` loops.
+        // `current_line_no` can be set to 0 or 1 for the context of the eval'd string.
+        // The `exec_mode_param` should be STATE_NORMAL, as eval'd code should execute normally
+        // within the current block and scope context.
+        process_line(code_to_eval, NULL, 0, STATE_NORMAL);
+
+        // Restore original line_no/input_source if they were modified by process_line or its callees
+        // (This depends on how `process_line` uses these for context in loops, etc.)
+        // Generally, process_line for eval should not impact the outer script's file seeking.
+    } else {
+        set_variable_scoped("LAST_COMMAND_STATUS", "0", false); // Eval of empty string is success
+    }
 }
 
 /////
