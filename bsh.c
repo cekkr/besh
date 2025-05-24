@@ -1,6 +1,6 @@
 /*
  * bsh - The Extensible Shell
- * Version: 0.7 (Dot Notation & Unified Operator Dispatch)
+ * Version: 0.8 (Dot Notation Property Access)
  * Copyright: Riccardo Cecchini <rcecchini.ds@gmail.com>
  *
  * This is an extensible shell designed to be lightweight yet powerful,
@@ -46,22 +46,23 @@
  * by its `_BSH_STRUCT_TYPE` metadata), `echo` will automatically "stringify"
  * the object, converting the flattened BSH variables back into the
  * `object:["key":"value", ...]` string format for output.
- * -   A BSH library (e.g., `object.bsh`) can provide helper functions to
+ * -   A BSH library (e.g., `object.bsh` or `extensions.bsh`) can provide helper functions to
  * more easily navigate and manipulate these flattened object structures within scripts.
  *
  * 4.  **Variable Property Access (Dot Notation):**
  * To access elements within BSH "objects" (which are internally stored as
- * flattened sets of variables), bsh uses a dot notation:
- * -   `$variable.propertyName`
- * -   `$variable.$variableContainingPropertyName`
+ * flattened sets of variables using an underscore-separated naming convention,
+ * e.g., `basevar_property1_property2`), bsh primarily uses a dot notation
+ * implemented in C's variable expansion logic:
+ * -   `$variable.propertyName` (e.g., `$myobj.user` accesses `myobj_user`)
+ * -   `$variable.$variableContainingPropertyName` (e.g., if `$keyvar` holds "name",
+ * then `$myobj.user.$keyvar` accesses `myobj_user_name`)
  * This syntax provides a clean and intuitive way to navigate the structured
- * data parsed from `object:`-prefixed strings or constructed by scripts.
- * The C core's variable expansion mechanism (`expand_variables_in_string_advanced`)
- * resolves these paths into the corresponding flattened variable names (e.g.,
- * `$variable_propertyName`). This replaces older, more implicit methods of
- * accessing array or object-like structures. While dot notation is primary,
- * the architecture allows for future BSH-level extensions to potentially
- * re-introduce or map other access syntaxes like `[]` if desired.
+ * data. The C core (`expand_variables_in_string_advanced`) parses this dot
+ * notation and resolves it to the corresponding flattened BSH variable name for lookup.
+ * While dot notation is the C-implemented default, BSH scripting extensions
+ * can provide functions to simulate other access styles (like `[]`) by
+ * programmatically constructing and accessing these underlying flattened variable names.
  *
  * 5.  **Dynamic PATH and Module Resolution (`import`):**
  * Commands and BSH modules (framework scripts) are resolved dynamically by
@@ -78,10 +79,10 @@
  * libraries at runtime.
  *
  * 7.  **Dynamic Library Loading & Calling (`loadlib`, `calllib`):**
- * Once C code is compiled (either manually or via `def_c_lib`), the resulting
- * shared library can be loaded into bsh using the `loadlib <path> <alias>`
- * built-in. Functions within this loaded library can then be invoked from BSH
- * scripts using `calllib <alias> <func_name> [args...]`. This is crucial for
+ * Once C code is compiled, the resulting shared library can be loaded into bsh
+ * using the `loadlib <path> <alias>` built-in. Functions within this loaded
+ * library can then be invoked from BSH scripts using
+ * `calllib <alias> <func_name> [args...]`. This is crucial for
  * extending the shell with high-performance operations (e.g., the `bshmath`
  * library for `number.bsh`) or accessing system APIs.
  *
@@ -101,18 +102,15 @@
  *
  * --- Parentheses `()` Usage ---
  *
- * Currently, parentheses `()` in bsh are primarily used for:
- * -   **Function Definitions:** To enclose the parameter list, e.g., `function my_func (p1 p2) { ... }`.
- * -   **Potential Future Use in Expressions:** While not fully parsed for precedence by
- * the C core itself, parentheses might be passed as part of string arguments to
- * the `__dynamic_op_handler` if complex script-defined expression evaluators
- * are built at the BSH level. The C tokenizer recognizes `(` and `)` as
- * `TOKEN_LPAREN` and `TOKEN_RPAREN`.
- * They are not currently used for command grouping in subshells in the C core.
- *
- * This combination of features aims to provide a minimal C core that serves as an
- * engine, with the shell's language features, operators, and complex behaviors
- * largely defined and extended by BSH scripts.
+ * In bsh, parentheses `()` are currently primarily used for:
+ * -   **Function Definitions:** To enclose the parameter list during function
+ * declaration, e.g., `function my_func (param1 param2) { ... }`.
+ * -   **Expression Grouping (Conceptual):** While the C core does not perform
+ * arithmetic precedence parsing using parentheses, they are tokenized as
+ * `TOKEN_LPAREN` and `TOKEN_RPAREN`. This allows them to be passed as part of
+ * expressions to the BSH `__dynamic_op_handler`, which could then implement
+ * script-level evaluation logic that respects parentheses if desired.
+ * They are not currently used by the C core for command grouping in subshells.
  */
 
 #include <stdio.h>
