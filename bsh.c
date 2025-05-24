@@ -148,7 +148,7 @@
 #define DEFAULT_MODULE_PATH "./framework:~/.bsh_framework:/usr/local/share/bsh/framework"
 #define MAX_EXPRESSION_TOKENS MAX_ARGS // Max tokens in a single expression to be parsed
 
-#define JSON_STDOUT_PREFIX "json:"
+#define JSON_STDOUT_PREFIX "json:" // json are not managed (?)
 #define OBJECT_STDOUT_PREFIX "object:"
 
 // --- Tokenizer Types (Simplified) ---
