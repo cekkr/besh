@@ -1,57 +1,118 @@
 /*
  * bsh - The Extensible Shell
- * Version: 0.6 (Unary Prefix/Postfix Operators)
+ * Version: 0.7 (Dot Notation & Unified Operator Dispatch)
  * Copyright: Riccardo Cecchini <rcecchini.ds@gmail.com>
  *
  * This is an extensible shell designed to be lightweight yet powerful,
- * allowing much of its functionality to be defined and extended through
- * BSH scripts themselves, rather than being hardcoded in C.
+ * allowing much of its functionality—including its operational syntax and
+ * data handling—to be defined and extended through BSH scripts themselves,
+ * rather than being hardcoded in C.
  *
- * --- How Extensible BSH Scripts Work ---
+ * --- Core Extensibility Mechanisms ---
  *
- * bsh achieves extensibility through several key mechanisms:
+ * bsh achieves its flexibility and extensibility through several key mechanisms:
  *
- * 1.  **Dynamic PATH and Module Resolution:** Commands and BSH modules (framework scripts)
- * are resolved dynamically by searching predefined paths (`PATH` for executables,
- * `BSH_MODULE_PATH` for BSH scripts). This means new commands or frameworks
- * can be added simply by placing them in an appropriate directory and
- * updating the shell's path variables.
+ * 1.  **Script-Defined Operators (`defoperator`):**
+ * Unlike traditional shells with fixed operator sets, bsh allows BSH scripts
+ * to define most operator symbols (e.g., "+", "-", "*", "++", "--", ".", "==")
+ * at runtime using the `defoperator` built-in command. The C core's tokenizer
+ * learns these operator symbols from script definitions.
  *
- * 2.  **Keyword Aliasing:** The `defkeyword` built-in command allows users to create
- * aliases for existing keywords or commands. For example, `defkeyword defunc function`
- * makes `function` an alias for `defunc`. This enhances script readability
- * and allows for personalized syntax.
+ * 2.  **Unified Operator Dispatch (`__dynamic_op_handler`):**
+ * When the C core tokenizes an expression involving a script-defined operator
+ * (be it binary infix like `$a + $b`, or unary prefix/postfix like `++$var`
+ * or `$var++`), it does not interpret the operation directly. Instead, it
+ * invokes a single, designated BSH function, conventionally named
+ * `__dynamic_op_handler`. This BSH function receives the operands (or variable
+ * name for unary ops), the operator symbol, and context (e.g., "prefix",
+ * "postfix"). The `__dynamic_op_handler` (defined in a core BSH script)
+ * is then responsible for determining the precise action, often involving
+ * type checking (via `type.bsh`) and calling appropriate BSH action functions
+ * (e.g., from `number.bsh`). This makes arithmetic, comparisons, and other
+ * operations fully extensible and customizable at the script level.
  *
- * 3.  **User-Defined Functions (Script-level Logic):** The `defunc` (or `function`)
- * keyword allows users to define custom shell functions entirely within BSH script.
- * These functions support lexical scoping, meaning variables defined within a function
- * are local to that function's execution. This enables complex logic and
- * code reuse directly in BSH, like the `for_loop` or `json_get` functions
- * defined in `.bshrc`.
+ * 3.  **Structured Data Handling (`object:` prefix & `echo` stringification):**
+ * -   **Automatic Parsing:** If a command's standard output (when captured, e.g.,
+ * during variable assignment like `$mydata = $(command_outputs_object)`)
+ * begins with the prefix "object:", `bsh.c` automatically parses the
+ * subsequent string as a BSH-specific object literal (e.g.,
+ * `["key1":"value1", "key2":["subkey":"subval"]]`). This parsed data is
+ * then "flattened" into a set of standard BSH variables, accessible via
+ * dot notation (e.g., `$mydata.key1`, `$mydata.key2.subkey`).
+ * A metadata variable (e.g., `$mydata_BSH_STRUCT_TYPE = "BSH_OBJECT_ROOT"`)
+ * is also created to mark the base variable as a BSH object container.
+ * -   **Automatic Stringification by `echo`:** Conversely, if the `echo` command
+ * is given a variable that represents one of these BSH objects (identified
+ * by its `_BSH_STRUCT_TYPE` metadata), `echo` will automatically "stringify"
+ * the object, converting the flattened BSH variables back into the
+ * `object:["key":"value", ...]` string format for output.
+ * -   A BSH library (e.g., `object.bsh`) can provide helper functions to
+ * more easily navigate and manipulate these flattened object structures within scripts.
  *
- * 4.  **Dynamic Library Loading (`loadlib` & `calllib`):** bsh can load shared C libraries
- * at runtime using `loadlib`. Once loaded, functions within these libraries
- * can be invoked from BSH scripts using `calllib`. This is crucial for
- * extending the shell with high-performance operations or accessing system APIs
- * that are impractical to implement in pure BSH script (e.g., mathematical
- * operations).
+ * 4.  **Variable Property Access (Dot Notation):**
+ * To access elements within BSH "objects" (which are internally stored as
+ * flattened sets of variables), bsh uses a dot notation:
+ * -   `$variable.propertyName`
+ * -   `$variable.$variableContainingPropertyName`
+ * This syntax provides a clean and intuitive way to navigate the structured
+ * data parsed from `object:`-prefixed strings or constructed by scripts.
+ * The C core's variable expansion mechanism (`expand_variables_in_string_advanced`)
+ * resolves these paths into the corresponding flattened variable names (e.g.,
+ * `$variable_propertyName`). This replaces older, more implicit methods of
+ * accessing array or object-like structures. While dot notation is primary,
+ * the architecture allows for future BSH-level extensions to potentially
+ * re-introduce or map other access syntaxes like `[]` if desired.
  *
- * 5.  **Dynamic Operator Handling (Infix Operations):** This is a powerful feature
- * that allows BSH scripts to define how arbitrary infix operators (like `+`, `-`, `*`, `/`)
- * are processed. When the C core encounters an expression like `$a + $b` or `val1 . val2`,
- * it doesn't have built-in arithmetic. Instead, it calls a special BSH function
- * (by convention, `__dynamic_op_handler`).
- * This BSH function (defined in `init.bsh` or similar framework scripts)
- * then determines the operand types and calls the appropriate underlying C library
- * functions (e.g., `bsh_add_numbers` for `+`) to perform the actual operation.
- * The result is then passed back to the C core to complete the assignment or evaluation.
- * This makes arithmetic and other complex data manipulations extensible at the script level.
+ * 5.  **Dynamic PATH and Module Resolution (`import`):**
+ * Commands and BSH modules (framework scripts) are resolved dynamically by
+ * searching paths defined in `PATH` (for executables) and `BSH_MODULE_PATH`
+ * (for BSH scripts). The `import module.name` command loads BSH scripts,
+ * converting dots in the module name to directory slashes to locate the file
+ * (e.g., `import framework.number` looks for `framework/number.bsh` within
+ * `BSH_MODULE_PATH` directories). This allows for modular script organization.
  *
- * 6.  **Unary Prefix/Postfix Operations (`$var++`, `++$var`):** Similar to dynamic infix
- * operators, when the C core detects a pattern like `$variable++` or `++$variable`,
- * it calls a dedicated BSH handler function (e.g., `__bsh_postfix_increment`).
- * This BSH function performs the actual increment/decrement logic, updates the
- * variable, and can set a result variable for the C core to note the outcome.
+ * 6.  **On-the-Fly C Compilation (`c_compiler.bsh` framework):**
+ * Through a BSH framework script like `c_compiler.bsh` (which provides a
+ * BSH function like `def_c_lib`), users can define, compile (using an
+ * available system C compiler like gcc or clang), and load C code as shared
+ * libraries at runtime.
+ *
+ * 7.  **Dynamic Library Loading & Calling (`loadlib`, `calllib`):**
+ * Once C code is compiled (either manually or via `def_c_lib`), the resulting
+ * shared library can be loaded into bsh using the `loadlib <path> <alias>`
+ * built-in. Functions within this loaded library can then be invoked from BSH
+ * scripts using `calllib <alias> <func_name> [args...]`. This is crucial for
+ * extending the shell with high-performance operations (e.g., the `bshmath`
+ * library for `number.bsh`) or accessing system APIs.
+ *
+ * 8.  **User-Defined Functions (`function` keyword):**
+ * The `function` (or `defunc`) keyword allows users to define custom shell
+ * functions entirely within BSH script. These functions support parameters
+ * and lexical scoping (variables defined within a function are local by default),
+ * enabling complex logic and code reuse directly in BSH. Parentheses `()`
+ * are used in function definitions to declare parameters, e.g.,
+ * `function my_func (param1 param2) { ... }`. Function calls follow
+ * typical shell syntax: `my_func arg1 arg2`.
+ *
+ * 9.  **Keyword Aliasing (`defkeyword`):**
+ * The `defkeyword` built-in command allows users to create aliases for existing
+ * keywords or command words (e.g., `defkeyword defunc function`). This helps
+ * in personalizing the shell's syntax or maintaining compatibility.
+ *
+ * --- Parentheses `()` Usage ---
+ *
+ * Currently, parentheses `()` in bsh are primarily used for:
+ * -   **Function Definitions:** To enclose the parameter list, e.g., `function my_func (p1 p2) { ... }`.
+ * -   **Potential Future Use in Expressions:** While not fully parsed for precedence by
+ * the C core itself, parentheses might be passed as part of string arguments to
+ * the `__dynamic_op_handler` if complex script-defined expression evaluators
+ * are built at the BSH level. The C tokenizer recognizes `(` and `)` as
+ * `TOKEN_LPAREN` and `TOKEN_RPAREN`.
+ * They are not currently used for command grouping in subshells in the C core.
+ *
+ * This combination of features aims to provide a minimal C core that serves as an
+ * engine, with the shell's language features, operators, and complex behaviors
+ * largely defined and extended by BSH scripts.
  */
 
 #include <stdio.h>
@@ -1318,121 +1379,118 @@ void set_variable_scoped(const char *name_raw, const char *value_to_set, bool is
 }
 
 void expand_variables_in_string_advanced(const char *input_str, char *expanded_str, size_t expanded_str_size) {
-    const char *p_in = input_str; char *p_out = expanded_str;
-    size_t remaining_size = expanded_str_size - 1; expanded_str[0] = '\0';
+    const char *p_in = input_str;
+    char *p_out = expanded_str;
+    size_t remaining_size = expanded_str_size - 1; // For null terminator
+    expanded_str[0] = '\0';
 
     while (*p_in && remaining_size > 0) {
         if (*p_in == '$') {
-            p_in++; 
-            char var_name_buffer[MAX_VAR_NAME_LEN * 2]; 
-            char *pv = var_name_buffer;
-
-            if (*p_in == '{') { 
-                p_in++; 
-                int brace_level = 1;
-                while (*p_in && brace_level > 0 && (pv - var_name_buffer < (long)sizeof(var_name_buffer) - 1)) {
-                    if (*p_in == '{') brace_level++;
-                    else if (*p_in == '}') brace_level--;
-                    if (brace_level > 0) *pv++ = *p_in; 
-                    p_in++;
-                }
-                *pv = '\0'; 
-            } else { 
-                while (isalnum((unsigned char)*p_in) || *p_in == '_') { 
-                    if (pv - var_name_buffer < MAX_VAR_NAME_LEN -1) *pv++ = *p_in++; else break;
-                }
-                if (*p_in == '[') { 
-                    if (pv - var_name_buffer < (long)sizeof(var_name_buffer) -1) *pv++ = *p_in++; else break; 
-                    int bracket_level = 1;
-                    while (*p_in && bracket_level > 0 && (pv - var_name_buffer < (long)sizeof(var_name_buffer) - 1)) {
-                        if (*p_in == '[') bracket_level++;
-                        else if (*p_in == ']') bracket_level--;
-                        *pv++ = *p_in++; 
-                    }
-                }
-                *pv = '\0'; 
-            }
-
-            char base_var_name[MAX_VAR_NAME_LEN];
-            char index_str_raw[MAX_VAR_NAME_LEN] = ""; 
-            bool is_array_access = false;
-
-            char* bracket_ptr = strchr(var_name_buffer, '[');
-            if (bracket_ptr) {
-                char* end_bracket_ptr = strrchr(bracket_ptr, ']'); 
-                if (end_bracket_ptr && end_bracket_ptr > bracket_ptr) {
-                    is_array_access = true;
-                    size_t base_len = bracket_ptr - var_name_buffer;
-                    strncpy(base_var_name, var_name_buffer, base_len); base_var_name[base_len] = '\0';
-                    size_t index_len = end_bracket_ptr - (bracket_ptr + 1);
-                    strncpy(index_str_raw, bracket_ptr + 1, index_len); index_str_raw[index_len] = '\0';
-                } else { 
-                    strncpy(base_var_name, var_name_buffer, MAX_VAR_NAME_LEN -1); base_var_name[MAX_VAR_NAME_LEN -1] = '\0';
-                }
-            } else { 
-                strncpy(base_var_name, var_name_buffer, MAX_VAR_NAME_LEN -1); base_var_name[MAX_VAR_NAME_LEN -1] = '\0';
-            }
+            p_in++; // Consume '$'
             
-            char *value_to_insert = NULL;
-            char expanded_index_val[INPUT_BUFFER_SIZE] = ""; 
-            if (is_array_access) {
-                if (index_str_raw[0] == '"' && index_str_raw[strlen(index_str_raw)-1] == '"') {
-                    char unescaped_idx[INPUT_BUFFER_SIZE];
-                    unescape_string(index_str_raw, unescaped_idx, sizeof(unescaped_idx));
-                    expand_variables_in_string_advanced(unescaped_idx, expanded_index_val, sizeof(expanded_index_val));
-                } else if (index_str_raw[0] == '$') {
-                    expand_variables_in_string_advanced(index_str_raw, expanded_index_val, sizeof(expanded_index_val));
-                } else { 
-                    strncpy(expanded_index_val, index_str_raw, sizeof(expanded_index_val)-1);
-                    expanded_index_val[sizeof(expanded_index_val)-1] = '\0';
-                }
+            char current_mangled_name[MAX_VAR_NAME_LEN * 4] = ""; // Buffer for var_prop1_prop2 etc. (increased size)
+            char segment_buffer[MAX_VAR_NAME_LEN]; // For individual segment (base var or property name)
+            char* pv = segment_buffer;
+            bool first_segment = true;
 
-                value_to_insert = get_array_element_scoped(base_var_name, expanded_index_val); 
+            do { // Loop for base variable and subsequent dot-separated properties
+                pv = segment_buffer; // Reset for current segment
+                segment_buffer[0] = '\0';
 
-                if (!value_to_insert) { 
-                    char* simple_var_val = get_variable_scoped(base_var_name);
-                    if (simple_var_val) { 
-                        char temp_char_buffer[2]; 
-                        long index_num = -1;
-                        char *endptr;
-                        errno = 0;
-                        index_num = strtol(expanded_index_val, &endptr, 10);
-
-                        if (errno == 0 && *expanded_index_val != '\0' && *endptr == '\0' && index_num >= 0 && (size_t)index_num < strlen(simple_var_val)) {
-                            temp_char_buffer[0] = simple_var_val[index_num];
-                            temp_char_buffer[1] = '\0';
-                            value_to_insert = temp_char_buffer; 
-                        } else {
-                            temp_char_buffer[0] = '\0';
-                            value_to_insert = temp_char_buffer;
+                if (first_segment) { // Parsing the base variable name
+                    if (*p_in == '{') {
+                        p_in++; // Consume '{'
+                        while (*p_in && *p_in != '}' && (pv - segment_buffer < MAX_VAR_NAME_LEN - 1)) {
+                            *pv++ = *p_in++;
+                        }
+                        if (*p_in == '}') p_in++; // Consume '}'
+                    } else {
+                        while (isalnum((unsigned char)*p_in) || *p_in == '_') {
+                            if (pv - segment_buffer < MAX_VAR_NAME_LEN - 1) *pv++ = *p_in++; else break;
                         }
                     }
-                }
-            } else { 
-                value_to_insert = get_variable_scoped(base_var_name);
-            }
+                    *pv = '\0';
+                    if (strlen(segment_buffer) == 0) { // Invalid: $ or ${}
+                        // Output literal '$' and potentially braces if they were consumed
+                        if (remaining_size > 0) { *p_out++ = '$'; remaining_size--; }
+                        const char* temp_p = p_in -1; // Check what was before current p_in
+                        if (*temp_p == '{' && remaining_size > 0) { *p_out++ = '{'; remaining_size--; }
+                        if (*temp_p == '}' && remaining_size > 0) { *p_out++ = '}'; remaining_size--; }
+                        goto next_char_in_input; // Break from $ processing, continue outer while
+                    }
+                    strncpy(current_mangled_name, segment_buffer, sizeof(current_mangled_name) - 1);
+                    first_segment = false;
+                } else { // Parsing a property name after a dot
+                    if (*p_in == '$') { // Dynamic property: .$dynamicProp
+                        p_in++; // Consume '$' for the dynamic part
+                        char dynamic_prop_source_var_name[MAX_VAR_NAME_LEN];
+                        char* pdv = dynamic_prop_source_var_name;
+                        if (*p_in == '{') {
+                            p_in++;
+                            while (*p_in && *p_in != '}' && (pdv - dynamic_prop_source_var_name < MAX_VAR_NAME_LEN - 1)) {
+                                *pdv++ = *p_in++;
+                            }
+                            if (*p_in == '}') p_in++;
+                        } else {
+                            while (isalnum((unsigned char)*p_in) || *p_in == '_') {
+                                if (pdv - dynamic_prop_source_var_name < MAX_VAR_NAME_LEN - 1) *pdv++ = *p_in++; else break;
+                            }
+                        }
+                        *pdv = '\0';
+                        char* prop_name_from_var = get_variable_scoped(dynamic_prop_source_var_name);
+                        if (prop_name_from_var) {
+                            strncpy(segment_buffer, prop_name_from_var, MAX_VAR_NAME_LEN -1);
+                            segment_buffer[MAX_VAR_NAME_LEN -1] = '\0';
+                        } else {
+                            segment_buffer[0] = '\0'; // Dynamic property name var not found
+                        }
+                    } else { // Literal property name: .prop
+                        while (isalnum((unsigned char)*p_in) || *p_in == '_') { // Property names are like var names
+                            if (pv - segment_buffer < MAX_VAR_NAME_LEN - 1) *pv++ = *p_in++; else break;
+                        }
+                        *pv = '\0';
+                    }
 
+                    if (strlen(segment_buffer) > 0) {
+                        if (strlen(current_mangled_name) + 1 + strlen(segment_buffer) < sizeof(current_mangled_name)) {
+                            strcat(current_mangled_name, "_");
+                            strcat(current_mangled_name, segment_buffer);
+                        } else {
+                            segment_buffer[0] = '\0'; // Prevent overflow, effectively ending chain
+                        }
+                    } else {
+                        // Invalid or empty property segment, chain broken.
+                        // The value of current_mangled_name up to this point will be sought.
+                        break; // Exit dot processing loop
+                    }
+                }
+            } while (*p_in == '.'); // Check for next dot only if a valid segment was parsed
+            // End of loop for base var and subsequent dot-separated properties
+
+            char* value_to_insert = get_variable_scoped(current_mangled_name);
             if (value_to_insert) {
                 size_t val_len = strlen(value_to_insert);
-                if (val_len < remaining_size) {
+                if (val_len <= remaining_size) { // Check if it fits
                     strcpy(p_out, value_to_insert);
                     p_out += val_len;
                     remaining_size -= val_len;
-                } else {
+                } else { // Not enough space
                     strncpy(p_out, value_to_insert, remaining_size);
                     p_out += remaining_size;
                     remaining_size = 0;
                 }
             }
+            // If value_to_insert is NULL, nothing is inserted for this $... sequence.
 
-        } else if (*p_in == '\\' && *(p_in+1) == '$') { 
-            p_in++; 
-            if (remaining_size > 0) { *p_out++ = *p_in++; remaining_size--; } 
-        } else { 
-            *p_out++ = *p_in++; remaining_size--;
+        } else if (*p_in == '\\' && *(p_in + 1) == '$') { // Escaped $
+            p_in++; // Skip '\'
+            if (remaining_size > 0) { *p_out++ = *p_in++; remaining_size--; }
+        } else { // Regular character
+            if (remaining_size > 0) { *p_out++ = *p_in++; remaining_size--; }
         }
+        next_char_in_input:; // Label for goto
     }
-    *p_out = '\0'; 
+    *p_out = '\0'; // Null-terminate the expanded string
 }
 
 char* get_array_element_scoped(const char* array_base_name, const char* index_str_raw_param) {

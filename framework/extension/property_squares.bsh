@@ -1,0 +1,57 @@
+# property_squares.bsh - Script for runtime extensions for objects properties reference
+
+echo "Loading BSH Extensions (extensions.bsh)..."
+
+# --- Square Bracket Access Simulation Functions ---
+# These functions provide a way to access object properties using a
+# syntax that resembles square brackets, by constructing the
+# underlying mangled variable names that the dot-notation would access.
+
+# Usage: get_element BASE_VAR_NAME KEY_STRING RESULT_VAR_NAME
+# Example: get_element myObject "propertyName" value_holder
+#          get_element myObject $dynamicKey value_holder
+function get_element (object_base_name_str key_str result_var) {
+    # Constructs the mangled name, e.g., "myObject_propertyName"
+    $mangled_name = "${object_base_name_str}_${key_str}"
+
+    # Retrieve the value. Relies on BSH's variable expansion.
+    # If $mangled_name doesn't exist, $($result_var) will typically be empty.
+    $($result_var) = $($mangled_name)
+    echo "DEBUG (get_element): Accessing '$mangled_name', got: '$($result_var)'"
+}
+
+# Usage: set_element BASE_VAR_NAME KEY_STRING VALUE_TO_SET
+# Example: set_element myObject "propertyName" "new value"
+#          set_element myObject $dynamicKey $newValue
+function set_element (object_base_name_str key_str value_to_set) {
+    $mangled_name = "${object_base_name_str}_${key_str}"
+    $($mangled_name) = "$value_to_set"
+    echo "DEBUG (set_element): Set '$mangled_name' to '$value_to_set'"
+
+    # Optionally, mark the base object as a BSH_OBJECT if not already done
+    # This helps echo stringify it correctly.
+    $object_type_var = "${object_base_name_str}_BSH_STRUCT_TYPE"
+    if "$($object_type_var)" == "" { # Set only if not already set
+        $($object_type_var) = "BSH_OBJECT_ROOT"
+    }
+}
+
+echo "BSH Square Bracket access simulation functions (get_element, set_element) defined."
+
+# --- Example Usage within BSH script ---
+#
+# $user_data_BSH_STRUCT_TYPE = "BSH_OBJECT_ROOT" # Mark it for echo
+# set_element user_data "name" "Alice"
+# set_element user_data "city" "Wonderland"
+#
+# $my_key = "city"
+# get_element user_data "$my_key" user_city_val
+# echo "User's city: $user_city_val" # Expected: Wonderland
+#
+# get_element user_data "name" user_name_val
+# echo "User's name: $user_name_val" # Expected: Alice
+#
+# # This would now be stringified by the modified C echo command
+# echo $user_data
+# # Expected output: object:["name":"Alice","city":"Wonderland"] (or similar, order might vary)
+#
