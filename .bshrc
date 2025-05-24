@@ -1,6 +1,7 @@
+# .bshrc file:
 # Executed when bsh starts. Defines core functions and aliases.
 # Default BSH Startup Script (.bshrc) - Emphasizing C Compilation & Type System
-echo "Executing .bshrc (v0.6 - dynamic ops, type system, C compilation)..."
+echo "Executing .bshrc (v0.9 - new C parser & BSH operator handlers)..." # Version updated
 echo "Welcome to bsh - The Extensible Shell!"
 echo "------------------------------------"
 
@@ -11,13 +12,10 @@ defkeyword defunc function
 # --- Essential Framework Imports ---
 echo "Importing essential BSH frameworks..."
 import c_compiler     # For def_c_lib to compile C code on the fly
-import type           # For get_type and type constants (e.g., TYPE_INT, TYPE_STRING)
-import core_operators # For defoperator calls & the central __dynamic_op_handler
+import type           # For get_type
+import core_operators # For defoperator calls & BSH operator handlers
 
-# number.bsh is imported AFTER bshmath C library is compiled and loaded,
-# as number.bsh might try to configure itself based on bshmath's availability.
-# OR, number.bsh defines functions, and their successful operation depends on bshmath.
-
+# number.bsh will be imported after bshmath C library is compiled and loaded.
 echo "------------------------------------"
 echo "Defining and Compiling 'bshmath' C Library via c_compiler.bsh..."
 
@@ -65,75 +63,68 @@ int bsh_modulo_numbers(int argc, char* argv[], char* obuf, int obuf_size) { // T
   if (iv2 == 0) { snprintf(obuf, obuf_size, \"Error: Modulo by zero\"); return 3; }
   snprintf(obuf, obuf_size, \"%ld\", iv1 % iv2); return 0;
 }
-
 // Comparison operations (return \"1\" for true, \"0\" for false)
-// These C functions should handle type parsing (strtod) and then compare.
 int bsh_numbers_equal(int argc, char* argv[], char* obuf, int obuf_size) {
-  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
-  double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL); /* Add error checks for strtod */
+  if (argc < 2) { snprintf(obuf, obuf_size, \"0\"); return 1; }
+  double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
   snprintf(obuf, obuf_size, \"%d\", v1 == v2); return 0;
 }
 int bsh_numbers_not_equal(int argc, char* argv[], char* obuf, int obuf_size) {
-  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  if (argc < 2) { snprintf(obuf, obuf_size, \"0\"); return 1; }
   double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
   snprintf(obuf, obuf_size, \"%d\", v1 != v2); return 0;
 }
 int bsh_numbers_greater_than(int argc, char* argv[], char* obuf, int obuf_size) {
-  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  if (argc < 2) { snprintf(obuf, obuf_size, \"0\"); return 1; }
   double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
   snprintf(obuf, obuf_size, \"%d\", v1 > v2); return 0;
 }
 int bsh_numbers_less_than(int argc, char* argv[], char* obuf, int obuf_size) {
-  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  if (argc < 2) { snprintf(obuf, obuf_size, \"0\"); return 1; }
   double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
   snprintf(obuf, obuf_size, \"%d\", v1 < v2); return 0;
 }
 int bsh_numbers_greater_equal(int argc, char* argv[], char* obuf, int obuf_size) {
-  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  if (argc < 2) { snprintf(obuf, obuf_size, \"0\"); return 1; }
   double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
   snprintf(obuf, obuf_size, \"%d\", v1 >= v2); return 0;
 }
 int bsh_numbers_less_equal(int argc, char* argv[], char* obuf, int obuf_size) {
-  if (argc < 2) { /* error ... */ snprintf(obuf, obuf_size, \"0\"); return 1; }
+  if (argc < 2) { snprintf(obuf, obuf_size, \"0\"); return 1; }
   double v1 = strtod(argv[0], NULL); double v2 = strtod(argv[1], NULL);
   snprintf(obuf, obuf_size, \"%d\", v1 <= v2); return 0;
 }
-
-// Type checking C functions (used by type.bsh or number.bsh's math_is_*)
+// Type checking C functions
 int bsh_is_integer(int argc, char* argv[], char* obuf, int obuf_size) {
   if (argc < 1 || argv[0][0] == '\\0') { snprintf(obuf, obuf_size, \"0\"); return 1; }
   char *endptr; strtol(argv[0], &endptr, 10);
   snprintf(obuf, obuf_size, \"%d\", *endptr == '\\0'); return 0;
 }
-int bsh_is_float(int argc, char* argv[], char* obuf, int obuf_size) { // Checks if it *can* be parsed as float
+int bsh_is_float(int argc, char* argv[], char* obuf, int obuf_size) {
   if (argc < 1 || argv[0][0] == '\\0') { snprintf(obuf, obuf_size, \"0\"); return 1; }
   char *endptr; strtod(argv[0], &endptr);
   snprintf(obuf, obuf_size, \"%d\", *endptr == '\\0'); return 0;
 }
-// Logical NOT C function (for '!')
+// Logical NOT C function
 int bsh_logical_not(int argc, char* argv[], char* obuf, int obuf_size) {
-  if (argc < 1) { snprintf(obuf, obuf_size, \"1\"); return 1; } // Or error
+  if (argc < 1) { snprintf(obuf, obuf_size, \"1\"); return 1; }
   if (strcmp(argv[0], \"0\") == 0 || strcmp(argv[0], \"false\") == 0 || argv[0][0] == '\\0') {
-    snprintf(obuf, obuf_size, \"1\"); // true
+    snprintf(obuf, obuf_size, \"1\");
   } else {
-    snprintf(obuf, obuf_size, \"0\"); // false
+    snprintf(obuf, obuf_size, \"0\");
   }
   return 0;
 }
-"
+" #
 
-# Define compiler/linker flags if needed
 $BSH_MATH_CFLAGS = "-Wall -Wextra -O2" # Example
-$BSH_MATH_LDFLAGS = "-lm" # Link math library for fmod etc. if not default
+$BSH_MATH_LDFLAGS = "-lm" # Link math library
 
-# Use def_c_lib from c_compiler.bsh to compile and load the C code
 def_c_lib bshmath BSH_MATH_C_LIB_SOURCE BSH_MATH_CFLAGS BSH_MATH_LDFLAGS
 
-# Check status variables set by def_c_lib
 if $bshmath_COMPILE_STATUS == "success" {
     if $bshmath_LOAD_STATUS == "success" {
         echo "'bshmath' C library compiled and loaded successfully."
-        # Now it's safe to import number.bsh which depends on bshmath
         echo "Importing number module (math actions)..."
         import number
     } else {
@@ -146,38 +137,18 @@ if $bshmath_COMPILE_STATUS == "success" {
 }
 echo "------------------------------------"
 
-# --- Import Core Framework Modules ---
-# Assumes modules are in a directory accessible via BSH_MODULE_PATH.
-# Sub-paths can be accessed using dots, e.g., framework.c_compiler.
-
-echo "Importing c_compiler module..." #
-import c_compiler # Provides def_c_lib [cite: 5]
-
-echo "Importing core_operators module (defines operators and __dynamic_op_handler)..." #
-import core_operators # NEW: Defines ops via 'defoperator' and __dynamic_op_handler [cite: 5]
-
-echo "Importing string module..." #
-import string # Assumed for string utilities [cite: 5]
-
-echo "Importing number module (provides math actions)..." #
-import number # Provides math_add, bsh_unary_*, etc. [cite: 5]
-
-echo "Importing type module (for type system, if used by __dynamic_op_handler advanced forms)..." #
-import type # For type checking, potentially [cite: 5]
+# Import other core modules AFTER core_operators and number (if number relies on bshmath)
+echo "Importing string module..."
+import string
 
 echo "------------------------------------"
 
-# --- Utility Functions (Leveraging Lexical Scoping) ---
-
-# Function to check if a variable's value is empty.
-# Usage: is_empty VAR_NAME_STRING RESULT_VAR_NAME
-# (is_empty, scope_test, for_loop from original .bshrc can go here)
+# --- Utility Functions ---
 function is_empty (var_name_str result_var) {
     $temp_val = $($var_name_str)
     if $temp_val == "" { $($result_var) = "true" } else { $($result_var) = "false" }
 }
 
-# Function to demonstrate local scope
 function scope_test (param1) {
     echo "--- scope_test ---"
     echo "Param1 (local): $param1"
@@ -185,64 +156,49 @@ function scope_test (param1) {
     echo "Local_var (local): $local_var"
 
     is_empty param1 param_empty_res
-    echo "Is param1 empty? $param_empty_res" # [cite: 7, 8]
+    echo "Is param1 empty? $param_empty_res"
     echo "Global_var (from scope_test): $global_var_example"
     echo "--- end scope_test ---"
 }
 
-# --- Enhanced Control Structures ---
-# for_loop and c_for can remain largely the same as they use inc/dec or command execution.
-# The 'inc' and 'dec' keywords in bsh.c would now internally use the
-# __dynamic_op_handler for $var++ like logic if they were implemented that way,
-# or they might directly modify variables if they are simpler builtins.
-# Assuming 'inc $varname' and 'dec $varname' are simple builtins that directly
-# call math_add/math_sub on the variable's value and re-set it.
-
-function for_loop (iterator start_val end_val step command_body) { # [cite: 8]
+# For loop using direct math_add calls (fine) or could use arithmetic operators
+function for_loop (iterator start_val end_val step command_body) {
     echo "FOR_LOOP: Iter '$iterator' from $start_val to $end_val (exclusive) step $step"
     $($iterator) = $start_val
 
-    if $step == "0" { # [cite: 8]
+    if $step == "0" {
         echo "FOR_LOOP Error: Step value cannot be zero."
-        return # [cite: 9]
+        return
     }
 
-    # Condition evaluation (e.g., $($iterator) < $end_val) will now go through __dynamic_op_handler
-    # if '<' is defined as an operator.
-    # The inc/dec calls on iterator also go through the new mechanism.
-    # For simplicity, let's assume inc/dec still work as commands or are handled.
-    # If inc/dec are BSH functions that call, e.g., `VAR=$($VAR + 1)`, that will use the new op handling.
-
-    $is_positive_step = "1" # Using "1" for true, "0" for false to align with math_gt etc.
-    #math_gt "$step" "0" step_is_pos_res # Example if math_gt sets a var
-    #if $step_is_pos_res == "0" { $is_positive_step = "0" }
-    # Simplified for now, assuming string comparison works for simple positive/negative numbers
-    if $step < "0" { # This comparison now uses __dynamic_op_handler [cite: 9]
+    $is_positive_step = "1" # Assume positive step
+    # The comparison $step < "0" will use the new operator system
+    if $step < "0" { # This now goes through the C parser and '<' operator BSH handler
         $is_positive_step = "0"
     }
 
     if $is_positive_step == "1" {
-        while $($iterator) < $end_val { # Comparison uses __dynamic_op_handler
+        # The comparison $($iterator) < $end_val uses new operator system
+        while $($iterator) < $end_val {
             $command_body
-            # Simple increment using the $iterator itself via __dynamic_op_handler
-            # This assumes 'inc' keyword or direct math can modify iterator based on step.
-            # For loop: $iterator = $($iterator) + $step
-            math_add "$($iterator)" "$step" "$iterator" # Re-assign to iterator
+            # $iterator = $($iterator) + $step # This would use the new '+' operator
+            math_add "$($iterator)" "$step" "$iterator" # Direct call, bypasses op dispatch for '+'
         }
     } else { # Negative step
-        while $($iterator) > $end_val { # Comparison uses __dynamic_op_handler
+        # The comparison $($iterator) > $end_val uses new operator system
+        while $($iterator) > $end_val {
             $command_body
-            math_add "$($iterator)" "$step" "$iterator" # Step is negative, so this subtracts
+            # $iterator = $($iterator) + $step # Step is negative
+            math_add "$($iterator)" "$step" "$iterator" # Direct call
         }
     }
     echo "FOR_LOOP: Finished for '$iterator'."
 }
 
-
 # --- JSON Handling (Conceptual Wrappers) ---
 # This part remains conceptual. If bsh.c now flattens JSON, these functions would
 # provide a BSH API to access those flattened variables.
-function json_get (base_json_var_name path_str result_var_name) { # [cite: 22]
+function json_get (base_json_var_name path_str result_var_name) {
     echo "JSON_GET: Attempting to get path '$path_str' from flattened JSON var '$base_json_var_name'"
 
     # Assuming bsh.c created variables like:
@@ -270,7 +226,7 @@ function json_get (base_json_var_name path_str result_var_name) { # [cite: 22]
 }
 
 # --- Path Manipulation Example ---
-# Stays largely the same, relies on shell's variable handling. [cite: 24]
+# Stays largely the same, relies on shell's variable handling.
 
 # --- C Code Definition for bshmath ---
 # This part is still crucial for number.bsh to function if it uses 'bshmath'.
@@ -312,17 +268,17 @@ int bsh_logical_not(int argc, char* argv[], char* obuf, int obuf_size) {
 "
 
 echo "Defining and compiling 'bshmath' C library for number framework..."
-# Assumes c_compiler.def_c_lib is available [cite: 31]
+# Assumes c_compiler.def_c_lib is available
 def_c_lib bshmath bsh_math_c_code "" ""
 
 if $bshmath_COMPILE_STATUS == "success" {
     if $bshmath_LOAD_STATUS == "success" {
         echo "'bshmath' library compiled and loaded successfully."
     } else {
-        echo "Warning: 'bshmath' compiled but failed to load." # [cite: 57]
+        echo "Warning: 'bshmath' compiled but failed to load."
     }
 } else {
-    echo "Error: Failed to compile 'bshmath' library." # [cite: 58, 59]
+    echo "Error: Failed to compile 'bshmath' library."
 }
 echo "------------------------------------"
 
@@ -342,7 +298,7 @@ function return (value_to_return) {
 echo "BSH 'return' function defined."
 
 # --- End of .bshrc ---
-echo ".bshrc execution finished." # [cite: 29]
+echo ".bshrc execution finished."
 echo ""
 
-$global_var_example = "I am a global variable set in .bshrc" # [cite: 30]
+$global_var_example = "I am a global variable set in .bshrc"

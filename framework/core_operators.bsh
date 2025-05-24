@@ -1,183 +1,191 @@
 # core_operators.bsh
-# Defines standard operator symbols to the C tokenizer and provides the
-# central BSH __dynamic_op_handler for processing them.
-# Loaded by .bshrc
+# Defines standard operator symbols and their BSH handlers.
+echo "Loading Core Operators Framework (core_operators.bsh)..." [cite: 124]
 
-echo "Loading Core Operators Framework (core_operators.bsh)..."
+# --- Define Core Operator Symbols & Properties ---
+# TYPE: UNARY_PREFIX, UNARY_POSTFIX, BINARY_INFIX, TERNARY_PRIMARY
+# ASSOC: L (Left), R (Right), N (Non-associative/Unary)
+# PRECEDENCE: Higher numbers mean higher precedence.
+# HANDLER: The BSH function to call.
 
-# --- Define Core Operator Symbols for the C Tokenizer ---
-# The 'defoperator' built-in tells bsh.c to recognize these strings as TOKEN_OPERATOR.
-# The C tokenizer will then pass these strings to __dynamic_op_handler.
+# Arithmetic Operators
+# Precedences: Multiplicative (50), Additive (40)
+defoperator "*" TYPE BINARY_INFIX PRECEDENCE 50 ASSOC L HANDLER "bsh_op_multiply"
+defoperator "/" TYPE BINARY_INFIX PRECEDENCE 50 ASSOC L HANDLER "bsh_op_divide"
+defoperator "%" TYPE BINARY_INFIX PRECEDENCE 50 ASSOC L HANDLER "bsh_op_modulo"
+defoperator "+" TYPE BINARY_INFIX PRECEDENCE 40 ASSOC L HANDLER "bsh_op_add_or_concat" # Smart handler
+defoperator "-" TYPE BINARY_INFIX PRECEDENCE 40 ASSOC L HANDLER "bsh_op_subtract"
+# Unary minus could be a separate operator or handled by bsh_op_subtract if it gets one arg.
+# For simplicity, assume tokenizer handles negative numbers like "-5" as TOKEN_NUMBER.
+# If user types "- $var", then '-' is a prefix operator.
+# defoperator "-" TYPE UNARY_PREFIX PRECEDENCE 60 ASSOC N HANDLER "bsh_op_negate"
 
-# Arithmetic and Decimal
-defoperator "+"
-defoperator "-"  # For subtraction. Negative numbers are handled by C tokenizer directly.
-defoperator "*"
-defoperator "/"
-defoperator "%"
-defoperator "."  # For decimal construction or other BSH-defined uses
 
-# Unary Increment/Decrement
-defoperator "++"
-defoperator "--"
+# Unary Increment/Decrement (high precedence)
+# Note: The BSH handlers will need to expect a variable NAME for these.
+defoperator "++" TYPE UNARY_PREFIX PRECEDENCE 60 ASSOC N HANDLER "bsh_op_prefix_increment"
+defoperator "--" TYPE UNARY_PREFIX PRECEDENCE 60 ASSOC N HANDLER "bsh_op_prefix_decrement"
+defoperator "++" TYPE UNARY_POSTFIX PRECEDENCE 60 ASSOC N HANDLER "bsh_op_postfix_increment"
+defoperator "--" TYPE UNARY_POSTFIX PRECEDENCE 60 ASSOC N HANDLER "bsh_op_postfix_decrement"
 
-# Comparison (will be handled by __dynamic_op_handler and number.bsh)
-defoperator "=="
-defoperator "!="
-defoperator ">"
-defoperator "<"
-defoperator ">="
-defoperator "<="
+# Comparison Operators (precedence 30)
+defoperator "==" TYPE BINARY_INFIX PRECEDENCE 30 ASSOC L HANDLER "bsh_op_equals"
+defoperator "!=" TYPE BINARY_INFIX PRECEDENCE 30 ASSOC L HANDLER "bsh_op_not_equals"
+defoperator ">"  TYPE BINARY_INFIX PRECEDENCE 30 ASSOC L HANDLER "bsh_op_greater_than"
+defoperator "<"  TYPE BINARY_INFIX PRECEDENCE 30 ASSOC L HANDLER "bsh_op_less_than"
+defoperator ">=" TYPE BINARY_INFIX PRECEDENCE 30 ASSOC L HANDLER "bsh_op_greater_equals"
+defoperator "<=" TYPE BINARY_INFIX PRECEDENCE 30 ASSOC L HANDLER "bsh_op_less_equals"
 
-# Logical (if not handled as special keywords by C parser for if/while)
-# Assuming for now 'if ! var' is handled by 'if' keyword parsing the '!'
-# If '!' is a general purpose logical NOT operator, it could be defined here too.
-# defoperator "!"
-# defoperator "&&"
-# defoperator "||"
+# Logical NOT (if to be used as a general prefix operator like ! $var)
+# defoperator "!" TYPE UNARY_PREFIX PRECEDENCE 60 ASSOC N HANDLER "bsh_op_logical_not"
 
-# Inline if
-defoperator "?"
-defoperator ":"
+# Ternary Conditional Operator (precedence 5, right-associative for nesting)
+defoperator "?" TYPE TERNARY_PRIMARY PRECEDENCE 5 ASSOC R HANDLER "bsh_op_ternary_handler"
+# The ':' is implicitly handled by the C parser when it encounters '?' defined as TERNARY_PRIMARY.
+# No separate defoperator for ':' as part of the ternary is needed if C handles the structure.
 
-echo "Core operator symbols defined."
+# Dot operator for decimal construction or potential property access (very high precedence)
+# If used for property access like $obj.prop, its handler would manage that.
+# If for decimals 10.5, its handler combines "10" and "5".
+defoperator "." TYPE BINARY_INFIX PRECEDENCE 70 ASSOC L HANDLER "bsh_op_dot_handler"
 
-# --- Central Dynamic Operator Handler ---
-# The C core (invoke_bsh_dynamic_op_handler) calls this BSH function when it encounters
-# an operator in an expression (standalone or RHS of assignment).
-#
-# Signature from C: __dynamic_op_handler (arg1, arg2, arg3, result_holder_var_name)
-#
-# For Binary Operations (e.g., VAL1 + VAL2):
-#   arg1: string value of the first operand (e.g., "10")
-#   arg2: string value of the second operand (e.g., "5")
-#   arg3: operator symbol string (e.g., "+")
-#   result_holder_var_name: name of BSH var to store expression result (e.g., "__TEMP_OP_RES")
-#
-# For Unary Operations (e.g., ++VAR or VAR++):
-#   arg1: name of the variable being operated on (e.g., "myCounter")
-#   arg2: operator symbol string (e.g., "++")
-#   arg3: context string ("prefix" or "postfix")
-#   result_holder_var_name: name of BSH var to store expression result (e.g., "__TEMP_OP_RES")
 
-function __dynamic_op_handler (param_arg1 param_arg2 param_arg3 param_result_var_name) {
-    echo "BSH __dynamic_op_handler: Args <$param_arg1> <$param_arg2> <$param_arg3> -> $param_result_var_name"
+echo "Core operator symbols and properties defined."
 
-    # Determine context: Unary or Binary
-    if $param_arg3 == "prefix" {
-        $op_var_name = "$param_arg1"
-        $op_symbol = "$param_arg2"
-        echo "BSH Dispatch: Unary Prefix: $op_symbol on var '$op_var_name'"
+# --- BSH Operator Handler Functions ---
+# These functions are called by the C core's expression evaluator.
+# Signature: handler_func (op_symbol_str, operand1_str, [operand2_str, ...] result_holder_var_name)
 
-        if $op_symbol == "++" {
-            bsh_unary_prefix_increment "$op_var_name" $param_result_var_name # From number.bsh
-        } else if $op_symbol == "--" {
-            bsh_unary_prefix_decrement "$op_var_name" $param_result_var_name # From number.bsh
-        } else {
-            echo "Error (__dynamic_op_handler): Unknown unary prefix operator '$op_symbol'"
-            $($param_result_var_name) = "UNKNOWN_PREFIX_OP_ERROR"
-        }
-        return
-    } else if $param_arg3 == "postfix" {
-        $op_var_name = "$param_arg1"
-        $op_symbol = "$param_arg2"
-        echo "BSH Dispatch: Unary Postfix: $op_symbol on var '$op_var_name'"
+# --- Arithmetic Handlers ---
+function bsh_op_add_or_concat (op_sym lhs rhs result_var) {
+    # echo "BSH Handler: $op_sym on '$lhs', '$rhs' -> $result_var"
+    get_type "$lhs" lhs_type_var # from type.bsh
+    get_type "$rhs" rhs_type_var # from type.bsh
 
-        if $op_symbol == "++" {
-            bsh_unary_postfix_increment "$op_var_name" $param_result_var_name # From number.bsh
-        } else if $op_symbol == "--" {
-            bsh_unary_postfix_decrement "$op_var_name" $param_result_var_name # From number.bsh
-        } else {
-            echo "Error (__dynamic_op_handler): Unknown unary postfix operator '$op_symbol'"
-            $($param_result_var_name) = "UNKNOWN_POSTFIX_OP_ERROR"
-        }
-        return
-    }
-    
-    # --- Handle Binary (or potentially special multi-part) Operations ---
-    $operand1_val = "$param_arg1"
-    $operand2_val = "$param_arg2" # For '?', this would be the true-expression part
-    $op_str = "$param_arg3"       # For '?', this would be "?"
-
-    echo "BSH Dispatch: Potential Binary/Special Op: '$operand1_val' $op_str '$operand2_val'"
-
-    # --- CONCEPTUAL: Attempting to handle '?' ---
-    if $op_str == "?" {
-        # At this point, __dynamic_op_handler received:
-        # param_arg1 = result of condition (e.g., "1" or "0")
-        # param_arg2 = value_if_true (e.g., "ehy")
-        # param_arg3 = "?"
-        # The ":" and value_if_false are NOT available here with the current C dispatch.
-
-        echo "BSH __dynamic_op_handler: Encountered '?' operator."
-        echo "  Condition (arg1): $operand1_val"
-        echo "  True_Expr (arg2): $operand2_val"
-        echo "  WARNING: ':' and False_Expr are not passed by current C core for '?'."
-
-        # Simplified logic: if condition is true, use operand2_val. Otherwise, error or default.
-        if "$operand1_val" == "1" || "$operand1_val" == "true" {
-            $($param_result_var_name) = "$operand2_val"
-        } else {
-            # We don't have the false_value here!
-            $($param_result_var_name) = "TERNARY_FALSE_BRANCH_MISSING"
-            echo "  Error: False branch of ternary operator not available to __dynamic_op_handler."
-        }
-        return
-    }
-    # ':' operator would also be called separately if it appears later in the token stream,
-    # e.g., __dynamic_op_handler "ehy" "ciao" ":" some_other_temp_var
-    # This doesn't reconstruct the ternary operator correctly.
-
-    # Assume Binary Operation if context is not "prefix" or "postfix"
-    # Here, param_arg3 is the operator symbol itself.
-    $val1_str = "$param_arg1"
-    $val2_str = "$param_arg2"
-    $op_symbol_binary = "$param_arg3"
-    echo "BSH Dispatch: Binary: '$val1_str' $op_symbol_binary '$val2_str'"
-
-    # Here, a more sophisticated system might use the 'type.bsh' framework
-    # to get types of val1_str and val2_str and dispatch to a registered handler
-    # (like the old register_operator_handler system).
-    # For this example, we'll do a direct switch based on the operator symbol,
-    # calling functions from number.bsh.
-
-    if $op_symbol_binary == "+" {
-        math_add "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == "-" {
-        math_sub "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == "*" {
-        math_mul "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == "/" {
-        math_div "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == "%" {
-        math_mod "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == "." { # Decimal construction
-        # This used to be in the 'calc' function.
-        # Assumes val1 is integer part (can be empty), val2 is fractional part.
-        if "$val1_str" == "" { # Handle cases like ".5" -> "0.5"
-            $($param_result_var_name) = "0.$val2_str"
-        } else {
-            $($param_result_var_name) = "$val1_str.$val2_str"
-        }
-        echo "BSH Dispatch: Decimal construct '$val1_str.$val2_str' result: $($param_result_var_name)"
-    } else if $op_symbol_binary == "==" {
-        math_eq "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == "!=" {
-        math_ne "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == ">" {
-        math_gt "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == "<" {
-        math_lt "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == ">=" {
-        math_ge "$val1_str" "$val2_str" $param_result_var_name
-    } else if $op_symbol_binary == "<=" {
-        math_le "$val1_str" "$val2_str" $param_result_var_name
+    if "$lhs_type_var" == "STRING" || "$rhs_type_var" == "STRING" {
+        # Assume string_concat is available globally or imported.
+        string_concat "$lhs" "$rhs" $result_var # from string.bsh
     } else {
-        echo "Error (__dynamic_op_handler): Unknown or unsupported binary operator '$op_symbol_binary'"
-        $($param_result_var_name) = "UNKNOWN_BINARY_OP_ERROR"
+        math_add "$lhs" "$rhs" $result_var # from number.bsh
     }
 }
 
-echo "Core Operators Framework loaded. __dynamic_op_handler is defined."
+function bsh_op_subtract (op_sym lhs rhs result_var) {
+    # echo "BSH Handler: $op_sym on '$lhs', '$rhs' -> $result_var"
+    math_sub "$lhs" "$rhs" $result_var # from number.bsh
+}
+function bsh_op_multiply (op_sym lhs rhs result_var) {
+    math_mul "$lhs" "$rhs" $result_var # from number.bsh
+}
+function bsh_op_divide (op_sym lhs rhs result_var) {
+    math_div "$lhs" "$rhs" $result_var # from number.bsh
+}
+function bsh_op_modulo (op_sym lhs rhs result_var) {
+    math_mod "$lhs" "$rhs" $result_var # from number.bsh
+}
+# function bsh_op_negate (op_sym val result_var) {
+#   # math_sub "0" "$val" $result_var # Example
+# }
 
-#todo: check unary op condition ? true : false implementation
+# --- Unary Increment/Decrement Handlers ---
+# These expect operand_str to be the NAME of the variable.
+function bsh_op_prefix_increment (op_sym var_name result_var) {
+    # echo "BSH Handler: $op_sym on var_name '$var_name' -> $result_var"
+    bsh_unary_prefix_increment "$var_name" $result_var # from number.bsh
+}
+function bsh_op_prefix_decrement (op_sym var_name result_var) {
+    bsh_unary_prefix_decrement "$var_name" $result_var # from number.bsh
+}
+function bsh_op_postfix_increment (op_sym var_name result_var) {
+    bsh_unary_postfix_increment "$var_name" $result_var # from number.bsh
+}
+function bsh_op_postfix_decrement (op_sym var_name result_var) {
+    bsh_unary_postfix_decrement "$var_name" $result_var # from number.bsh
+}
+
+# --- Comparison Handlers ---
+function bsh_op_equals (op_sym lhs rhs result_var) {
+    math_eq "$lhs" "$rhs" $result_var # from number.bsh
+}
+function bsh_op_not_equals (op_sym lhs rhs result_var) {
+    math_ne "$lhs" "$rhs" $result_var # from number.bsh
+}
+function bsh_op_greater_than (op_sym lhs rhs result_var) {
+    math_gt "$lhs" "$rhs" $result_var # from number.bsh
+}
+function bsh_op_less_than (op_sym lhs rhs result_var) {
+    math_lt "$lhs" "$rhs" $result_var # from number.bsh
+}
+function bsh_op_greater_equals (op_sym lhs rhs result_var) {
+    math_ge "$lhs" "$rhs" $result_var # from number.bsh
+}
+function bsh_op_less_equals (op_sym lhs rhs result_var) {
+    math_le "$lhs" "$rhs" $result_var # from number.bsh
+}
+
+# --- Logical NOT Handler ---
+# function bsh_op_logical_not (op_sym val result_var) {
+#   math_not "$val" $result_var # from number.bsh
+# }
+
+# --- Ternary Operator Handler ---
+# C calls: bsh_op_ternary_handler("?", eval_COND, true_expr_val_str, false_expr_val_str, result_var)
+# The C parser provided passes evaluated strings for true/false branches for now.
+# For lazy eval, C would need to pass token lists.
+function bsh_op_ternary_handler (op_sym cond_val true_val false_val result_var) {
+    echo "BSH Ternary Handler: Cond='$cond_val', TrueV='$true_val', FalseV='$false_val' -> $result_var"
+    # Truthiness check for cond_val
+    if "$cond_val" == "1" || "$cond_val" == "true" || ("$cond_val" != "0" && "$cond_val" != "false" && "$cond_val" != "") {
+        $($result_var) = "$true_val"
+    } else {
+        $($result_var) = "$false_val"
+    }
+}
+
+# --- Dot Operator Handler ---
+# This is a versatile operator.
+# 1. Decimal construction: "10" . "5" -> "10.5"
+# 2. Property access: $myobj . "propertyname" -> value of myobj_propertyname
+# The C parser will pass the LHS and RHS as evaluated strings.
+function bsh_op_dot_handler (op_sym lhs rhs result_var) {
+    echo "BSH Dot Handler: LHS='$lhs', RHS='$rhs' -> $result_var"
+
+    # Attempt to see if it looks like decimal construction
+    get_type "$lhs" lhs_type_var
+    get_type "$rhs" rhs_type_var
+
+    # Heuristic: if RHS is purely digits and LHS is empty or digits, treat as decimal.
+    # This is simplistic. A more robust way might involve checking if LHS is a known object type.
+    $is_lhs_numeric_like = "0"
+    if "$lhs_type_var" == "INTEGER" || "$lhs_type_var" == "FLOAT" || "$lhs" == "" {
+        $is_lhs_numeric_like = "1"
+    }
+    $is_rhs_integer = "0"
+    if "$rhs_type_var" == "INTEGER" { $is_rhs_integer = "1" }
+
+    if "$is_lhs_numeric_like" == "1" && "$is_rhs_integer" == "1" && !($lhs == "" && $rhs == "") {
+        # Decimal construction like 10.5 or .5
+        if "$lhs" == "" {
+            $($result_var) = "0.$rhs"
+        } else {
+            $($result_var) = "$lhs.$rhs"
+        }
+        echo "Dot Handler: Decimal construct -> $($result_var)"
+    } else {
+        # Assume property access: lhs is base var name (string), rhs is property name (string)
+        # This assumes that if $myobj.prop is typed, $myobj is evaluated to its *name* string "myobj"
+        # if it's not a literal. The C parser needs to handle this.
+        # If $myobj evaluates to its value, this won't work for property access easily.
+        # For simplicity, let's assume 'lhs' is the base object's name if it's for property access.
+        # This part is tricky without knowing exactly how C evaluates $obj for $obj.prop.
+        # If C always fully evaluates $obj, then dot for property access is harder.
+        # Let's assume for now this handler is primarily for decimal construction.
+        # Property access via dot is usually handled directly in C's expand_variables_in_string_advanced.
+        # If dot is a generic operator, its BSH handler would need careful design for property access.
+        echo "Dot Handler: Not interpreting as decimal construction. LHS type: $lhs_type_var, RHS type: $rhs_type_var."
+        echo "             Property access via '.' operator in BSH needs careful C-side support for LHS evaluation."
+        $($result_var) = "$lhs.$rhs" # Fallback: literal concatenation
+    }
+}
+
+echo "Core Operators Framework: Specific BSH handlers defined."

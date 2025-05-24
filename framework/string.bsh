@@ -1,273 +1,107 @@
 # BSH String Framework (string.bsh)
-# Provides functions for string operations.
-# Assumes a C library (e.g., bshmath or a dedicated bshstring lib) is loaded,
-# typically with an alias like $BSH_STRING_LIB_ALIAS.
-
 echo "Loading String Framework (string.bsh)..."
 
 # --- Configuration ---
-# The alias used when loading the C string library functions.
-# This could be the same as BSH_MATH_LIB_ALIAS if functions are bundled.
-$BSH_STRING_LIB_ALIAS = "bshstringlib" # Example, adjust as needed
+$BSH_STRING_LIB_ALIAS = "bshstringlib" # Example, ensure this C library is defined and loaded
+                                     # Or use "bshmath" if string C funcs are bundled there.
 
 # --- Helper: Check if the string library seems loaded ---
 function is_string_lib_loaded (result_var) {
-    # Placeholder, similar to is_math_lib_loaded
-    # echo "is_string_lib_loaded: Assuming '$BSH_STRING_LIB_ALIAS' is loaded if used."
+    # Conceptual check
     $($result_var) = "true"
 }
 
 # --- String Comparison Operations ---
-# These functions set result_var to "1" (true) or "0" (false).
-# Assumed C functions: bsh_string_is_equal, bsh_string_is_not_equal
-
-function _string_generic_op (op_display_name c_func_name args_array result_var_name) {
-    # Generic helper for string operations
-    # args_array should be a BSH array name where $args_array_count is set
-    # and $args_array_0, $args_array_1 ... hold the arguments.
-
-    # Build argument string for calllib
-    $num_lib_args = $($args_array)_count
-    $lib_args_str = ""
-    $idx = 0
-    while $idx < $num_lib_args {
-        $arg_val = $($args_array)_$idx
-        $lib_args_str = "$lib_args_str \"$arg_val\"" # Quote each argument
-        $idx = $($idx) + 1
-    }
-
-    # echo "STRING $op_display_name: Calling $c_func_name with $lib_args_str" # Can be verbose
+# These are utilities, not direct operator handlers for '==' etc.
+# '==' operator will be handled by bsh_op_equals, which might use type checking.
+function _string_compare_op_internal (c_func_name arg1_str arg2_str result_var_name) {
     is_string_lib_loaded string_lib_ready
-    if $string_lib_ready != "true" {
-        echo "Error: String library '$BSH_STRING_LIB_ALIAS' not loaded. Cannot perform $op_display_name."
-        if $op_display_name == "compare" { $($result_var_name) = "0" } # Default to false for comparisons
-        else { $($result_var_name) = "STRING_LIB_ERROR" }
-        return
-    }
-
-    # calllib expects arguments spread out, not as a single string.
-    # The 'calllib' in bsh.c might need to be flexible or we construct the call differently.
-    # For now, assuming calllib can take a variable number of string arguments
-    # or the C functions take a fixed number of arguments as demonstrated previously.
-    # The _string_compare_op and string_len from previous example are fine for fixed args.
-    # This generic one is more for future use if calllib is enhanced or for complex args.
-    # Reverting to specific arg passing for now.
-
-    # This function will be simplified or used differently.
-    # For now, let's keep specific argument passing for each function as it's clearer
-    # with the current calllib mechanism.
-}
-
-
-function _string_compare_op (op_display_name c_func_name arg1_str arg2_str result_var_name) {
-    # echo "STRING COMPARE $op_display_name: '$arg1_str', '$arg2_str'"
-    is_string_lib_loaded string_lib_ready
-    if $string_lib_ready != "true" {
-        echo "Error: String library '$BSH_STRING_LIB_ALIAS' not loaded. Cannot perform $op_display_name."
-        $($result_var_name) = "0" # Default to false on library error
-        return
-    }
+    if $string_lib_ready != "true" { $($result_var_name) = "0"; return }
 
     calllib $BSH_STRING_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str"
     if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var_name) = $LAST_LIB_CALL_OUTPUT # Expected "1" or "0" from C
-        # echo "STRING COMPARE $op_display_name result: $($result_var_name)"
+        $($result_var_name) = $LAST_LIB_CALL_OUTPUT
     } else {
-        echo "Error during $op_display_name operation with $BSH_STRING_LIB_ALIAS.$c_func_name."
-        echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
-        $($result_var_name) = "0" # Default to false on operation error
+        echo "Error in C lib string compare $BSH_STRING_LIB_ALIAS.$c_func_name."
+        $($result_var_name) = "0"
     }
 }
 
-function string_eq (str1 str2 result_var) {
-    _string_compare_op "equal" "bsh_string_is_equal" "$str1" "$str2" $result_var
+function string_eq (str1 str2 result_var) { # Utility function
+    _string_compare_op_internal "bsh_string_is_equal" "$str1" "$str2" $result_var
 }
 
-function string_ne (str1 str2 result_var) {
-    _string_compare_op "not_equal" "bsh_string_is_not_equal" "$str1" "$str2" $result_var
+function string_ne (str1 str2 result_var) { # Utility function
+    _string_compare_op_internal "bsh_string_is_not_equal" "$str1" "$str2" $result_var
 }
 
-# --- String Concatenation ---
-# Usage: string_concat STR1 STR2 RESULT_VAR
-# Assumed C function: bsh_string_concat(argc=2, argv={"s1","s2"}, obuf, obuf_size)
+# --- String Concatenation (Utility) ---
+# Called by a smart handler for '+' operator.
 function string_concat (str1 str2 result_var) {
-    # echo "STRING CONCAT: '$str1' + '$str2'"
     is_string_lib_loaded string_lib_ready
-    if $string_lib_ready != "true" {
-        echo "Error: String library '$BSH_STRING_LIB_ALIAS' not loaded for string_concat."
-        $($result_var) = "CONCAT_ERROR"
-        return
-    }
+    if $string_lib_ready != "true" { $($result_var) = "CONCAT_ERROR"; return }
 
-    calllib $BSH_STRING_LIB_ALIAS "bsh_string_concat" "$str1" "$str2"
-    if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT
-        # echo "STRING CONCAT result: $($result_var)"
-    } else {
-        echo "Error during string_concat operation."
-        echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
-        $($result_var) = "CONCAT_ERROR"
-    }
+    # If C func "bsh_string_concat" exists:
+    # calllib $BSH_STRING_LIB_ALIAS "bsh_string_concat" "$str1" "$str2"
+    # if $LAST_LIB_CALL_STATUS == "0" { $($result_var) = $LAST_LIB_CALL_OUTPUT }
+    # else { $($result_var) = "CONCAT_ERROR_C_CALL" }
+
+    # Pure BSH concatenation if no C function:
+    $($result_var) = "$str1$str2"
 }
+
 
 # --- Character at Index ---
-# Usage: string_char_at_index INPUT_STR INDEX_NUM RESULT_VAR
-# Assumed C function: bsh_string_char_at_index(argc=2, argv={"str","idx"}, obuf, obuf_size)
-# Index is 0-based. Returns empty string if index is out of bounds.
 function string_char_at_index (input_str index_num result_var) {
-    # echo "STRING CHAR_AT: Character at index $index_num from '$input_str'"
     is_string_lib_loaded string_lib_ready
-    if $string_lib_ready != "true" {
-        echo "Error: String library '$BSH_STRING_LIB_ALIAS' not loaded for char_at_index."
-        $($result_var) = "" # Return empty on error
-        return
-    }
+    if $string_lib_ready != "true" { $($result_var) = ""; return }
 
     calllib $BSH_STRING_LIB_ALIAS "bsh_string_char_at_index" "$input_str" "$index_num"
-    if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT # Character as string, or empty string
-        # echo "STRING CHAR_AT result: $($result_var)"
-    } else {
-        echo "Error during string_char_at_index operation."
-        echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
-        $($result_var) = "" # Return empty on error
-    }
+    if $LAST_LIB_CALL_STATUS == "0" { $($result_var) = $LAST_LIB_CALL_OUTPUT }
+    else { $($result_var) = "" }
 }
-
 
 # --- String Splitting ---
-# These functions work together. string_split is the main user-facing one.
-# Assumed C functions:
-# bsh_string_split_count(argc=2, argv={"str","delim"}, obuf, obuf_size) -> obuf = count
-# bsh_string_split_get_part(argc=3, argv={"str","delim","idx"}, obuf, obuf_size) -> obuf = part
-
-function _string_split_count (input_str delimiter_str result_var) {
+# ... (string_split, _string_split_count, _string_split_get_part remain the same conceptually,
+#      relying on their respective C library functions via calllib) ...
+function _string_split_count (input_str delimiter_str result_var) { 
     calllib $BSH_STRING_LIB_ALIAS "bsh_string_split_count" "$input_str" "$delimiter_str"
-    if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT
-    } else {
-        echo "Error in _string_split_count: Status $LAST_LIB_CALL_STATUS, Output $LAST_LIB_CALL_OUTPUT"
-        $($result_var) = "-1" # Error
-    }
+    if $LAST_LIB_CALL_STATUS == "0" { $($result_var) = $LAST_LIB_CALL_OUTPUT }
+    else { $($result_var) = "-1" }
 }
-
 function _string_split_get_part (input_str delimiter_str index_num result_var) {
     calllib $BSH_STRING_LIB_ALIAS "bsh_string_split_get_part" "$input_str" "$delimiter_str" "$index_num"
-    if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT
-    } else {
-        echo "Error in _string_split_get_part (idx $index_num): Status $LAST_LIB_CALL_STATUS, Output $LAST_LIB_CALL_OUTPUT"
-        $($result_var) = "SPLIT_PART_ERROR"
-    }
+    if $LAST_LIB_CALL_STATUS == "0" { $($result_var) = $LAST_LIB_CALL_OUTPUT }
+    else { $($result_var) = "SPLIT_PART_ERROR" }
 }
-
-# Usage: string_split INPUT_STR DELIMITER_STR RESULT_ARRAY_BASE_NAME
-# This will create BSH array elements: $RESULT_ARRAY_BASE_NAME_count, $RESULT_ARRAY_BASE_NAME_0, $RESULT_ARRAY_BASE_NAME_1, ...
 function string_split (input_str delimiter_str result_array_base) {
-    # echo "STRING SPLIT: Splitting '$input_str' by '$delimiter_str' into array '$result_array_base'"
     is_string_lib_loaded string_lib_ready
-    if $string_lib_ready != "true" {
-        echo "Error: String library '$BSH_STRING_LIB_ALIAS' not loaded for string_split."
-        # Set count to 0 or error for the array base
-        set_array_element_scoped "$result_array_base" "count" "0" # Using existing BSH array functions
-        return
-    }
-
-    $count_var_name = "${result_array_base}_split_internal_count" # Temp var for count
+    if $string_lib_ready != "true" { set_array_element_scoped "$result_array_base" "count" "0"; return }
+    $count_var_name = "${result_array_base}_split_internal_count"
     _string_split_count "$input_str" "$delimiter_str" $count_var_name
     $num_parts = $($count_var_name)
-
-    if $num_parts == "-1" { # Error from _string_split_count
-        echo "Failed to get split count for '$input_str'."
-        set_array_element_scoped "$result_array_base" "count" "0"
-        return
-    }
-
+    if $num_parts == "-1" { set_array_element_scoped "$result_array_base" "count" "0"; return }
     set_array_element_scoped "$result_array_base" "count" "$num_parts"
-
     $idx = 0
-    $part_var_name = "${result_array_base}_split_internal_part" # Temp var for part
+    $part_var_name = "${result_array_base}_split_internal_part"
     while $idx < $num_parts {
         _string_split_get_part "$input_str" "$delimiter_str" "$idx" $part_var_name
-        $current_part_value = $($part_var_name)
-        set_array_element_scoped "$result_array_base" "$idx" "$current_part_value"
-        # echo "  $result_array_base[$idx] = '$current_part_value'"
-        $idx = $($idx) + 1
+        set_array_element_scoped "$result_array_base" "$idx" "$($part_var_name)"
+        $idx = $($idx) + 1 # This will use the new '+' operator handling
     }
-    # echo "STRING SPLIT complete. Count: $num_parts"
 }
 
 
-# --- Other String Functions (from previous) ---
-# Usage: string_len STR_VAL RESULT_VAR_NAME
+# --- String Length ---
 function string_len (str_val result_var) {
-    # echo "STRING LEN: Getting length of '$str_val'"
     is_string_lib_loaded string_lib_ready
-    if $string_lib_ready != "true" {
-        echo "Error: String library '$BSH_STRING_LIB_ALIAS' not loaded for string_len."
-        $($result_var) = "-1" # Error indicator for length
-        return
-    }
+    if $string_lib_ready != "true" { $($result_var) = "-1"; return }
 
     calllib $BSH_STRING_LIB_ALIAS "bsh_string_length" "$str_val"
-    if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT
-        # echo "STRING LEN of '$str_val' result: $($result_var)"
-    } else {
-        echo "Error during string_len operation."
-        echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
-        $($result_var) = "-1" # Error indicator
-    }
+    if $LAST_LIB_CALL_STATUS == "0" { $($result_var) = $LAST_LIB_CALL_OUTPUT }
+    else { $($result_var) = "-1" }
 }
 
-function bsh_core_string_concat_handler (val1 type1 val2 type2 result_var) {
-    # string_concat C function expects two strings.
-    # Type conversion (e.g. number to string) is implicit as BSH variables are strings.
-    string_concat "$val1" "$val2" $result_var
-}
-
-# Register handlers
-# String concatenation should often take precedence if one operand is a string.
-register_operator_handler "+" "STRING" "ANY" "bsh_core_string_concat_handler"
-register_operator_handler "+" "ANY" "STRING" "bsh_core_string_concat_handler"
-# A more specific STRING+STRING can be added if ANY is too broad for other future ops.
-register_operator_handler "+" "STRING" "STRING" "bsh_core_string_concat_handler"
-
-echo "String Framework operator handlers registered."
-
-echo "String Framework loaded with concat, char_at_index, and split."
-# --- Example Usage (commented out) ---
-# $s1 = "hello"
-# $s2 = "world"
-# $combined = ""
-# string_concat $s1 " " temp_res
-# string_concat $temp_res $s2 combined
-# echo "Concatenated: '$combined'" # Expected: 'hello world'
-#
-# $char_val = ""
-# string_char_at_index "$combined" "0" char_val
-# echo "Char at index 0 of '$combined': '$char_val'" # Expected: 'h'
-# string_char_at_index "$combined" "6" char_val
-# echo "Char at index 6 of '$combined': '$char_val'" # Expected: 'w'
-# string_char_at_index "$combined" "100" char_val
-# echo "Char at index 100 of '$combined': '$char_val'" # Expected: '' (empty)
-#
-# $data_str = "apple,banana,cherry"
-# string_split "$data_str" "," my_fruit_array
-# $fruit_count = $my_fruit_array_count # Accessing count set by string_split
-# echo "Found $fruit_count fruits."
-# $i = 0
-# while $i < $fruit_count {
-#   $current_fruit = $my_fruit_array[$i] # Using BSH array access
-#   echo "Fruit $i: $current_fruit"
-#   $i = $($i) + 1
-# }
-# Expected:
-# Found 3 fruits.
-# Fruit 0: apple
-# Fruit 1: banana
-# Fruit 2: cherry
-#
-# # Example for $stringa[2] (requires bsh.c modification)
-# $test_string = "example"
-# # echo "Direct char access: $test_string[0] $test_string[3] $test_string[6]" # Should be 'e' 'm' 'e'
+# The old bsh_core_string_concat_handler and register_operator_handler calls are removed.
+# Concatenation for '+' is now handled by bsh_op_add_or_concat in core_operators.bsh.
+echo "String Framework loaded."

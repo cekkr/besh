@@ -1,196 +1,131 @@
-# BSH Number Framework (number.bsh) - Rewritten
+# BSH Number Framework (number.bsh) - Rewritten for new operator system
 # Provides BSH functions for mathematical operations and comparisons.
-# These functions are typically called by the BSH '__dynamic_op_handler'.
-# BSH Number Framework (number.bsh)
-# Provides functions for mathematical operations on number-like strings.
-# Assumes a C math library (e.g., compiled via c_compiler.bsh) is loaded,
-# typically with an alias like 'bshmath'.
-echo "Loading Number Framework (number.bsh)..." #
+# These functions are called by BSH operator handlers defined in core_operators.bsh,
+# or can be the handlers themselves if their signature matches.
+echo "Loading Number Framework (number.bsh)..." 
 
 # --- Configuration ---
-$BSH_MATH_LIB_ALIAS = "bshmath" #
+$BSH_MATH_LIB_ALIAS = "bshmath" 
 
-# --- Helper: Check if the math library seems loaded ---
-# This function can remain as is.
-function is_math_lib_loaded (result_var) { #
-    # A more robust check might try a dummy calllib or check a status var from loading.
-    # For now, assume it's meant to be loaded by .bshrc before this is heavily used.
-    echo "is_math_lib_loaded: Assuming '$BSH_MATH_LIB_ALIAS' is available if used by this point." #
-    $($result_var) = "true" # Placeholder
-}
-
-# --- Core Math Operations (Wrappers for C library calls) ---
-# This internal helper remains the same. It's the core of calling the C functions.
-function _math_binary_op (op_display_name c_func_name arg1_str arg2_str result_var_name) { #
-    echo "MATH $op_display_name: $arg1_str, $arg2_str"
-    # is_math_lib_loaded math_lib_ready # Check can be done here or higher up
-    # if $math_lib_ready != "true" {
-    # echo "Error: Math library '$BSH_MATH_LIB_ALIAS' not loaded. Cannot perform $op_display_name."
-    # $($result_var_name) = "MATH_LIB_ERROR"
-    # return
-    # }
-    calllib $BSH_MATH_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str" #
+# --- Internal Helper for Binary Ops ---
+# This helper is called by the specific math functions below.
+function _math_binary_op_internal (c_func_name arg1_str arg2_str result_var_name) {
+    # echo "MATH_INTERNAL $c_func_name: $arg1_str, $arg2_str -> $result_var_name"
+    calllib $BSH_MATH_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str"
     if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var_name) = $LAST_LIB_CALL_OUTPUT #
-        echo "MATH $op_display_name result: $($result_var_name)"
+        $($result_var_name) = $LAST_LIB_CALL_OUTPUT
     } else {
-        echo "Error during $op_display_name operation with $BSH_MATH_LIB_ALIAS.$c_func_name." #
-        echo "  Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT" #
-        $($result_var_name) = "OPERATION_ERROR" #
+        echo "Error in C lib call $BSH_MATH_LIB_ALIAS.$c_func_name. Status: $LAST_LIB_CALL_STATUS, Output: $LAST_LIB_CALL_OUTPUT"
+        $($result_var_name) = "MATH_OP_ERROR"
     }
 }
 
-# --- Public Math Functions (called by __dynamic_op_handler or other BSH code) ---
-function math_add (num1_str num2_str result_var) { #
-    _math_binary_op "add" "bsh_add_numbers" "$num1_str" "$num2_str" $result_var
+# --- Public Math Functions (can be used as BSH operator handlers) ---
+# Signature for BSH op handler: (op_symbol_str, operand1_str, operand2_str, result_holder_var_name)
+function math_add (op_sym_ignored num1_str num2_str result_var) {
+    _math_binary_op_internal "bsh_add_numbers" "$num1_str" "$num2_str" $result_var
 }
-function math_sub (num1_str num2_str result_var) { #
-    _math_binary_op "subtract" "bsh_subtract_numbers" "$num1_str" "$num2_str" $result_var
+function math_sub (op_sym_ignored num1_str num2_str result_var) {
+    _math_binary_op_internal "bsh_subtract_numbers" "$num1_str" "$num2_str" $result_var
 }
-function math_mul (num1_str num2_str result_var) { #
-    _math_binary_op "multiply" "bsh_multiply_numbers" "$num1_str" "$num2_str" $result_var
+function math_mul (op_sym_ignored num1_str num2_str result_var) {
+    _math_binary_op_internal "bsh_multiply_numbers" "$num1_str" "$num2_str" $result_var
 }
-function math_div (num1_str num2_str result_var) { #
-    _math_binary_op "divide" "bsh_divide_numbers" "$num1_str" "$num2_str" $result_var
+function math_div (op_sym_ignored num1_str num2_str result_var) {
+    _math_binary_op_internal "bsh_divide_numbers" "$num1_str" "$num2_str" $result_var
 }
-function math_mod (num1_str num2_str result_var) { #
-    _math_binary_op "modulo" "bsh_modulo_numbers" "$num1_str" "$num2_str" $result_var
+function math_mod (op_sym_ignored num1_str num2_str result_var) {
+    _math_binary_op_internal "bsh_modulo_numbers" "$num1_str" "$num2_str" $result_var
 }
 
-# --- Helper for Comparison Operations ---
-# This internal helper remains the same.
-function _math_compare_op (op_display_name c_func_name arg1_str arg2_str result_var_name) { #
-    echo "MATH COMPARE $op_display_name: $arg1_str, $arg2_str"
-    # is_math_lib_loaded math_lib_ready # Check
-    # if $math_lib_ready != "true" { $($result_var_name) = "0"; return } # Error yields false for comparisons
-
-    calllib $BSH_MATH_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str" #
+# --- Internal Helper for Comparison Ops ---
+function _math_compare_op_internal (c_func_name arg1_str arg2_str result_var_name) {
+    # echo "MATH_COMPARE_INTERNAL $c_func_name: $arg1_str, $arg2_str -> $result_var_name"
+    calllib $BSH_MATH_LIB_ALIAS $c_func_name "$arg1_str" "$arg2_str"
     if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var_name) = $LAST_LIB_CALL_OUTPUT # Result is "1" or "0" from C
-        echo "MATH COMPARE $op_display_name result: $($result_var_name)"
+        $($result_var_name) = $LAST_LIB_CALL_OUTPUT # Expected "1" or "0"
     } else {
-        echo "Error during $op_display_name with $BSH_MATH_LIB_ALIAS.$c_func_name. Status: $LAST_LIB_CALL_STATUS" #
-        $($result_var_name) = "0" # Error yields false
+        echo "Error in C lib compare $BSH_MATH_LIB_ALIAS.$c_func_name. Status: $LAST_LIB_CALL_STATUS"
+        $($result_var_name) = "0" # Error yields false for comparisons
     }
 }
 
-# --- Public Comparison Functions ---
-# These would be called by __dynamic_op_handler.
-# Assumes C functions like bsh_numbers_equal return "1" for true, "0" for false.
-function math_eq (num1_str num2_str result_var) { #
-    _math_compare_op "equal" "bsh_numbers_equal" "$num1_str" "$num2_str" $result_var
+# --- Public Comparison Functions (can be used as BSH operator handlers) ---
+function math_eq (op_sym_ignored num1_str num2_str result_var) {
+    _math_compare_op_internal "bsh_numbers_equal" "$num1_str" "$num2_str" $result_var
 }
-function math_ne (num1_str num2_str result_var) { #
-    _math_compare_op "not_equal" "bsh_numbers_not_equal" "$num1_str" "$num2_str" $result_var
+function math_ne (op_sym_ignored num1_str num2_str result_var) {
+    _math_compare_op_internal "bsh_numbers_not_equal" "$num1_str" "$num2_str" $result_var
 }
-function math_gt (num1_str num2_str result_var) { #
-    _math_compare_op "greater_than" "bsh_numbers_greater_than" "$num1_str" "$num2_str" $result_var
+function math_gt (op_sym_ignored num1_str num2_str result_var) {
+    _math_compare_op_internal "bsh_numbers_greater_than" "$num1_str" "$num2_str" $result_var
 }
-function math_lt (num1_str num2_str result_var) { #
-    _math_compare_op "less_than" "bsh_numbers_less_than" "$num1_str" "$num2_str" $result_var
+function math_lt (op_sym_ignored num1_str num2_str result_var) {
+    _math_compare_op_internal "bsh_numbers_less_than" "$num1_str" "$num2_str" $result_var
 }
-function math_ge (num1_str num2_str result_var) { #
-    _math_compare_op "greater_equal" "bsh_numbers_greater_equal" "$num1_str" "$num2_str" $result_var
+function math_ge (op_sym_ignored num1_str num2_str result_var) {
+    _math_compare_op_internal "bsh_numbers_greater_equal" "$num1_str" "$num2_str" $result_var
 }
-function math_le (num1_str num2_str result_var) { #
-    _math_compare_op "less_equal" "bsh_numbers_less_equal" "$num1_str" "$num2_str" $result_var
+function math_le (op_sym_ignored num1_str num2_str result_var) {
+    _math_compare_op_internal "bsh_numbers_less_equal" "$num1_str" "$num2_str" $result_var
 }
 
-# --- Logical NOT for "0" or "1" ---
-# Called by __dynamic_op_handler if "!" is a prefix unary op.
-function math_not (value_str result_var) { #
-    echo "MATH NOT: Inverting '$value_str'"
-    # is_math_lib_loaded math_lib_ready # Check
-    # if $math_lib_ready != "true" { $($result_var) = "0"; return }
-
-    # Assumes bsh_logical_not C function is available in $BSH_MATH_LIB_ALIAS
-    calllib $BSH_MATH_LIB_ALIAS "bsh_logical_not" "$value_str" #
+# --- Logical NOT for "0" or "1" (can be a BSH operator handler) ---
+# Signature for unary op handler: (op_symbol_str, operand_str, result_holder_var_name)
+function math_not (op_sym_ignored value_str result_var) {
+    # echo "MATH NOT: Inverting '$value_str' -> $result_var"
+    calllib $BSH_MATH_LIB_ALIAS "bsh_logical_not" "$value_str"
     if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT #
+        $($result_var) = $LAST_LIB_CALL_OUTPUT
     } else {
-        echo "Error during math_not operation. Status: $LAST_LIB_CALL_STATUS" #
+        echo "Error during math_not operation. Status: $LAST_LIB_CALL_STATUS"
         $($result_var) = "0" # Default to false on error
     }
-    echo "MATH NOT result for '$value_str': $($result_var)"
 }
 
-# --- BSH Unary Operator Implementations ---
-# These are called by __dynamic_op_handler.
-# Signature: (target_variable_name_string, result_holder_bsh_variable_name)
-# They modify the target variable *by name* and set the result_holder for the expression's value.
-
-function bsh_unary_postfix_increment (target_var_name_str result_holder_var_name) { #
-    echo "BSH Unary Action: postfix_increment for var '$target_var_name_str'"
-    $original_value = $($target_var_name_str) # Get current value by name
-    math_add "$original_value" "1" __temp_inc_val_holder_pf # Store $original_value + 1
-    $($target_var_name_str) = $__temp_inc_val_holder_pf # Update original variable by name
-    $($result_holder_var_name) = "$original_value" # Postfix expression value is original
-    echo "Postfix Inc: Var '$target_var_name_str' was '$original_value', now '$($target_var_name_str)'. Expr val: '$($result_holder_var_name)'." #
-}
-
-function bsh_unary_prefix_increment (target_var_name_str result_holder_var_name) { #
-    echo "BSH Unary Action: prefix_increment for var '$target_var_name_str'"
-    $original_value = $($target_var_name_str) #
-    math_add "$original_value" "1" __temp_inc_val_holder_pr #
-    $($target_var_name_str) = $__temp_inc_val_holder_pr #
-    $($result_holder_var_name) = "$__temp_inc_val_holder_pr" # Prefix expression value is new value
-    echo "Prefix Inc: Var '$target_var_name_str' was '$original_value', now '$($target_var_name_str)'. Expr val: '$($result_holder_var_name)'."
-}
-
-function bsh_unary_postfix_decrement (target_var_name_str result_holder_var_name) { #
-    echo "BSH Unary Action: postfix_decrement for var '$target_var_name_str'"
+# --- BSH Unary Operator Implementations (can be BSH operator handlers) ---
+# These expect target_var_name_str to be the NAME of the variable.
+# C dispatcher needs to ensure it passes the name for these specific handlers.
+# Signature: (op_symbol_str, var_name_str, result_holder_var_name)
+function bsh_unary_postfix_increment (op_sym_ignored target_var_name_str result_holder_var_name) {
+    # echo "BSH Unary Action: postfix_increment for var '$target_var_name_str'"
     $original_value = $($target_var_name_str)
-    math_sub "$original_value" "1" __temp_dec_val_holder_pf
+    math_add "$op_sym_ignored" "$original_value" "1" __temp_inc_val_holder_pf # Pass dummy op_sym
+    $($target_var_name_str) = $__temp_inc_val_holder_pf
+    $($result_holder_var_name) = "$original_value"
+}
+
+function bsh_unary_prefix_increment (op_sym_ignored target_var_name_str result_holder_var_name) {
+    # echo "BSH Unary Action: prefix_increment for var '$target_var_name_str'"
+    $original_value = $($target_var_name_str)
+    math_add "$op_sym_ignored" "$original_value" "1" __temp_inc_val_holder_pr # Pass dummy op_sym
+    $($target_var_name_str) = $__temp_inc_val_holder_pr
+    $($result_holder_var_name) = "$__temp_inc_val_holder_pr"
+} 
+
+function bsh_unary_postfix_decrement (op_sym_ignored target_var_name_str result_holder_var_name) {
+    $original_value = $($target_var_name_str)
+    math_sub "$op_sym_ignored" "$original_value" "1" __temp_dec_val_holder_pf # Pass dummy op_sym
     $($target_var_name_str) = $__temp_dec_val_holder_pf
     $($result_holder_var_name) = "$original_value"
-    echo "Postfix Dec: Var '$target_var_name_str' was '$original_value', now '$($target_var_name_str)'. Expr val: '$($result_holder_var_name)'."
-}
+} 
 
-function bsh_unary_prefix_decrement (target_var_name_str result_holder_var_name) { #
-    echo "BSH Unary Action: prefix_decrement for var '$target_var_name_str'"
+function bsh_unary_prefix_decrement (op_sym_ignored target_var_name_str result_holder_var_name) {
     $original_value = $($target_var_name_str)
-    math_sub "$original_value" "1" __temp_dec_val_holder_pr
+    math_sub "$op_sym_ignored" "$original_value" "1" __temp_dec_val_holder_pr # Pass dummy op_sym
     $($target_var_name_str) = $__temp_dec_val_holder_pr
     $($result_holder_var_name) = "$__temp_dec_val_holder_pr"
-    echo "Prefix Dec: Var '$target_var_name_str' was '$original_value', now '$($target_var_name_str)'. Expr val: '$($result_holder_var_name)'."
-}
-
+} 
 
 # --- Type Checking Functions ---
-# These remain useful and can be called from BSH.
-function math_is_int (value_str result_var) { #
-    echo "MATH is_int: Checking '$value_str'"
-    calllib $BSH_MATH_LIB_ALIAS "bsh_is_integer" "$value_str" #
-    if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT #
-    } else {
-        $($result_var) = "0" # Default to false (not an int) on error
-    }
-    echo "MATH is_int result for '$value_str': $($result_var)"
-}
-function math_is_float (value_str result_var) { #
-    echo "MATH is_float: Checking '$value_str'"
-    calllib $BSH_MATH_LIB_ALIAS "bsh_is_float" "$value_str" #
-    if $LAST_LIB_CALL_STATUS == "0" {
-        $($result_var) = $LAST_LIB_CALL_OUTPUT #
-    } else {
-        $($result_var) = "0" #
-    }
-    echo "MATH is_float result for '$value_str': $($result_var)"
+function math_is_int (value_str result_var) { # Not an op handler, direct call
+    calllib $BSH_MATH_LIB_ALIAS "bsh_is_integer" "$value_str"
+    if $LAST_LIB_CALL_STATUS == "0" { $($result_var) = $LAST_LIB_CALL_OUTPUT } else { $($result_var) = "0" }
 }
 
-# The 'calc' function might be less necessary for simple ops like 'A + B' if expressions
-# are directly handled by __dynamic_op_handler. However, it could still be a utility
-# for explicit calculations or if its specific parsing/behavior for the decimal
-# constructor is preferred in some contexts. The decimal construction via "." operator
-# is now handled by __dynamic_op_handler.
-# function calc (var1_name op_str var2_name result_var) { ... }
+function math_is_float (value_str result_var) { # Not an op handler, direct call
+    calllib $BSH_MATH_LIB_ALIAS "bsh_is_float" "$value_str"
+    if $LAST_LIB_CALL_STATUS == "0" { $($result_var) = $LAST_LIB_CALL_OUTPUT } else { $($result_var) = "0" }
+} 
 
-# Operator handler registration like register_operator_handler is no longer done in number.bsh
-# if __dynamic_op_handler directly calls math_add, etc.
-# If __dynamic_op_handler uses an internal BSH-level type-based dispatch, then
-# number.bsh might still call register_operator_handler to register with that BSH dispatcher.
-# For this rewrite, we assume __dynamic_op_handler is a large switch calling these functions directly.
-# Remove old handler sections
-
-echo "Number Framework functions loaded. Ready to be called by __dynamic_op_handler." #
+echo "Number Framework functions updated for new operator system."
