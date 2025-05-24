@@ -1,0 +1,49 @@
+# inline_if.bsh
+# Provides a BSH function for conditional value assignment (ternary-like).
+
+echo "Loading Inline If Extension (inline_if.bsh)..."
+
+# Function: iif (inline if)
+# Mimics a ternary operator: condition ? value_if_true : value_if_false.
+#
+# Usage:
+#   # First, evaluate the condition and store its result (typically "1" for true, "0" for false)
+#   math_eq "$num" "2" condition_result_var  # Example: using math_eq from number.bsh
+#
+#   # Then call iif:
+#   iif $condition_result_var "Value if true" "Value if false" destination_variable_name
+#
+# Arguments:
+#   $1 (condition_outcome): The result of a condition ("1" or "true" for true; "0", "false", or empty for false).
+#   $2 (true_value): The value to assign if the condition is true.
+#   $3 (false_value): The value to assign if the condition is false.
+#   $4 (result_var_name): The name of the variable in the caller's scope to store the chosen value.
+
+function iif (condition_outcome true_value false_value result_var_name) {
+    echo "IIF: Condition='$condition_outcome', TrueVal='$true_value', FalseVal='$false_value' -> $result_var_name"
+
+    if "$condition_outcome" == "1" || "$condition_outcome" == "true" {
+        $($result_var_name) = "$true_value"
+    } else {
+        $($result_var_name) = "$false_value"
+    }
+}
+
+echo "BSH 'iif' function defined. Usage: iif \$condition_result \"true_val\" \"false_val\" result_var"
+
+# Example of how it would be used in a script:
+#
+# $my_number = 10
+# $check_value = 10
+#
+# # Evaluate condition using math_eq (which calls C, then __dynamic_op_handler)
+# math_eq "$my_number" "$check_value" comparison_result
+#
+# # Use iif with the result of the comparison
+# iif $comparison_result "Numbers are equal!" "Numbers are different." final_message
+# echo "$final_message" # Output: Numbers are equal!
+#
+# $check_value = 5
+# math_eq "$my_number" "$check_value" comparison_result_2
+# iif $comparison_result_2 "Numbers are equal!" "Numbers are different." final_message_2
+# echo "$final_message_2" # Output: Numbers are different.

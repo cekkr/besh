@@ -36,6 +36,10 @@ defoperator "<="
 # defoperator "&&"
 # defoperator "||"
 
+# Inline if
+defoperator "?"
+defoperator ":"
+
 echo "Core operator symbols defined."
 
 # --- Central Dynamic Operator Handler ---
@@ -89,6 +93,40 @@ function __dynamic_op_handler (param_arg1 param_arg2 param_arg3 param_result_var
         }
         return
     }
+    
+    # --- Handle Binary (or potentially special multi-part) Operations ---
+    $operand1_val = "$param_arg1"
+    $operand2_val = "$param_arg2" # For '?', this would be the true-expression part
+    $op_str = "$param_arg3"       # For '?', this would be "?"
+
+    echo "BSH Dispatch: Potential Binary/Special Op: '$operand1_val' $op_str '$operand2_val'"
+
+    # --- CONCEPTUAL: Attempting to handle '?' ---
+    if $op_str == "?" {
+        # At this point, __dynamic_op_handler received:
+        # param_arg1 = result of condition (e.g., "1" or "0")
+        # param_arg2 = value_if_true (e.g., "ehy")
+        # param_arg3 = "?"
+        # The ":" and value_if_false are NOT available here with the current C dispatch.
+
+        echo "BSH __dynamic_op_handler: Encountered '?' operator."
+        echo "  Condition (arg1): $operand1_val"
+        echo "  True_Expr (arg2): $operand2_val"
+        echo "  WARNING: ':' and False_Expr are not passed by current C core for '?'."
+
+        # Simplified logic: if condition is true, use operand2_val. Otherwise, error or default.
+        if "$operand1_val" == "1" || "$operand1_val" == "true" {
+            $($param_result_var_name) = "$operand2_val"
+        } else {
+            # We don't have the false_value here!
+            $($param_result_var_name) = "TERNARY_FALSE_BRANCH_MISSING"
+            echo "  Error: False branch of ternary operator not available to __dynamic_op_handler."
+        }
+        return
+    }
+    # ':' operator would also be called separately if it appears later in the token stream,
+    # e.g., __dynamic_op_handler "ehy" "ciao" ":" some_other_temp_var
+    # This doesn't reconstruct the ternary operator correctly.
 
     # Assume Binary Operation if context is not "prefix" or "postfix"
     # Here, param_arg3 is the operator symbol itself.
@@ -141,3 +179,5 @@ function __dynamic_op_handler (param_arg1 param_arg2 param_arg3 param_result_var
 }
 
 echo "Core Operators Framework loaded. __dynamic_op_handler is defined."
+
+#todo: check unary op condition ? true : false implementation

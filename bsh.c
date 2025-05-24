@@ -157,8 +157,8 @@ typedef enum {
     TOKEN_EMPTY, TOKEN_WORD, TOKEN_STRING, TOKEN_VARIABLE, TOKEN_OPERATOR,
     TOKEN_LPAREN, TOKEN_RPAREN, TOKEN_LBRACE, TOKEN_RBRACE, TOKEN_LBRACKET, TOKEN_RBRACKET,
     TOKEN_ASSIGN, TOKEN_SEMICOLON, TOKEN_PIPE, TOKEN_AMPERSAND, TOKEN_COMMENT,
-    TOKEN_EOF, TOKEN_ERROR, TOKEN_NUMBER
-    // No specific TOKEN_INCREMENT, TOKEN_DECREMENT; use TOKEN_OPERATOR with text "++" or "--"
+    TOKEN_EOF, TOKEN_ERROR, TOKEN_NUMBER,
+    TOKEN_QMARK, TOKEN_COLON 
 } TokenType;
 
 typedef struct {
@@ -269,6 +269,7 @@ void add_keyword_alias(const char* original, const char* alias_name);
 const char* resolve_keyword_alias(const char* alias_name);
 void free_keyword_alias_list();
 int advanced_tokenize_line(const char *line, Token *tokens, int max_tokens, char *token_storage, size_t storage_size);
+bool evaluate_expression_tokens(Token* tokens, int start_idx, int end_idx, char* result_buffer, size_t buffer_size);
 
 // Path Management
 void add_path_to_list(PathDirNode **list_head, const char* dir_path);
@@ -827,36 +828,64 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                             }
                     } else {
 
-                        // External command
-                        char command_path[MAX_FULL_PATH_LEN];
-                        if (find_command_in_path_dynamic(command_name, command_path)) {
-                            char *args[MAX_ARGS + 1];
-                            char expanded_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
-                            args[0] = command_path; 
-                            int arg_count = 1;
-
-                            for (int i = 1; i < num_tokens; ++i) {
-                                if (tokens[i].type == TOKEN_COMMENT) break; 
-                                if (arg_count < MAX_ARGS) {
-                                    if (tokens[i].type == TOKEN_STRING) {
-                                        char unescaped_val[INPUT_BUFFER_SIZE];
-                                        unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
-                                        expand_variables_in_string_advanced(unescaped_val, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
-                                    } else {
-                                        expand_variables_in_string_advanced(tokens[i].text, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
-                                    }
-                                    args[arg_count++] = expanded_args_storage[arg_count-1];
-                                } else {
-                                    fprintf(stderr, "Warning: Too many arguments for command '%s'. Max %d allowed.\n", command_name, MAX_ARGS);
-                                    break;
-                                }
+                        // Try to evaluate the whole line as an expression if it's not assignment/command.
+                        char expression_result_buffer[INPUT_BUFFER_SIZE];
+                        if (evaluate_expression_tokens(tokens, 0, num_tokens - 1, expression_result_buffer, sizeof(expression_result_buffer))) {
+                            if (strlen(expression_result_buffer) > 0 &&
+                                strncmp(expression_result_buffer, "TERNARY_COND_EVAL_ERROR", strlen("TERNARY_COND_EVAL_ERROR")) != 0 &&
+                                strncmp(expression_result_buffer, "EXPR_EVAL_ERROR", strlen("EXPR_EVAL_ERROR")) != 0 &&
+                                // Also check against results from invoke_bsh_dynamic_op_handler if they indicate errors
+                                strncmp(expression_result_buffer, "OP_HANDLER_NO_RESULT_VAR", strlen("OP_HANDLER_NO_RESULT_VAR")) !=0 &&
+                                strncmp(expression_result_buffer, "NO_HANDLER_ERROR", strlen("NO_HANDLER_ERROR")) !=0 &&
+                                strncmp(expression_result_buffer, "UNKNOWN_HANDLER_ERROR", strlen("UNKNOWN_HANDLER_ERROR")) !=0 &&
+                                strncmp(expression_result_buffer, "UNKNOWN_PREFIX_OP_ERROR", strlen("UNKNOWN_PREFIX_OP_ERROR")) !=0 &&
+                                strncmp(expression_result_buffer, "UNARY_PREFIX_OP_ERROR", strlen("UNARY_PREFIX_OP_ERROR")) !=0 &&
+                                // ... etc. for other error strings from invoke_bsh_dynamic_op_handler or its BSH callees
+                                true /* add more positive checks if needed, or fewer error checks */
+                                ) {
+                                printf("%s\n", expression_result_buffer);
                             }
-                            args[arg_count] = NULL; 
-
-                            execute_external_command(command_path, args, arg_count, NULL, 0); 
+                            set_variable_scoped("LAST_OP_RESULT", expression_result_buffer, false); // Or a new var like LAST_EXPR_RESULT
                         } else {
-                            fprintf(stderr, "Command not found: %s (line %d)\n", command_name, current_line_no);
-                        }
+                            // If evaluate_expression_tokens returned false, it's a more fundamental parsing error
+                            // OR it could be an external command if no expression pattern matched.
+                            // This 'else' branch would now contain the logic to try it as an external command.
+                            char command_path_ext[MAX_FULL_PATH_LEN];
+                            if (find_command_in_path_dynamic(tokens[0].text, command_path_ext)) {
+                                // External command
+                                char command_path[MAX_FULL_PATH_LEN];
+                                if (find_command_in_path_dynamic(command_name, command_path)) {
+                                    char *args[MAX_ARGS + 1];
+                                    char expanded_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
+                                    args[0] = command_path; 
+                                    int arg_count = 1;
+
+                                    for (int i = 1; i < num_tokens; ++i) {
+                                        if (tokens[i].type == TOKEN_COMMENT) break; 
+                                        if (arg_count < MAX_ARGS) {
+                                            if (tokens[i].type == TOKEN_STRING) {
+                                                char unescaped_val[INPUT_BUFFER_SIZE];
+                                                unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
+                                                expand_variables_in_string_advanced(unescaped_val, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
+                                            } else {
+                                                expand_variables_in_string_advanced(tokens[i].text, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
+                                            }
+                                            args[arg_count++] = expanded_args_storage[arg_count-1];
+                                        } else {
+                                            fprintf(stderr, "Warning: Too many arguments for command '%s'. Max %d allowed.\n", command_name, MAX_ARGS);
+                                            break;
+                                        }
+                                    }
+                                    args[arg_count] = NULL; 
+
+                                    execute_external_command(command_path, args, arg_count, NULL, 0); 
+                                } else {
+                                    fprintf(stderr, "Command not found: %s (line %d)\n", command_name, current_line_no);
+                                }
+                            } else {
+                                fprintf(stderr, "Command not found or syntax error: %s\n", tokens[0].text);
+                            }
+                        }                        
                     }
                 }
             }
@@ -998,6 +1027,9 @@ void initialize_operators_dynamic() {
     // assume they might be common enough for C, or can be added by init.bsh.
     // Let's keep it minimal for this example.
     // Comparison operators like "==" will be defined by scripts via 'defoperator'.
+
+    add_operator_dynamic("?", TOKEN_QMARK);
+    add_operator_dynamic(":", TOKEN_COLON);
 }
 
 void add_operator_dynamic(const char* op_str, TokenType type) {
@@ -1853,6 +1885,134 @@ void handle_defoperator_statement(Token *tokens, int num_tokens) {
     // printf("DEBUG: Defined operator '%s'\n", op_symbol); // Optional debug
 }
 
+bool evaluate_expression_tokens(Token* tokens_arr, int start_idx, int end_idx, char* result_buffer, size_t buffer_size) {
+    result_buffer[0] = '\0';
+    if (start_idx > end_idx) {
+        // fprintf(stderr, "Debug: evaluate_expression_tokens called with empty token range.\n");
+        return true; // Successfully evaluated to "empty"
+    }
+
+    // Find the main ternary operator symbols ('?' and ':') at the current nesting level.
+    // This simplified version doesn't handle nested parentheses balancing for finding ? and :
+    int qmark_idx = -1, colon_idx = -1;
+    // int paren_level = 0; // Would be needed for robust ? : finding with parentheses
+
+    for (int i = start_idx; i <= end_idx; ++i) {
+        // if (tokens_arr[i].type == TOKEN_LPAREN) paren_level++;
+        // else if (tokens_arr[i].type == TOKEN_RPAREN) paren_level--;
+        // if (paren_level == 0) { // Only consider operators at the top level of parentheses
+            if (tokens_arr[i].type == TOKEN_QMARK && qmark_idx == -1) { // First '?'
+                qmark_idx = i;
+            } else if (tokens_arr[i].type == TOKEN_COLON && qmark_idx != -1 && colon_idx == -1) { // First ':' after '?'
+                colon_idx = i;
+                // break; // Found a complete ? : structure at this level
+            }
+        // }
+    }
+
+    if (qmark_idx != -1 && colon_idx != -1 && qmark_idx < colon_idx) {
+        // Ternary operator found: A ? B : C
+        // A: tokens_arr[start_idx ... qmark_idx-1]
+        // B: tokens_arr[qmark_idx+1 ... colon_idx-1]
+        // C: tokens_arr[colon_idx+1 ... end_idx]
+
+        char condition_result_str[INPUT_BUFFER_SIZE];
+        if (!evaluate_expression_tokens(tokens_arr, start_idx, qmark_idx - 1, condition_result_str, sizeof(condition_result_str))) {
+            strncpy(result_buffer, "TERNARY_COND_EVAL_ERROR", buffer_size - 1);
+            return false; // Error evaluating condition
+        }
+
+        // Evaluate condition_result_str ("1", "true", "0", "false", or non-empty/empty for truthiness)
+        bool condition_is_true = (strcmp(condition_result_str, "1") == 0 ||
+                                  strcasecmp(condition_result_str, "true") == 0 ||
+                                  (strlen(condition_result_str) > 0 && strcmp(condition_result_str,"0") != 0 && strcasecmp(condition_result_str,"false") !=0 ) );
+
+        if (condition_is_true) {
+            return evaluate_expression_tokens(tokens_arr, qmark_idx + 1, colon_idx - 1, result_buffer, buffer_size);
+        } else {
+            return evaluate_expression_tokens(tokens_arr, colon_idx + 1, end_idx, result_buffer, buffer_size);
+        }
+    } else {
+        // No ternary operator at this level, or malformed. Evaluate as simple expression.
+        // This part will handle: literal, variable, or single op1 OPR op2, or UNARY_OP op1 etc.
+        int num_expr_tokens = (end_idx - start_idx) + 1;
+
+        if (num_expr_tokens == 1) { // Single token: literal or variable
+            Token* current_token = &tokens_arr[start_idx];
+            if (current_token->type == TOKEN_STRING) {
+                char unescaped[INPUT_BUFFER_SIZE];
+                unescape_string(current_token->text, unescaped, sizeof(unescaped));
+                expand_variables_in_string_advanced(unescaped, result_buffer, buffer_size);
+            } else if (current_token->type == TOKEN_NUMBER || current_token->type == TOKEN_VARIABLE || current_token->type == TOKEN_WORD) {
+                expand_variables_in_string_advanced(current_token->text, result_buffer, buffer_size);
+            } else {
+                fprintf(stderr, "Error: Cannot evaluate single token of type %d as expression.\n", current_token->type);
+                strncpy(result_buffer, "EXPR_EVAL_ERROR", buffer_size -1); return false;
+            }
+            return true;
+        } else if (num_expr_tokens == 2) { // Potential unary operation: OP $var or $var OP
+            Token* op_token = NULL; Token* var_token = NULL; char context[10];
+            if (tokens_arr[start_idx].type == TOKEN_OPERATOR && tokens_arr[start_idx+1].type == TOKEN_VARIABLE) { // ++$var
+                op_token = &tokens_arr[start_idx]; var_token = &tokens_arr[start_idx+1]; strcpy(context, "prefix");
+            } else if (tokens_arr[start_idx].type == TOKEN_VARIABLE && tokens_arr[start_idx+1].type == TOKEN_OPERATOR) { // $var++
+                var_token = &tokens_arr[start_idx]; op_token = &tokens_arr[start_idx+1]; strcpy(context, "postfix");
+            }
+
+            if (op_token && var_token) {
+                char var_name_clean[MAX_VAR_NAME_LEN]; // Extract from var_token->text (remove '$')
+                // ... (logic to extract clean var name, same as in old handle_unary_op_statement / process_line for unary)
+                 if (var_token->text[0] == '$') {
+                    if (var_token->text[1] == '{') { /* ... */ } else { strncpy(var_name_clean, var_token->text + 1, MAX_VAR_NAME_LEN - 1); var_name_clean[MAX_VAR_NAME_LEN - 1] = '\0';}
+                } else { /* error */ return false; }
+
+                const char* temp_bsh_result_var = "__TEMP_EVAL_EXPR_RES";
+                return invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                               var_name_clean, op_token->text, context,
+                                               temp_bsh_result_var, result_buffer, buffer_size);
+            } else {
+                 fprintf(stderr, "Error: Malformed 2-token expression for evaluation.\n");
+                 strncpy(result_buffer, "EXPR_EVAL_ERROR", buffer_size-1); return false;
+            }
+        } else if (num_expr_tokens == 3 && tokens_arr[start_idx+1].type == TOKEN_OPERATOR) { // op1 OPR op2
+            char op1_expanded[INPUT_BUFFER_SIZE];
+            char op2_expanded[INPUT_BUFFER_SIZE];
+
+            // Expand operand1
+            if (tokens_arr[start_idx].type == TOKEN_STRING) { /* unescape and expand */ unescape_string(tokens_arr[start_idx].text, op1_expanded, sizeof(op1_expanded)); expand_variables_in_string_advanced(op1_expanded, op1_expanded, sizeof(op1_expanded)); }
+            else { expand_variables_in_string_advanced(tokens_arr[start_idx].text, op1_expanded, sizeof(op1_expanded)); }
+
+            // Expand operand2
+            if (tokens_arr[start_idx+2].type == TOKEN_STRING) { /* unescape and expand */ unescape_string(tokens_arr[start_idx+2].text, op2_expanded, sizeof(op2_expanded)); expand_variables_in_string_advanced(op2_expanded, op2_expanded, sizeof(op2_expanded));}
+            else { expand_variables_in_string_advanced(tokens_arr[start_idx+2].text, op2_expanded, sizeof(op2_expanded)); }
+
+            const char* operator_str = tokens_arr[start_idx+1].text;
+            const char* temp_bsh_result_var = "__TEMP_EVAL_EXPR_RES";
+            return invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                           op1_expanded, op2_expanded, operator_str,
+                                           temp_bsh_result_var, result_buffer, buffer_size);
+        } else {
+            // More complex expression or unsupported: concatenate as string for now (basic fallback)
+            // This path means the expression wasn't a single var/literal, recognized unary/binary, or ternary.
+            // It will just combine the raw token texts or their variable expansions.
+            result_buffer[0] = '\0'; size_t current_len = 0;
+            for (int i = start_idx; i <= end_idx; ++i) {
+                char expanded_part[INPUT_BUFFER_SIZE];
+                if (tokens_arr[i].type == TOKEN_STRING) { /* unescape and expand */ unescape_string(tokens_arr[i].text, expanded_part, sizeof(expanded_part)); expand_variables_in_string_advanced(expanded_part, expanded_part, sizeof(expanded_part)); }
+                else { expand_variables_in_string_advanced(tokens_arr[i].text, expanded_part, sizeof(expanded_part)); }
+                
+                if (current_len + strlen(expanded_part) + (i > start_idx ? 1 : 0) < buffer_size) {
+                    if (i > start_idx) { strcat(result_buffer, " "); current_len++; }
+                    strcat(result_buffer, expanded_part); current_len += strlen(expanded_part);
+                } else { /* buffer full */ break; }
+            }
+            // This fallback concatenation might not be "evaluation" in a strict sense for complex expressions
+            // but it's what bsh does for simple multi-token assignments if not an op or command.
+            return true;
+        }
+    }
+    return false; // Should not be reached if logic is complete
+}
+
 void handle_assignment_advanced(Token *tokens, int num_tokens) {
     if (num_tokens < 3 || tokens[0].type != TOKEN_VARIABLE || tokens[1].type != TOKEN_ASSIGN) {
         fprintf(stderr, "Assignment syntax: $variable = value | $array[index] = value\n"); return;
@@ -1879,27 +2039,71 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
     char value_to_set[INPUT_BUFFER_SIZE]; value_to_set[0] = '\0'; 
     bool is_rhs_command = false;
 
-    // --- Check for "object:" prefix ---
-    bool structured_data_parsed = false;
-    const char* data_to_parse_str = NULL;
+    char rhs_eval_result[INPUT_BUFFER_SIZE]; // Buffer for the fully evaluated RHS
+    rhs_eval_result[0] = '\0';
+    bool eval_success = false;
 
-    if (strncmp(value_to_set, "object:", strlen("object:")) == 0) {
-        data_to_parse_str = value_to_set + strlen("object:");
-        structured_data_parsed = true;
+    // Determine the start and end token indices for the RHS expression
+    // RHS starts at tokens[2] (after $var and =)
+    int rhs_start_idx = 2;
+    int rhs_end_idx = num_tokens - 1;
+    // Adjust rhs_end_idx if the last token is a comment
+    if (rhs_end_idx >= rhs_start_idx && tokens[rhs_end_idx].type == TOKEN_COMMENT) {
+        rhs_end_idx--;
     }
-    // Add other prefixes here if needed in the future, e.g., "json:"
 
-    if (structured_data_parsed) {
-        int current_scope_id_for_data = (scope_stack_top >= 0) ? scope_stack[scope_stack_top].scope_id : GLOBAL_SCOPE_ID;
-        
-        // Call the new C function to parse and flatten this specific BSH object string
-        parse_and_flatten_bsh_object_string(data_to_parse_str, base_var_name, current_scope_id_for_data);
+    if (rhs_start_idx <= rhs_end_idx) {
+        // NEW: Use evaluate_expression_tokens for the entire RHS
+        if (evaluate_expression_tokens(tokens, rhs_start_idx, rhs_end_idx, rhs_eval_result, sizeof(rhs_eval_result))) {
+            // The object: prefix check for command substitution results would now need to be
+            // handled *inside* evaluate_expression_tokens if a part of the expression
+            // is a command substitution $(...).
+            // For now, let's assume evaluate_expression_tokens handles its own $(...) expansion
+            // and that result is what we have in rhs_eval_result.
 
-        // The main variable ($base_var_name) can store the raw string (minus prefix)
-        // or a marker. Let's store the raw string.
-        memmove(value_to_set, (char*)data_to_parse_str, strlen(data_to_parse_str) + 1);
+            // Check if the result of evaluation (which might come from a cmd substitution within the expr)
+            // has the "object:" prefix.
+            bool structured_data_parsed = false;
+            const char* data_to_parse_str = NULL;
+            const char* detected_prefix_str = NULL; // e.g. "object:"
+
+            if (strncmp(rhs_eval_result, "object:", strlen("object:")) == 0) { // As per user request
+                data_to_parse_str = rhs_eval_result + strlen("object:");
+                detected_prefix_str = "object:"; // For passing to the parser
+                structured_data_parsed = true;
+            }
+
+            if (structured_data_parsed) {
+                int current_scope = (scope_stack_top >= 0) ? scope_stack[scope_stack_top].scope_id : GLOBAL_SCOPE_ID;
+                parse_and_flatten_bsh_object_string(data_to_parse_str, base_var_name, current_scope); // Needs scope_id if not using global
+                
+                // What to assign to the main variable? The raw data (minus prefix) or a marker.
+                memmove(rhs_eval_result, (char*)data_to_parse_str, strlen(data_to_parse_str) + 1);
+            }
+            eval_success = true;
+        } else {
+            fprintf(stderr, "Error evaluating RHS for assignment to '%s'.\n", base_var_name);
+            strncpy(rhs_eval_result, "RHS_EVAL_ERROR", sizeof(rhs_eval_result) - 1);
+        }
+    } else { // No tokens on RHS (e.g., $var =)
+        eval_success = true; // Evaluates to empty string
     }
-    // If not structured_data_parsed, value_to_set contains the raw command output.
+
+    // Final assignment
+    if (eval_success) {
+        if (is_array_assignment) {
+            set_array_element_scoped(base_var_name, index_str_raw, rhs_eval_result);
+        } else {
+            set_variable_scoped(base_var_name, rhs_eval_result, false);
+        }
+    }
+    // Note: The old logic for 'is_rhs_command' directly in handle_assignment_advanced is now
+    // implicitly handled if evaluate_expression_tokens can evaluate command substitutions $(...).
+    // If evaluate_expression_tokens cannot handle $(...) itself, then handle_assignment_advanced
+    // would need to detect $(...) first, execute it, get its output, and *then* if that output
+    // isn't an object prefix, it could be part of a larger expression to pass to evaluate_expression_tokens.
+    // This simplified version assumes evaluate_expression_tokens can get the final string value.
+
     // --- END Prefix Check ---
 
     if (num_tokens > 2 && tokens[2].type == TOKEN_WORD) {
