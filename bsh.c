@@ -901,9 +901,6 @@ bool invoke_bsh_operator_handler(const char* bsh_handler_name_param,
 
 // --- Expression Evaluation (New/Rewritten using Precedence Climbing) ---
 
-// Forward declaration for recursive calls
-bool parse_expression_recursive(ExprParseContext* ctx, int min_precedence);
-
 // Parses a primary: number, variable, string, or parenthesized expression
 // Also handles UNARY_PREFIX operators here as they have high precedence.
 bool parse_operand(ExprParseContext* ctx, char* operand_result_buffer, size_t operand_buffer_size) {
@@ -1216,7 +1213,28 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
 
     // ... (current_exec_state == STATE_BLOCK_SKIP logic remains similar) ...
     if (current_exec_state == STATE_BLOCK_SKIP && exec_mode_param != STATE_IMPORT_PARSING) {
-        // ... (handle if, else, while, defunc for block nesting, and '}') ...
+        const char* first_token_text_resolved = NULL;
+        if (tokens[0].type == TOKEN_WORD) {
+             first_token_text_resolved = resolve_keyword_alias(tokens[0].text);
+        }
+
+        if (tokens[0].type == TOKEN_RBRACE) { 
+            handle_closing_brace_token(tokens[0], input_source);
+        } else if (first_token_text_resolved &&
+                   (strcmp(first_token_text_resolved, "else") == 0 )) {
+            handle_else_statement_advanced(tokens, num_tokens, input_source, current_line_no);
+        } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "if") == 0){
+            push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no);
+        } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "while") == 0){
+            push_block_bf(BLOCK_TYPE_WHILE, false, 0, current_line_no);
+        } else if (first_token_text_resolved && strcmp(first_token_text_resolved, "defunc") == 0){
+             push_block_bf(BLOCK_TYPE_FUNCTION_DEF, false, 0, current_line_no); 
+        } else if (tokens[0].type == TOKEN_LBRACE) { 
+            BlockFrame* current_block = peek_block_bf();
+            if (!current_block) { // Should not happen if LBRACE follows a skipped if/while/defunc
+                 fprintf(stderr, "Syntax error: Unmatched '{' on line %d while skipping.\n", current_line_no);
+            }
+        }        
         return;
     }
     if (bsh_return_value_is_set && current_exec_state == STATE_RETURN_REQUESTED){
@@ -1513,7 +1531,26 @@ int main(int argc, char *argv[]) {
             }
 
             char state_indicator[35] = "";  //
-            // ... (prompt state indicator logic remains the same) ...
+            if (block_stack_top_bf >= 0) {
+                BlockFrame* top_block = peek_block_bf();
+                const char* block_type_str = "unknown";
+                if (top_block) {
+                    if (top_block->type == BLOCK_TYPE_IF) block_type_str = "if";
+                    else if (top_block->type == BLOCK_TYPE_ELSE) block_type_str = "else";
+                    else if (top_block->type == BLOCK_TYPE_WHILE) block_type_str = "while";
+                    else if (top_block->type == BLOCK_TYPE_FUNCTION_DEF) block_type_str = "defunc_body";
+                }
+
+                if (current_exec_state == STATE_BLOCK_SKIP) {
+                    snprintf(state_indicator, sizeof(state_indicator), "(skip %s %d)", block_type_str, block_stack_top_bf + 1);
+                } else if (current_exec_state == STATE_DEFINE_FUNC_BODY && current_function_definition) {
+                     snprintf(state_indicator, sizeof(state_indicator), "(defunc %s)", current_function_definition->name);
+                } else if (top_block) { 
+                    snprintf(state_indicator, sizeof(state_indicator), "(%s %d)", block_type_str, block_stack_top_bf + 1);
+                }
+            } else if (current_exec_state == STATE_DEFINE_FUNC_BODY && current_function_definition) {
+                snprintf(state_indicator, sizeof(state_indicator), "(defunc %s...)", current_function_definition->name);
+            }
 
             snprintf(prompt_buffer, sizeof(prompt_buffer), "%s%s> ", current_prompt_val, state_indicator); //
             printf("%s", prompt_buffer); //
@@ -1541,4 +1578,1721 @@ int main(int argc, char *argv[]) {
 
     cleanup_shell(); //
     return 0; //
+}
+
+/////
+///// Missing implementations
+/////
+
+
+void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
+    // ... (remains the same)
+    if (num_tokens < 2) { 
+        fprintf(stderr, "Syntax error for 'if'. Expected: if [!] <condition_value_or_variable> [{]\n");
+        if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
+           push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+        } return;
+    }
+
+    bool condition_result = false;
+    bool negate_result = false;
+    int condition_token_idx = 1;
+
+    if (current_exec_state != STATE_BLOCK_SKIP) {
+        if (tokens[1].type == TOKEN_OPERATOR && strcmp(tokens[1].text, "!") == 0) {
+            if (num_tokens < 3) { 
+                fprintf(stderr, "Syntax error for 'if !'. Expected: if ! <condition_value_or_variable> [{]\n");
+                if (block_stack_top_bf < MAX_NESTING_DEPTH -1) { 
+                    push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+                }
+                return;
+            }
+            negate_result = true;
+            condition_token_idx = 2;
+        }
+
+        if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+            condition_result = evaluate_condition_advanced(&tokens[condition_token_idx], &tokens[condition_token_idx+1], &tokens[condition_token_idx+2]);
+        } else { 
+            char condition_value_expanded[INPUT_BUFFER_SIZE];
+            if (tokens[condition_token_idx].type == TOKEN_STRING) {
+                char unescaped[INPUT_BUFFER_SIZE];
+                unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+                expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+            } else {
+                expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+            }
+            condition_result = (strcmp(condition_value_expanded, "1") == 0 || 
+                                (strcmp(condition_value_expanded, "true") == 0) ||
+                                (strlen(condition_value_expanded) > 0 && strcmp(condition_value_expanded,"0") != 0 && strcmp(condition_value_expanded,"false") !=0 ) );
+        }
+
+
+        if (negate_result) {
+            condition_result = !condition_result;
+        }
+    } 
+
+    push_block_bf(BLOCK_TYPE_IF, condition_result, 0, current_line_no);
+    if (condition_result && current_exec_state != STATE_BLOCK_SKIP) { 
+        current_exec_state = STATE_BLOCK_EXECUTE;
+    } else {
+        current_exec_state = STATE_BLOCK_SKIP;
+    }
+
+    int brace_expected_after_idx = condition_token_idx;
+    if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+        brace_expected_after_idx = condition_token_idx + 2; 
+    }
+    int last_substantive_token_idx_before_brace_or_comment = brace_expected_after_idx;
+
+    if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1 && tokens[last_substantive_token_idx_before_brace_or_comment+1].type == TOKEN_LBRACE) {
+    } else if (num_tokens == last_substantive_token_idx_before_brace_or_comment + 1) {
+    } else if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1 && tokens[num_tokens-1].type == TOKEN_LBRACE) {
+    } else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == last_substantive_token_idx_before_brace_or_comment +1){
+    }
+    else if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1) { 
+         fprintf(stderr, "Syntax error for 'if': Unexpected tokens after condition/expression. '{' expected or end of line.\n");
+    }
+}
+
+void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
+    // ... (remains the same)
+    if (num_tokens < 2) {
+        fprintf(stderr, "Syntax error for 'while'. Expected: while [!] <condition_value_or_variable_or_expr> [{]\n");
+        if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
+           push_block_bf(BLOCK_TYPE_WHILE, false, get_file_pos(input_source), current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+        } return;
+    }
+
+    bool condition_result = false;
+    bool negate_result = false;
+    int condition_token_idx = 1;
+    long loop_fpos_at_while_line = get_file_pos(input_source); 
+    
+    if (current_exec_state != STATE_BLOCK_SKIP) {
+        if (tokens[1].type == TOKEN_OPERATOR && strcmp(tokens[1].text, "!") == 0) {
+            if (num_tokens < 3) {
+                fprintf(stderr, "Syntax error for 'while !'. Expected: while ! <condition_value_or_variable_or_expr> [{]\n");
+                 if (block_stack_top_bf < MAX_NESTING_DEPTH -1) {
+                    push_block_bf(BLOCK_TYPE_WHILE, false, loop_fpos_at_while_line, current_line_no); current_exec_state = STATE_BLOCK_SKIP;
+                }
+                return;
+            }
+            negate_result = true;
+            condition_token_idx = 2;
+        }
+
+        if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+             condition_result = evaluate_condition_advanced(&tokens[condition_token_idx], &tokens[condition_token_idx+1], &tokens[condition_token_idx+2]);
+        } else { 
+            char condition_value_expanded[INPUT_BUFFER_SIZE];
+            if (tokens[condition_token_idx].type == TOKEN_STRING) {
+                char unescaped[INPUT_BUFFER_SIZE];
+                unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+                expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+            } else {
+                expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+            }
+            condition_result = (strcmp(condition_value_expanded, "1") == 0 || 
+                                (strcmp(condition_value_expanded, "true") == 0) ||
+                                (strlen(condition_value_expanded) > 0 && strcmp(condition_value_expanded,"0") != 0 && strcmp(condition_value_expanded,"false") !=0 ) );
+        }
+
+        if (negate_result) {
+            condition_result = !condition_result;
+        }
+    }
+
+    push_block_bf(BLOCK_TYPE_WHILE, condition_result, loop_fpos_at_while_line, current_line_no);
+    if (condition_result && current_exec_state != STATE_BLOCK_SKIP) {
+        current_exec_state = STATE_BLOCK_EXECUTE;
+    } else {
+        current_exec_state = STATE_BLOCK_SKIP;
+    }
+    
+    int brace_expected_after_idx = condition_token_idx;
+    if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+        brace_expected_after_idx = condition_token_idx + 2; 
+    }
+
+    int last_substantive_token_idx_before_brace_or_comment = brace_expected_after_idx;
+
+    if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1 && tokens[last_substantive_token_idx_before_brace_or_comment+1].type == TOKEN_LBRACE) {}
+    else if (num_tokens == last_substantive_token_idx_before_brace_or_comment + 1) {}
+    else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == last_substantive_token_idx_before_brace_or_comment +1){}
+    else if (num_tokens > last_substantive_token_idx_before_brace_or_comment + 1) {
+         fprintf(stderr, "Syntax error for 'while': Unexpected tokens after condition/expression. '{' expected or end of line.\n");
+    }
+}
+
+void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
+    // ... (remains the same)
+    BlockFrame* prev_block_frame = peek_block_bf();
+    if (!prev_block_frame || (prev_block_frame->type != BLOCK_TYPE_IF && prev_block_frame->type != BLOCK_TYPE_ELSE)) {
+        fprintf(stderr, "Error: 'else' without a preceding 'if' or 'else if' block on line %d.\n", current_line_no);
+        if (current_exec_state != STATE_BLOCK_SKIP) { 
+            current_exec_state = STATE_BLOCK_SKIP; 
+        } return;
+    }
+
+    BlockFrame closed_if_or_else_if = *pop_block_bf(); 
+    bool execute_this_else_branch = false;
+
+    if (closed_if_or_else_if.condition_true) { 
+        execute_this_else_branch = false;
+    } else { 
+        if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { 
+            int condition_token_idx = 2; 
+            bool negate_result = false;
+
+            if (num_tokens < 3) { 
+                fprintf(stderr, "Syntax error for 'else if'. Expected: else if [!] <condition_value_or_variable_or_expr> [{]\n");
+                execute_this_else_branch = false; 
+            } else {
+                if (tokens[2].type == TOKEN_OPERATOR && strcmp(tokens[2].text, "!") == 0) { 
+                    if (num_tokens < 4) { 
+                        fprintf(stderr, "Syntax error for 'else if !'. Expected: else if ! <condition_value_or_variable_or_expr> [{]\n");
+                        execute_this_else_branch = false;
+                    } else {
+                        negate_result = true;
+                        condition_token_idx = 3; 
+                    }
+                }
+                if (execute_this_else_branch == false && !(negate_result && num_tokens <4) && !(num_tokens <3) ) { 
+                    if (current_exec_state != STATE_BLOCK_SKIP) { 
+                        if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
+                             execute_this_else_branch = evaluate_condition_advanced(&tokens[condition_token_idx], &tokens[condition_token_idx+1], &tokens[condition_token_idx+2]);
+                        } else { 
+                            char condition_value_expanded[INPUT_BUFFER_SIZE];
+                            if (tokens[condition_token_idx].type == TOKEN_STRING) {
+                                char unescaped[INPUT_BUFFER_SIZE];
+                                unescape_string(tokens[condition_token_idx].text, unescaped, sizeof(unescaped));
+                                expand_variables_in_string_advanced(unescaped, condition_value_expanded, sizeof(condition_value_expanded));
+                            } else {
+                                expand_variables_in_string_advanced(tokens[condition_token_idx].text, condition_value_expanded, sizeof(condition_value_expanded));
+                            }
+                             execute_this_else_branch = (strcmp(condition_value_expanded, "1") == 0 || 
+                                (strcmp(condition_value_expanded, "true") == 0) ||
+                                (strlen(condition_value_expanded) > 0 && strcmp(condition_value_expanded,"0") != 0 && strcmp(condition_value_expanded,"false") !=0 ) );
+                        }
+                        if (negate_result) execute_this_else_branch = !execute_this_else_branch;
+                    } else { 
+                        execute_this_else_branch = false;
+                    }
+                }
+            }
+        } else { 
+            execute_this_else_branch = true; 
+        }
+    }
+
+    push_block_bf(BLOCK_TYPE_ELSE, execute_this_else_branch, 0, current_line_no);
+    if (execute_this_else_branch && current_exec_state != STATE_BLOCK_SKIP) { 
+        current_exec_state = STATE_BLOCK_EXECUTE;
+    } else {
+        current_exec_state = STATE_BLOCK_SKIP;
+    }
+
+    int base_token_count_for_brace_check = 1; 
+    if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { 
+        base_token_count_for_brace_check = 2; 
+        if (num_tokens > 2 && tokens[2].type == TOKEN_OPERATOR && strcmp(tokens[2].text, "!") == 0) { 
+             base_token_count_for_brace_check = 3; 
+        }
+        if (num_tokens >= base_token_count_for_brace_check + 3 && tokens[base_token_count_for_brace_check + 1].type == TOKEN_OPERATOR) {
+            base_token_count_for_brace_check += 2; 
+        }
+        base_token_count_for_brace_check++; 
+    }
+
+    if (num_tokens > base_token_count_for_brace_check && tokens[base_token_count_for_brace_check].type == TOKEN_LBRACE) {  }
+    else if (num_tokens == base_token_count_for_brace_check) {  }
+    else if (num_tokens > base_token_count_for_brace_check && tokens[num_tokens-1].type == TOKEN_LBRACE) {  }
+    else if (tokens[num_tokens-1].type == TOKEN_COMMENT && num_tokens-1 == base_token_count_for_brace_check){}
+    else if (num_tokens > base_token_count_for_brace_check && tokens[base_token_count_for_brace_check].type != TOKEN_COMMENT) { 
+        fprintf(stderr, "Syntax error for 'else'/'else if' on line %d: Unexpected tokens after condition/expression. '{' expected or end of line.\n", current_line_no);
+    }
+}
+
+void handle_defunc_statement_advanced(Token *tokens, int num_tokens) {
+    // ... (remains the same)
+    if (num_tokens < 2 || tokens[1].type != TOKEN_WORD) {
+        fprintf(stderr, "Syntax: defunc <funcname> [(param1 ...)] [{]\n"); return;
+    }
+    if (is_defining_function && current_exec_state != STATE_IMPORT_PARSING) {
+        fprintf(stderr, "Error: Cannot nest function definitions during normal execution.\n"); return;
+    }
+    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) {
+        push_block_bf(BLOCK_TYPE_FUNCTION_DEF, false, 0, 0); return; 
+    }
+
+    current_function_definition = (UserFunction*)malloc(sizeof(UserFunction));
+    if (!current_function_definition) { perror("malloc for function definition failed"); return; }
+    memset(current_function_definition, 0, sizeof(UserFunction));
+    strncpy(current_function_definition->name, tokens[1].text, MAX_VAR_NAME_LEN - 1);
+
+    int token_idx = 2;
+    if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_LPAREN) {
+        token_idx++; 
+        while(token_idx < num_tokens && tokens[token_idx].type != TOKEN_RPAREN) {
+            if (tokens[token_idx].type == TOKEN_WORD) {
+                if (current_function_definition->param_count < MAX_FUNC_PARAMS) {
+                    strncpy(current_function_definition->params[current_function_definition->param_count++], tokens[token_idx].text, MAX_VAR_NAME_LEN -1);
+                } else { fprintf(stderr, "Too many parameters for function %s.\n", current_function_definition->name); free(current_function_definition); current_function_definition = NULL; return; }
+            } else if (tokens[token_idx].type == TOKEN_COMMENT) { 
+                break; 
+            }else { fprintf(stderr, "Syntax error in function parameters: Expected word for %s, got '%s'.\n", current_function_definition->name, tokens[token_idx].text); free(current_function_definition); current_function_definition = NULL; return; }
+            token_idx++;
+        }
+        if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_RPAREN) token_idx++; 
+        else if (!(token_idx < num_tokens && tokens[token_idx].type == TOKEN_COMMENT)) { 
+             fprintf(stderr, "Syntax error in function parameters: missing ')' for %s.\n", current_function_definition->name); free(current_function_definition); current_function_definition = NULL; return; 
+        }
+    }
+    while(token_idx < num_tokens && tokens[token_idx].type == TOKEN_COMMENT) {
+        token_idx++;
+    }
+
+    if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_LBRACE) { 
+        is_defining_function = true;
+        if (current_exec_state != STATE_IMPORT_PARSING) current_exec_state = STATE_DEFINE_FUNC_BODY;
+        push_block_bf(BLOCK_TYPE_FUNCTION_DEF, true, 0, 0); 
+    } else if (token_idx == num_tokens) { 
+        is_defining_function = true;
+        if (current_exec_state != STATE_IMPORT_PARSING) current_exec_state = STATE_DEFINE_FUNC_BODY;
+    } else {
+        fprintf(stderr, "Syntax error in function definition: '{' expected for %s, got '%s'.\n", current_function_definition->name, tokens[token_idx].text);
+        free(current_function_definition); current_function_definition = NULL;
+    }
+}
+
+void handle_inc_dec_statement_advanced(Token *tokens, int num_tokens, bool increment) {
+    // ... (remains the same, this is for 'inc'/'dec' keywords)
+    if (num_tokens != 2 || (tokens[1].type != TOKEN_VARIABLE && tokens[1].type != TOKEN_WORD)) {
+        fprintf(stderr, "Syntax: %s <$varname_or_varname | $arr[idx]>\n", increment ? "inc" : "dec"); return;
+    }
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    const char* var_name_token_text = tokens[1].text;
+    char var_name_or_base[MAX_VAR_NAME_LEN];
+    bool is_array_op = false;
+    char index_raw[MAX_VAR_NAME_LEN] = "";
+
+    if (tokens[1].type == TOKEN_VARIABLE) { 
+        char temp_text[MAX_VAR_NAME_LEN * 2]; 
+        strncpy(temp_text, var_name_token_text + 1, sizeof(temp_text)-1); temp_text[sizeof(temp_text)-1] = '\0';
+        char* bracket = strchr(temp_text, '[');
+        if (bracket) {
+            char* end_bracket = strrchr(bracket, ']');
+            if (end_bracket && end_bracket > bracket + 1) { 
+                is_array_op = true;
+                size_t base_len = bracket - temp_text;
+                strncpy(var_name_or_base, temp_text, base_len); var_name_or_base[base_len] = '\0';
+                size_t index_len = end_bracket - (bracket + 1);
+                strncpy(index_raw, bracket + 1, index_len); index_raw[index_len] = '\0';
+            } else { fprintf(stderr, "Malformed array index in %s: %s\n", increment ? "inc" : "dec", var_name_token_text); return; }
+        } else { strncpy(var_name_or_base, temp_text, MAX_VAR_NAME_LEN -1); var_name_or_base[MAX_VAR_NAME_LEN-1] = '\0'; }
+    } else { 
+        strncpy(var_name_or_base, var_name_token_text, MAX_VAR_NAME_LEN -1); var_name_or_base[MAX_VAR_NAME_LEN-1] = '\0';
+    }
+
+    char* current_val_str;
+    char expanded_index_for_array_op[INPUT_BUFFER_SIZE]; 
+
+    if (is_array_op) {
+        if (index_raw[0] == '"' && index_raw[strlen(index_raw)-1] == '"') {
+            char unescaped_idx[INPUT_BUFFER_SIZE];
+            unescape_string(index_raw, unescaped_idx, sizeof(unescaped_idx));
+            expand_variables_in_string_advanced(unescaped_idx, expanded_index_for_array_op, sizeof(expanded_index_for_array_op));
+        } else if (index_raw[0] == '$') {
+            expand_variables_in_string_advanced(index_raw, expanded_index_for_array_op, sizeof(expanded_index_for_array_op));
+        } else { 
+            strncpy(expanded_index_for_array_op, index_raw, sizeof(expanded_index_for_array_op)-1);
+            expanded_index_for_array_op[sizeof(expanded_index_for_array_op)-1] = '\0';
+        }
+        current_val_str = get_array_element_scoped(var_name_or_base, expanded_index_for_array_op);
+    } else { 
+        current_val_str = get_variable_scoped(var_name_or_base);
+    }
+
+    long current_val = 0;
+    if (current_val_str) {
+        char *endptr; errno = 0;
+        current_val = strtol(current_val_str, &endptr, 10);
+        if (errno != 0 || *current_val_str == '\0' || *endptr != '\0') {
+            fprintf(stderr, "Warning: Variable/element '%s%s%s%s%s' ('%s') is not a valid integer for %s. Treating as 0.\n",
+                tokens[1].type == TOKEN_VARIABLE ? "$" : "", var_name_or_base, 
+                is_array_op ? "[" : "", is_array_op ? expanded_index_for_array_op : "", is_array_op ? "]" : "",
+                current_val_str ? current_val_str : "NULL", increment ? "inc" : "dec");
+            current_val = 0;
+        }
+    }
+    current_val += (increment ? 1 : -1);
+    char new_val_str[MAX_VAR_NAME_LEN]; 
+    snprintf(new_val_str, sizeof(new_val_str), "%ld", current_val);
+
+    if (is_array_op) set_array_element_scoped(var_name_or_base, expanded_index_for_array_op, new_val_str);
+    else set_variable_scoped(var_name_or_base, new_val_str, false);
+}
+
+void handle_loadlib_statement(Token *tokens, int num_tokens) {
+    // ... (remains the same)
+    if (num_tokens != 3) { fprintf(stderr, "Syntax: loadlib <path_or_$var> <alias_or_$var>\n"); return; }
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+    char lib_path[MAX_FULL_PATH_LEN], alias[MAX_VAR_NAME_LEN];
+    
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, lib_path, sizeof(lib_path));
+    } else { 
+        expand_variables_in_string_advanced(tokens[1].text, lib_path, sizeof(lib_path));
+    }
+    
+    if (tokens[2].type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, alias, sizeof(alias));
+    } else { 
+        expand_variables_in_string_advanced(tokens[2].text, alias, sizeof(alias));
+    }
+
+    if (strlen(lib_path) == 0 || strlen(alias) == 0) { fprintf(stderr, "loadlib error: Path or alias is empty.\n"); return; }
+    DynamicLib* current_lib = loaded_libs; while(current_lib) { if (strcmp(current_lib->alias, alias) == 0) { fprintf(stderr, "Error: Lib alias '%s' in use.\n", alias); return; } current_lib = current_lib->next; }
+    void *handle = dlopen(lib_path, RTLD_LAZY | RTLD_GLOBAL);
+    if (!handle) { fprintf(stderr, "Error loading library '%s': %s\n", lib_path, dlerror()); return; }
+    DynamicLib *new_lib_entry = (DynamicLib*)malloc(sizeof(DynamicLib));
+    if (!new_lib_entry) { perror("malloc for new_lib_entry failed"); dlclose(handle); return; }
+    strncpy(new_lib_entry->alias, alias, MAX_VAR_NAME_LEN -1); new_lib_entry->alias[MAX_VAR_NAME_LEN-1] = '\0';
+    new_lib_entry->handle = handle; new_lib_entry->next = loaded_libs; loaded_libs = new_lib_entry;
+}
+
+void handle_calllib_statement(Token *tokens, int num_tokens) {
+    // ... (remains the same)
+    if (num_tokens < 3) { fprintf(stderr, "Syntax: calllib <alias> <func_name> [args...]\n"); return; }
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+    char alias[MAX_VAR_NAME_LEN], func_name[MAX_VAR_NAME_LEN];
+
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, alias, sizeof(alias));
+    } else { 
+        expand_variables_in_string_advanced(tokens[1].text, alias, sizeof(alias));
+    }
+
+    if (tokens[2].type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, func_name, sizeof(func_name));
+    } else { 
+        expand_variables_in_string_advanced(tokens[2].text, func_name, sizeof(func_name));
+    }
+
+    if (strlen(alias) == 0 || strlen(func_name) == 0) { fprintf(stderr, "calllib error: Alias or func name empty.\n"); return; }
+    DynamicLib* lib_entry = loaded_libs; void* lib_handle = NULL;
+    while(lib_entry) { if (strcmp(lib_entry->alias, alias) == 0) { lib_handle = lib_entry->handle; break; } lib_entry = lib_entry->next; }
+    if (!lib_handle) { fprintf(stderr, "Error: Library alias '%s' not found.\n", alias); return; }
+    dlerror(); void* func_ptr = dlsym(lib_handle, func_name); char* dlsym_error = dlerror();
+    if (dlsym_error != NULL) { fprintf(stderr, "Error finding func '%s' in lib '%s': %s\n", func_name, alias, dlsym_error); return; }
+    if (!func_ptr) { fprintf(stderr, "Error finding func '%s' (ptr NULL, no dlerror).\n", func_name); return; }
+
+    typedef int (*lib_func_sig_t)(int, char**, char*, int); 
+    lib_func_sig_t target_func = (lib_func_sig_t)func_ptr;
+    int lib_argc = num_tokens - 3;
+    char* lib_argv_expanded_storage[MAX_ARGS][INPUT_BUFFER_SIZE]; char* lib_argv[MAX_ARGS + 1];
+    for(int i=0; i < lib_argc; ++i) {
+        if (tokens[i+3].type == TOKEN_STRING) { char unescaped[INPUT_BUFFER_SIZE]; unescape_string(tokens[i+3].text, unescaped, sizeof(unescaped)); expand_variables_in_string_advanced(unescaped, lib_argv_expanded_storage[i], INPUT_BUFFER_SIZE);
+        } else { expand_variables_in_string_advanced(tokens[i+3].text, lib_argv_expanded_storage[i], INPUT_BUFFER_SIZE); }
+        lib_argv[i] = lib_argv_expanded_storage[i];
+    } lib_argv[lib_argc] = NULL;
+    char lib_output_buffer[INPUT_BUFFER_SIZE]; lib_output_buffer[0] = '\0';
+    int lib_status = target_func(lib_argc, lib_argv, lib_output_buffer, sizeof(lib_output_buffer));
+    char status_str[12]; snprintf(status_str, sizeof(status_str), "%d", lib_status);
+    set_variable_scoped("LAST_LIB_CALL_STATUS", status_str, false);
+    set_variable_scoped("LAST_LIB_CALL_OUTPUT", lib_output_buffer, false);
+}
+
+void handle_import_statement(Token *tokens, int num_tokens) {
+    // ... (remains the same)
+    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) { 
+        return;
+    }
+
+    if (num_tokens < 2) {
+        fprintf(stderr, "Syntax: import <module_name_or_path>\n");
+        return;
+    }
+
+    char module_spec_expanded[MAX_FULL_PATH_LEN];
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped_module_spec[MAX_FULL_PATH_LEN];
+        unescape_string(tokens[1].text, unescaped_module_spec, sizeof(unescaped_module_spec));
+        expand_variables_in_string_advanced(unescaped_module_spec, module_spec_expanded, sizeof(module_spec_expanded));
+    } else { 
+        expand_variables_in_string_advanced(tokens[1].text, module_spec_expanded, sizeof(module_spec_expanded));
+    }
+    
+    if (strlen(module_spec_expanded) == 0) {
+        fprintf(stderr, "Error: import statement received an empty module path/name after expansion.\n");
+        return;
+    }
+
+    char full_module_path[MAX_FULL_PATH_LEN];
+    if (find_module_in_path(module_spec_expanded, full_module_path)) {
+        ExecutionState previous_exec_state = current_exec_state;
+        current_exec_state = STATE_IMPORT_PARSING; 
+
+        execute_script(full_module_path, true, false); 
+
+        current_exec_state = previous_exec_state; 
+    } else {
+        fprintf(stderr, "Error: Module '%s' not found for import.\n", module_spec_expanded);
+    }
+}
+
+void handle_update_cwd_statement(Token *tokens, int num_tokens) {
+    // ... (remains the same)
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    if (num_tokens != 1) {
+        fprintf(stderr, "Syntax: update_cwd (takes no arguments)\n");
+        return;
+    }
+
+    char cwd_buffer[PATH_MAX];
+    if (getcwd(cwd_buffer, sizeof(cwd_buffer)) != NULL) {
+        set_variable_scoped("CWD", cwd_buffer, false);
+    } else {
+        perror("bsh: update_cwd: getcwd() error");
+        set_variable_scoped("CWD", "", false); 
+    }
+}
+
+// New handler for unary operations like $var++ or ++$var
+void handle_unary_op_statement(Token* var_token, Token* op_token, bool is_prefix) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    char var_name_clean[MAX_VAR_NAME_LEN];
+    // The var_token->text for a TOKEN_VARIABLE will be like "$myvar" or "${myvar}" or "$arr[idx]"
+    // We need to extract the actual variable name part for the BSH handler.
+    // For simplicity, this example will focus on simple variables like "$myvar".
+    // Handling "$arr[idx]++" would require parsing the base name and index here.
+    if (var_token->text[0] == '$') {
+        if (var_token->text[1] == '{') { // ${varname}
+            const char* end_brace = strchr(var_token->text + 2, '}');
+            if (end_brace) {
+                size_t len = end_brace - (var_token->text + 2);
+                if (len < MAX_VAR_NAME_LEN) {
+                    strncpy(var_name_clean, var_token->text + 2, len);
+                    var_name_clean[len] = '\0';
+                } else {
+                    fprintf(stderr, "Error: Variable name in ${...} too long for unary op.\n");
+                    return;
+                }
+            } else { // Malformed ${...
+                fprintf(stderr, "Error: Malformed ${...} in unary op.\n");
+                return;
+            }
+        } else { // $varname
+             // Check for array access $var[index] - this part needs more robust parsing if to be supported directly.
+            char* bracket_ptr = strchr(var_token->text + 1, '[');
+            if (bracket_ptr) {
+                fprintf(stderr, "Error: Unary operator on array element (e.g., $arr[idx]++) is not directly supported by this simple handler. Use 'inc $arr[idx]' or a BSH function.\n");
+                // For a full implementation, you'd parse base_var_name and index_str_raw here,
+                // then the BSH handler would need to be more complex or you'd have specialized BSH handlers.
+                return;
+            }
+            strncpy(var_name_clean, var_token->text + 1, MAX_VAR_NAME_LEN - 1);
+            var_name_clean[MAX_VAR_NAME_LEN - 1] = '\0';
+        }
+    } else {
+        fprintf(stderr, "Error: Unary operator expected a variable (e.g., $var), got '%s'.\n", var_token->text);
+        return;
+    }
+    
+    if (strlen(var_name_clean) == 0) {
+        fprintf(stderr, "Error: Empty variable name in unary operation.\n");
+        return;
+    }
+
+
+    const char* op_str = op_token->text;
+    char bsh_handler_name[MAX_VAR_NAME_LEN];
+
+    if (is_prefix) {
+        if (strcmp(op_str, "++") == 0) strncpy(bsh_handler_name, "__bsh_prefix_increment", sizeof(bsh_handler_name)-1);
+        else if (strcmp(op_str, "--") == 0) strncpy(bsh_handler_name, "__bsh_prefix_decrement", sizeof(bsh_handler_name)-1);
+        else { fprintf(stderr, "Internal error: Unknown prefix unary operator '%s'.\n", op_str); return; }
+    } else { // Postfix
+        if (strcmp(op_str, "++") == 0) strncpy(bsh_handler_name, "__bsh_postfix_increment", sizeof(bsh_handler_name)-1);
+        else if (strcmp(op_str, "--") == 0) strncpy(bsh_handler_name, "__bsh_postfix_decrement", sizeof(bsh_handler_name)-1);
+        else { fprintf(stderr, "Internal error: Unknown postfix unary operator '%s'.\n", op_str); return; }
+    }
+    bsh_handler_name[sizeof(bsh_handler_name)-1] = '\0';
+
+    char c_result_buffer[INPUT_BUFFER_SIZE];
+    const char* bsh_temp_result_var_name = "__TEMP_UNARY_OP_EXPR_RES"; // BSH var to hold expression's value
+
+    // Call the BSH handler.
+    // BSH handler signature: function handler_name (var_to_modify_name_str, result_holder_var_name_str)
+    if (invoke_bsh_unary_op_call(bsh_handler_name, 
+                                 var_name_clean,          // Pass the clean variable name (e.g., "myvar")
+                                 bsh_temp_result_var_name, 
+                                 c_result_buffer, sizeof(c_result_buffer))) {
+        // The BSH handler performs the side effect (modifies var_name_clean)
+        // AND sets bsh_temp_result_var_name to the "value" of the expression.
+        set_variable_scoped("LAST_OP_RESULT", c_result_buffer, false);
+        // If these operations should print their result when standalone:
+        // printf("%s\n", c_result_buffer); 
+    } else {
+        fprintf(stderr, "Error executing BSH unary op handler '%s' for variable '%s'.\n", bsh_handler_name, var_name_clean);
+        set_variable_scoped("LAST_OP_RESULT", "UNARY_OP_HANDLER_ERROR", false);
+    }
+}
+
+
+// --- Block Management ---
+// ... (push_block_bf, pop_block_bf, peek_block_bf, handle_opening_brace_token, handle_closing_brace_token remain the same)
+void push_block_bf(BlockType type, bool condition_true, long loop_start_fpos, int loop_start_line_no) {
+    if (block_stack_top_bf >= MAX_NESTING_DEPTH - 1) { fprintf(stderr, "Max block nesting depth exceeded.\n"); return; }
+    block_stack_top_bf++;
+    block_stack[block_stack_top_bf].type = type;
+    block_stack[block_stack_top_bf].condition_true = condition_true;
+    block_stack[block_stack_top_bf].loop_start_fpos = loop_start_fpos;
+    block_stack[block_stack_top_bf].loop_start_line_no = loop_start_line_no;
+    block_stack[block_stack_top_bf].prev_exec_state = current_exec_state;
+}
+
+BlockFrame* pop_block_bf() {
+    if (block_stack_top_bf < 0) { return NULL; }
+    return &block_stack[block_stack_top_bf--];
+}
+
+BlockFrame* peek_block_bf() {
+    if (block_stack_top_bf < 0) return NULL;
+    return &block_stack[block_stack_top_bf];
+}
+
+void handle_opening_brace_token(Token token) {
+    BlockFrame* current_block_frame = peek_block_bf();
+    if (!current_block_frame) { 
+        if (is_defining_function && current_function_definition && current_exec_state != STATE_BLOCK_SKIP) {
+            push_block_bf(BLOCK_TYPE_FUNCTION_DEF, true, 0, 0); 
+            return;
+        }
+        fprintf(stderr, "Error: '{' found without a preceding statement expecting it.\n"); return;
+    }
+    if (current_block_frame->type == BLOCK_TYPE_FUNCTION_DEF) { 
+    }
+    else if (current_block_frame->condition_true && current_exec_state != STATE_BLOCK_SKIP) current_exec_state = STATE_BLOCK_EXECUTE;
+    else current_exec_state = STATE_BLOCK_SKIP;
+}
+
+void handle_closing_brace_token(Token token, FILE* input_source) {
+    BlockFrame* closed_block_frame = pop_block_bf();
+    if (!closed_block_frame) { fprintf(stderr, "Error: '}' found without a matching open block.\n"); current_exec_state = STATE_NORMAL; return; }
+
+    ExecutionState state_before_closed_block = closed_block_frame->prev_exec_state;
+    BlockFrame* parent_block = peek_block_bf(); 
+
+    if (closed_block_frame->type == BLOCK_TYPE_WHILE && closed_block_frame->condition_true && 
+        (current_exec_state == STATE_BLOCK_EXECUTE || current_exec_state == STATE_NORMAL || current_exec_state == STATE_IMPORT_PARSING) ) { 
+        
+        bool can_loop_via_fseek = false;
+        if (input_source_is_file(input_source) && closed_block_frame->loop_start_fpos != -1) {
+             // Before seeking, re-evaluate the condition. This requires re-tokenizing the while header.
+             // This is a complex part. A simpler (but less flexible) model is to just seek.
+             // For now, we'll stick to the seek model, assuming the condition might change due to side effects in the loop.
+            if (fseek(input_source, closed_block_frame->loop_start_fpos, SEEK_SET) == 0) {
+                can_loop_via_fseek = true;
+                current_exec_state = STATE_NORMAL; // Allow re-processing of the while line by execute_script
+                return; 
+            } else { 
+                perror("fseek failed for while loop"); 
+            }
+        } else if (!input_source_is_file(input_source) && closed_block_frame->loop_start_line_no > 0) { 
+             // This case is for loops inside function bodies (not read from file)
+             // True looping here would require re-executing the function lines from the loop header.
+             // This is not implemented by simple fseek.
+             fprintf(stderr, "Warning: 'while' loop repetition for non-file input (e.g. function body, line %d) is not supported by fseek. Loop will terminate.\n", closed_block_frame->loop_start_line_no);
+        }
+    }
+
+    if (!parent_block) { 
+        current_exec_state = STATE_NORMAL;
+    } else { 
+        if (parent_block->type == BLOCK_TYPE_FUNCTION_DEF && is_defining_function) {
+            current_exec_state = STATE_DEFINE_FUNC_BODY; 
+        } else if (parent_block->condition_true) {
+            current_exec_state = STATE_BLOCK_EXECUTE; 
+        } else {
+            current_exec_state = STATE_BLOCK_SKIP; 
+        }
+    }
+
+    if (closed_block_frame->type == BLOCK_TYPE_FUNCTION_DEF) {
+        if (current_function_definition) { 
+            current_function_definition->next = function_list; 
+            function_list = current_function_definition;
+            current_function_definition = NULL; 
+        }
+        is_defining_function = false; 
+        current_exec_state = state_before_closed_block; 
+        
+        if (!parent_block && current_exec_state == STATE_DEFINE_FUNC_BODY) {
+            current_exec_state = STATE_NORMAL;
+        }
+    }
+    
+    if (block_stack_top_bf == -1 && current_exec_state != STATE_DEFINE_FUNC_BODY) {
+        current_exec_state = STATE_NORMAL;
+    }
+}
+
+void handle_exit_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) {
+         // If skipping, an exit within that block context might also be skipped,
+         // or it might immediately terminate the script. Forcing termination is common.
+    }
+
+    // For now, 'exit' without args means exit current script/function with status 0.
+    // If it's the main interactive shell, it exits the shell.
+    // A more advanced 'exit' could take a status code.
+    // And distinguish between exiting a function vs. exiting the whole script.
+
+    // This simple version sets the return request state,
+    // which will stop current script/function processing.
+    // If called from the top-level interactive loop, main() would handle it.
+    bsh_last_return_value[0] = '\0'; // 'exit' itself doesn't set a printable return value here
+    bsh_return_value_is_set = false; // 'exit' is about termination status, not typical 'return value' for echo
+
+    if (num_tokens > 1) { // exit <status_code>
+        char expanded_status[INPUT_BUFFER_SIZE];
+        expand_variables_in_string_advanced(tokens[1].text, expanded_status, sizeof(expanded_status));
+        long exit_code = strtol(expanded_status, NULL, 10);
+        // Store this exit_code somewhere if the shell needs to propagate it as actual process exit status.
+        // For now, we'll just use it to signal return.
+        snprintf(bsh_last_return_value, sizeof(bsh_last_return_value), "%ld", exit_code);
+        bsh_return_value_is_set = true; // For script result capture
+    }
+
+    current_exec_state = STATE_RETURN_REQUESTED; // Use the same state to stop execution
+                                                 // The main loop or script executor needs to check this
+                                                 // and decide if it's a full shell exit or script/func exit.
+
+    // If this is the top-level interactive shell, the main loop in main()
+    // would see STATE_RETURN_REQUESTED and then decide to actually exit the bsh process.
+    // If in a script, execute_script() would stop.
+    // If in a function, execute_user_function() would stop.
+}
+
+void handle_eval_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) {
+        return; // Don't eval if in a skipped block (unless it's an import context that allows it)
+    }
+
+    if (num_tokens < 2) {
+        // 'eval' with no arguments is typically a no-op or might return success.
+        // Some shells might error; for now, let's make it a no-op.
+        set_variable_scoped("LAST_COMMAND_STATUS", "0", false);
+        return;
+    }
+
+    char code_to_eval[MAX_LINE_LENGTH * 2]; // Buffer for the string to be evaluated
+                                           // Potentially needs to be larger if eval arguments are very long
+    code_to_eval[0] = '\0';
+    size_t current_eval_code_len = 0;
+
+    // Concatenate all arguments to 'eval' into a single string, expanding them.
+    for (int i = 1; i < num_tokens; i++) {
+        if (tokens[i].type == TOKEN_COMMENT) break;
+
+        char expanded_arg_part[INPUT_BUFFER_SIZE];
+        if (tokens[i].type == TOKEN_STRING) {
+            char unescaped_val[INPUT_BUFFER_SIZE];
+            unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val)); // From your bsh.c
+            expand_variables_in_string_advanced(unescaped_val, expanded_arg_part, sizeof(expanded_arg_part)); // From your bsh.c
+        } else {
+            expand_variables_in_string_advanced(tokens[i].text, expanded_arg_part, sizeof(expanded_arg_part)); // From your bsh.c
+        }
+
+        size_t part_len = strlen(expanded_arg_part);
+        if (current_eval_code_len + part_len + (i > 1 ? 1 : 0) < sizeof(code_to_eval)) {
+            if (i > 1) { // Add space between arguments
+                strcat(code_to_eval, " ");
+                current_eval_code_len++;
+            }
+            strcat(code_to_eval, expanded_arg_part);
+            current_eval_code_len += part_len;
+        } else {
+            fprintf(stderr, "eval: Constructed code string too long.\n");
+            set_variable_scoped("LAST_COMMAND_STATUS", "1", false); // Indicate error
+            return;
+        }
+    }
+
+    if (strlen(code_to_eval) > 0) {
+        // printf("[DEBUG eval: Executing: \"%s\"]\n", code_to_eval); // Optional debug
+
+        // Store current line number and input source, as eval provides its own "line"
+        // FILE* original_input_source = input_source; // from process_line params (if needed)
+        // int original_line_no = current_line_no;     // from process_line params (if needed)
+
+        // Execute the constructed string.
+        // The `process_line` function is designed to handle a single line of BSH code.
+        // `input_source` is NULL because this code doesn't come from a seekable file stream for `while` loops.
+        // `current_line_no` can be set to 0 or 1 for the context of the eval'd string.
+        // The `exec_mode_param` should be STATE_NORMAL, as eval'd code should execute normally
+        // within the current block and scope context.
+        process_line(code_to_eval, NULL, 0, STATE_NORMAL);
+
+        // Restore original line_no/input_source if they were modified by process_line or its callees
+        // (This depends on how `process_line` uses these for context in loops, etc.)
+        // Generally, process_line for eval should not impact the outer script's file seeking.
+    } else {
+        set_variable_scoped("LAST_COMMAND_STATUS", "0", false); // Eval of empty string is success
+    }
+}
+
+/////
+/////
+/////
+
+// --- Utility Implementations ---
+// ... (trim_whitespace, free_function_list, free_operator_list, free_loaded_libs, get_file_pos, unescape_string, input_source_is_file remain the same)
+char* trim_whitespace(char *str) {
+    if (!str) return NULL; char *end;
+    while (isspace((unsigned char)*str)) str++;
+    if (*str == 0) return str; 
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) end--;
+    *(end + 1) = 0;
+    return str;
+}
+
+void free_function_list() {
+    UserFunction *current = function_list; UserFunction *next_func;
+    while (current != NULL) {
+        next_func = current->next;
+        for (int i = 0; i < current->line_count; ++i) if(current->body[i]) free(current->body[i]);
+        free(current); current = next_func;
+    }
+    function_list = NULL;
+}
+
+void free_loaded_libs() {
+    DynamicLib *current = loaded_libs; DynamicLib *next_lib;
+    while(current) {
+        next_lib = current->next;
+        if (current->handle) dlclose(current->handle);
+        free(current); current = next_lib;
+    }
+    loaded_libs = NULL;
+}
+
+long get_file_pos(FILE* f) {
+    if (!f || f == stdin || f == stdout || f == stderr) return -1L;
+    long pos = ftell(f);
+    if (pos == -1L) { return -1L; }
+    return pos;
+}
+
+char* unescape_string(const char* input_raw, char* output_buffer, size_t buffer_size) {
+    char* out = output_buffer; const char* p = input_raw; size_t out_len = 0;
+    bool in_quotes = false;
+
+    if (*p == '"') { 
+        p++; 
+        in_quotes = true;
+    }
+
+    while (*p && out_len < buffer_size - 1) {
+        if (in_quotes && *p == '"' && !(p > input_raw && *(p-1) == '\\' && (p-2 < input_raw || *(p-2) != '\\'))) {
+             break; 
+        }
+        if (*p == '\\') {
+            p++; if (!*p) break; 
+            switch (*p) {
+                case 'n': *out++ = '\n'; break; case 't': *out++ = '\t'; break;
+                case '"': *out++ = '"'; break;  case '\\': *out++ = '\\'; break;
+                case '$': *out++ = '$'; break;  default: *out++ = '\\'; *out++ = *p; break; 
+            }
+        } else { *out++ = *p; }
+        if (*p) p++; 
+        out_len++;
+    }
+    *out = '\0';
+    return output_buffer;
+}
+
+bool input_source_is_file(FILE* f) {
+    if (!f || f == stdin || f == stdout || f == stderr) return false;
+    int fd = fileno(f);
+    if (fd == -1) return false; 
+    return (fd != STDIN_FILENO && fd != STDOUT_FILENO && fd != STDERR_FILENO);
+}
+
+void execute_script(const char *filename, bool is_import_call, bool is_startup_script) {
+    // ... (remains largely the same, ensure loop_start_fpos is correctly passed if used by while)
+    FILE *script_file = fopen(filename, "r");
+    if (!script_file) {
+        if (!is_startup_script || errno != ENOENT) { 
+            fprintf(stderr, "Error opening script '%s': %s\n", filename, strerror(errno));
+        }
+        return;
+    }
+    
+    char line_buffer[INPUT_BUFFER_SIZE]; int line_no = 0;
+    ExecutionState script_exec_mode = is_import_call ? STATE_IMPORT_PARSING : STATE_NORMAL;
+
+    ExecutionState outer_exec_state_backup = current_exec_state;
+    int outer_block_stack_top_bf_backup = block_stack_top_bf;
+    bool restore_context = (!is_import_call && !is_startup_script);
+
+    while (true) {
+        if (!fgets(line_buffer, sizeof(line_buffer), script_file)) {
+            if (feof(script_file)) break; 
+            if (ferror(script_file)) { perror("Error reading script file"); break; }
+        }
+        line_no++;
+        process_line(line_buffer, script_file, line_no, script_exec_mode);
+    }
+    fclose(script_file);
+
+    if (is_import_call) { 
+        if (is_defining_function && current_function_definition) {
+            fprintf(stderr, "Warning: Unterminated function definition '%s' at end of imported file '%s'.\n", current_function_definition->name, filename);
+            for(int i=0; i < current_function_definition->line_count; ++i) if(current_function_definition->body[i]) free(current_function_definition->body[i]);
+            free(current_function_definition); current_function_definition = NULL; is_defining_function = false;
+            if (block_stack_top_bf >=0 && peek_block_bf() && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF) {
+                pop_block_bf();
+            }
+        }
+    } else if (restore_context) { 
+        current_exec_state = outer_exec_state_backup;
+        while(block_stack_top_bf > outer_block_stack_top_bf_backup) {
+            BlockFrame* bf = pop_block_bf();
+            fprintf(stderr, "Warning: Script '%s' ended with unclosed block (type %d).\n", filename, bf ? bf->type : -1);
+        }
+    }
+
+    if (is_startup_script) {
+        current_exec_state = STATE_NORMAL;
+        while(block_stack_top_bf > -1) { 
+             BlockFrame* bf = pop_block_bf();
+             if (bf && bf->type == BLOCK_TYPE_FUNCTION_DEF && is_defining_function) {
+                fprintf(stderr, "Warning: Startup script ended with unterminated function definition.\n");
+                if(current_function_definition) {
+                    for(int i=0; i < current_function_definition->line_count; ++i) if(current_function_definition->body[i]) free(current_function_definition->body[i]);
+                    free(current_function_definition); current_function_definition = NULL;
+                }
+                is_defining_function = false;
+             }
+        }
+    }
+}
+
+///
+/// Objects (JSON-like)
+///
+
+// Helper to skip whitespace in the object string
+const char* skip_whitespace_in_obj_str(const char* s) {
+    while (*s && isspace((unsigned char)*s)) s++;
+    return s;
+}
+
+// Helper to parse a BSH-style quoted string from the object string
+// Returns a pointer to the character after the parsed string (and closing quote).
+// Stores the unescaped string content in 'dest_buffer'.
+// This is a simplified string parser for this specific context.
+const char* parse_quoted_string_from_obj_str(const char* s, char* dest_buffer, size_t buffer_size) {
+    dest_buffer[0] = '\0';
+    s = skip_whitespace_in_obj_str(s);
+    if (*s != '"') return s; // Expected opening quote
+
+    s++; // Skip opening quote
+    char* out = dest_buffer;
+    size_t count = 0;
+    while (*s && count < buffer_size - 1) {
+        if (*s == '"') { // End of string
+            s++; // Skip closing quote
+            *out = '\0';
+            return s;
+        }
+        // Basic escape handling (add more if needed: \n, \t, etc.)
+        if (*s == '\\' && *(s + 1) != '\0') {
+            s++;
+            if (*s == '"' || *s == '\\') {
+                *out++ = *s++;
+            } else { // Keep backslash if not a recognized escape for this simple parser
+                *out++ = '\\';
+                *out++ = *s++;
+            }
+        } else {
+            *out++ = *s++;
+        }
+        count++;
+    }
+    *out = '\0'; // Ensure null termination
+    // If loop ended due to buffer full or end of string without closing quote, it's an error
+    // or implies the string was truncated. For simplicity, we return current 's'.
+    return s;
+}
+
+// Main recursive parsing function
+// data_ptr is a pointer-to-pointer to traverse the input string
+void parse_bsh_object_recursive(const char** data_ptr, const char* current_base_bsh_var_name, int scope_id) {
+    const char* p = skip_whitespace_in_obj_str(*data_ptr);
+
+    if (*p != '[') {
+        fprintf(stderr, "BSH Object Parse Error: Expected '[' for object/array start. At: %s\n", p);
+        // To prevent infinite loops on malformed input, consume something or error out.
+        // For simplicity, we'll try to find the end or a known delimiter if things go wrong.
+        *data_ptr = p + strlen(p); // Consume rest of string on error
+        return;
+    }
+    p++; // Consume '['
+
+    bool first_element = true;
+    while (*p) {
+        p = skip_whitespace_in_obj_str(p);
+        if (*p == ']') {
+            p++; // Consume ']'
+            break; // End of current object/array
+        }
+
+        if (!first_element) {
+            if (*p == ',') {
+                p++; // Consume ','
+                p = skip_whitespace_in_obj_str(p);
+            } else {
+                fprintf(stderr, "BSH Object Parse Error: Expected ',' or ']' between elements. At: %s\n", p);
+                *data_ptr = p + strlen(p); return; // Error
+            }
+        }
+        first_element = false;
+
+        // Parse Key
+        char key_buffer[MAX_VAR_NAME_LEN]; // For "0", "ciao"
+        p = parse_quoted_string_from_obj_str(p, key_buffer, sizeof(key_buffer));
+        if (strlen(key_buffer) == 0) {
+            fprintf(stderr, "BSH Object Parse Error: Expected valid key string. At: %s\n", p);
+            *data_ptr = p + strlen(p); return; // Error
+        }
+
+        p = skip_whitespace_in_obj_str(p);
+        if (*p != ':') {
+            fprintf(stderr, "BSH Object Parse Error: Expected ':' after key '%s'. At: %s\n", key_buffer, p);
+            *data_ptr = p + strlen(p); return; // Error
+        }
+        p++; // Consume ':'
+        p = skip_whitespace_in_obj_str(p);
+
+        // Construct new base name for BSH variable
+        char next_base_bsh_var_name[MAX_VAR_NAME_LEN * 2]; // Increased size for nested names
+        // Sanitize key_buffer for use in variable names (e.g., replace disallowed chars with '_')
+        // For now, assume keys are simple enough or BSH var names allow them.
+        snprintf(next_base_bsh_var_name, sizeof(next_base_bsh_var_name), "%s_%s", current_base_bsh_var_name, key_buffer);
+
+        // Parse Value
+        if (*p == '[') { // Nested object/array
+            // Set a type for the current key indicating it's a nested structure
+            char type_var_for_key[MAX_VAR_NAME_LEN * 2 + 20];
+            snprintf(type_var_for_key, sizeof(type_var_for_key), "%s_BSH_STRUCT_TYPE", next_base_bsh_var_name);
+            set_variable_scoped(type_var_for_key, "BSH_OBJECT", false); // Using current scope
+
+            parse_bsh_object_recursive(&p, next_base_bsh_var_name, scope_id);
+        } else if (*p == '"') { // String value
+            char value_buffer[INPUT_BUFFER_SIZE]; // Assuming values fit here
+            p = parse_quoted_string_from_obj_str(p, value_buffer, sizeof(value_buffer));
+            set_variable_scoped(next_base_bsh_var_name, value_buffer, false); // Using current scope
+        } else {
+            fprintf(stderr, "BSH Object Parse Error: Expected value (string or nested object) after key '%s'. At: %s\n", key_buffer, p);
+            *data_ptr = p + strlen(p); return; // Error
+        }
+    } // End while
+    *data_ptr = p; // Update the main pointer
+}
+
+// The public function called by handle_assignment_advanced
+void parse_and_flatten_bsh_object_string(const char* object_data_string, const char* base_var_name, int current_scope_id) {
+    const char* p = object_data_string; // p will be advanced by the recursive parser
+
+    // Set a root type for the base variable name
+    char root_type_var_key[MAX_VAR_NAME_LEN + 30]; // Enough for _BSH_STRUCT_TYPE and safety
+    snprintf(root_type_var_key, sizeof(root_type_var_key), "%s_BSH_STRUCT_TYPE", base_var_name);
+    set_variable_scoped(root_type_var_key, "BSH_OBJECT_ROOT", false); // Or "BSH_ARRAY_ROOT"
+
+    // Temporarily push the target scope if different from current, or ensure set_variable_scoped uses it.
+    // For simplicity, we assume set_variable_scoped in our recursive calls will use the active scope
+    // which should be the one where the assignment is happening.
+    // If 'current_scope_id' is different from scope_stack[scope_stack_top].scope_id,
+    // you might need a temporary scope push/pop or pass scope_id to set_variable_scoped.
+    // The current set_variable_scoped uses scope_stack[scope_stack_top].scope_id implicitly.
+
+    parse_bsh_object_recursive(&p, base_var_name, current_scope_id);
+
+    // p should now point to the end of the parsed structure or where parsing stopped.
+    // You can check if *p is whitespace or null to see if the whole string was consumed.
+    p = skip_whitespace_in_obj_str(p);
+    if (*p != '\0') {
+        fprintf(stderr, "BSH Object Parse Warning: Extra characters found after main object structure. At: %s\n", p);
+    }
+    fprintf(stdout, "[BSH_DEBUG] Flattening complete for base var '%s'.\n", base_var_name);
+}
+
+/// Stringify object
+
+// Helper for stringification: find all variables prefixed by base_var_name_
+// This is a conceptual helper, actual iteration would be over variable_list_head.
+typedef struct VarPair { char key[MAX_VAR_NAME_LEN]; char* value; char type_info[MAX_VAR_NAME_LEN]; struct VarPair* next; } VarPair;
+
+// Recursive helper
+bool build_object_string_recursive(const char* current_base_name, char** p_out, size_t* remaining_size, int scope_id) {
+    char prefix_pattern[MAX_VAR_NAME_LEN * 2];
+    snprintf(prefix_pattern, sizeof(prefix_pattern), "%s_", current_base_name);
+    size_t prefix_len = strlen(prefix_pattern);
+
+    VarPair* pairs_head = NULL;
+    VarPair* pairs_tail = NULL;
+    int element_count = 0;
+
+    // Step 1: Collect all direct children of current_base_name in the current scope
+    Variable* var_node = variable_list_head;
+    while (var_node) {
+        if (var_node->scope_id == scope_id && strncmp(var_node->name, prefix_pattern, prefix_len) == 0) {
+            const char* sub_key_full = var_node->name + prefix_len;
+            // Ensure this is a direct child, not a grandchild (e.g., base_key1_subkey vs base_key1)
+            if (strchr(sub_key_full, '_') == NULL || 
+                (strstr(sub_key_full, "_BSH_STRUCT_TYPE") != NULL && strchr(sub_key_full, '_') == strstr(sub_key_full, "_BSH_STRUCT_TYPE")) ) {
+                
+                char actual_key[MAX_VAR_NAME_LEN];
+                strncpy(actual_key, sub_key_full, sizeof(actual_key)-1);
+                actual_key[sizeof(actual_key)-1] = '\0';
+                
+                char* type_suffix_ptr = strstr(actual_key, "_BSH_STRUCT_TYPE");
+                if (type_suffix_ptr) { // It's a type variable for a sub-object, not a direct value itself (unless it's the root)
+                    *type_suffix_ptr = '\0'; // Get the key name before "_BSH_STRUCT_TYPE"
+                }
+
+                // Avoid adding duplicates if we process type var and value var separately
+                bool key_already_added = false;
+                for(VarPair* vp = pairs_head; vp; vp = vp->next) { if(strcmp(vp->key, actual_key) == 0) {key_already_added = true; break;}}
+                if(key_already_added && !type_suffix_ptr) continue; // If value var and key is added from type, skip
+                if(key_already_added && type_suffix_ptr) { // Update type if key exists
+                     for(VarPair* vp = pairs_head; vp; vp = vp->next) { if(strcmp(vp->key, actual_key) == 0) { strncpy(vp->type_info, var_node->value, sizeof(vp->type_info)-1); break;}}
+                     continue;
+                }
+
+
+                VarPair* new_pair = (VarPair*)malloc(sizeof(VarPair));
+                if (!new_pair) { /* error */ return false; }
+                strncpy(new_pair->key, actual_key, sizeof(new_pair->key)-1);
+                new_pair->key[sizeof(new_pair->key)-1] = '\0';
+                new_pair->value = NULL; // Will be filled if it's a direct value
+                new_pair->type_info[0] = '\0'; // Default no specific type
+                new_pair->next = NULL;
+
+                if (type_suffix_ptr) { // This was a *_BSH_STRUCT_TYPE variable
+                    strncpy(new_pair->type_info, var_node->value, sizeof(new_pair->type_info)-1);
+                } else { // This is a direct value variable
+                    new_pair->value = var_node->value;
+                }
+                
+                if (!pairs_head) pairs_head = pairs_tail = new_pair;
+                else { pairs_tail->next = new_pair; pairs_tail = new_pair; }
+                element_count++;
+            }
+        }
+        var_node = var_node->next;
+    }
+    
+    // Step 1b: For keys found via _BSH_STRUCT_TYPE, find their actual value if they are simple
+    // (This logic might need refinement if a key is ONLY defined by its _BSH_STRUCT_TYPE but has no direct value, implying it's purely a container)
+    for(VarPair* vp = pairs_head; vp; vp = vp->next) {
+        if (vp->value == NULL && strlen(vp->type_info) == 0) { // No value and no type, try to get direct value
+             char direct_value_var_name[MAX_VAR_NAME_LEN *2];
+             snprintf(direct_value_var_name, sizeof(direct_value_var_name), "%s_%s", current_base_name, vp->key);
+             vp->value = get_variable_scoped(direct_value_var_name); // Relies on correct scope
+        }
+    }
+
+
+    // Step 2: Append '['
+    if (*remaining_size < 2) return false;
+    **p_out = '['; (*p_out)++; (*remaining_size)--;
+
+    // Step 3: Iterate through collected pairs and stringify them
+    // TODO: Sort pairs if necessary (e.g., numeric keys for array-like objects)
+    bool first = true;
+    VarPair* current_pair = pairs_head;
+    while (current_pair) {
+        if (!first) {
+            if (*remaining_size < 2) { /* free VarPairs */ return false; }
+            **p_out = ','; (*p_out)++;
+            **p_out = ' '; (*p_out)++; // Optional space
+            (*remaining_size) -= 2;
+        }
+        first = false;
+
+        // Append key (quoted)
+        if (*remaining_size < strlen(current_pair->key) + 3) { /* free VarPairs */ return false; }
+        **p_out = '"'; (*p_out)++; (*remaining_size)--;
+        strcpy(*p_out, current_pair->key); (*p_out) += strlen(current_pair->key); (*remaining_size) -= strlen(current_pair->key);
+        **p_out = '"'; (*p_out)++; (*remaining_size)--;
+
+        // Append ':'
+        if (*remaining_size < 2) { /* free VarPairs */ return false; }
+        **p_out = ':'; (*p_out)++;
+        **p_out = ' '; (*p_out)++; // Optional space
+        (*remaining_size) -= 2;
+
+        // Append value
+        char next_level_base_name[MAX_VAR_NAME_LEN * 2];
+        snprintf(next_level_base_name, sizeof(next_level_base_name), "%s_%s", current_base_name, current_pair->key);
+
+        if (strcmp(current_pair->type_info, "BSH_OBJECT") == 0 || strcmp(current_pair->type_info, "BSH_OBJECT_ROOT") == 0) { // It's a nested object
+            if (!build_object_string_recursive(next_level_base_name, p_out, remaining_size, scope_id)) {
+                 /* free VarPairs */ return false;
+            }
+        } else if (current_pair->value) { // Simple string value
+            if (*remaining_size < strlen(current_pair->value) + 3) { /* free VarPairs */ return false; }
+            **p_out = '"'; (*p_out)++; (*remaining_size)--;
+            // TODO: Escape special characters in current_pair->value before strcpy
+            strcpy(*p_out, current_pair->value);
+            (*p_out) += strlen(current_pair->value);
+            (*remaining_size) -= strlen(current_pair->value);
+            **p_out = '"'; (*p_out)++; (*remaining_size)--;
+        } else { // Should have a value or be a known container type
+            if (*remaining_size < 3) { /* free VarPairs */ return false; }
+            strcpy(*p_out, "\"\""); (*p_out) += 2; (*remaining_size) -=2; // Empty string if no value found
+        }
+        current_pair = current_pair->next;
+    }
+
+    // Step 4: Append ']'
+    if (*remaining_size < 2) { /* free VarPairs */ return false; }
+    **p_out = ']'; (*p_out)++; (*remaining_size)--;
+    **p_out = '\0';
+
+    // Free the collected VarPair list
+    current_pair = pairs_head;
+    while(current_pair) {
+        VarPair* next = current_pair->next;
+        free(current_pair);
+        current_pair = next;
+    }
+    return true;
+}
+
+
+bool stringify_bsh_object_to_string(const char* base_var_name, char* output_buffer, size_t buffer_size) {
+    output_buffer[0] = '\0';
+    if (buffer_size < strlen("object:[]") + 1) return false; // Min possible output
+
+    strcpy(output_buffer, "object:");
+    char* p_out = output_buffer + strlen("object:");
+    size_t remaining_size = buffer_size - strlen("object:") -1 /* for null terminator */;
+    
+    int current_scope = (scope_stack_top >= 0) ? scope_stack[scope_stack_top].scope_id : GLOBAL_SCOPE_ID;
+
+    if (!build_object_string_recursive(base_var_name, &p_out, &remaining_size, current_scope)) {
+        // Append error marker if something went wrong during build
+        strcat(output_buffer, "[ERROR_DURING_STRINGIFY]");
+        return false;
+    }
+    
+    return true;
+}
+
+// echo definition moved here for helpers
+
+void handle_echo_advanced(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    char expanded_arg_buffer[INPUT_BUFFER_SIZE]; // Buffer for general argument expansion
+    char object_stringified_buffer[INPUT_BUFFER_SIZE * 2]; // Potentially larger for object stringification
+
+    for (int i = 1; i < num_tokens; i++) {
+        if (tokens[i].type == TOKEN_COMMENT) break;
+
+        const char* string_to_print = NULL;
+        bool is_bsh_object_to_stringify = false;
+
+        // First, determine if the argument is a variable that might be a BSH object
+        if (tokens[i].type == TOKEN_VARIABLE) {
+            char var_name_raw[MAX_VAR_NAME_LEN];
+            // Extract clean variable name (without '$' or '${}')
+            // This part needs to be robust as in handle_assignment_advanced or handle_unary_op_statement
+            if (tokens[i].text[0] == '$') {
+                if (tokens[i].text[1] == '{') {
+                    const char* end_brace = strchr(tokens[i].text + 2, '}');
+                    if (end_brace) {
+                        size_t len = end_brace - (tokens[i].text + 2);
+                        if (len < MAX_VAR_NAME_LEN) {
+                            strncpy(var_name_raw, tokens[i].text + 2, len);
+                            var_name_raw[len] = '\0';
+                        } else { /* var name too long, handle error or truncate */ var_name_raw[0] = '\0'; }
+                    } else { /* malformed */ var_name_raw[0] = '\0'; }
+                } else {
+                    // Simple $var or $var[index] - for echo, we care about the base var for type check
+                    char* bracket_ptr = strchr(tokens[i].text + 1, '[');
+                    if (bracket_ptr) {
+                        size_t base_len = bracket_ptr - (tokens[i].text + 1);
+                        if (base_len < MAX_VAR_NAME_LEN) {
+                            strncpy(var_name_raw, tokens[i].text + 1, base_len);
+                            var_name_raw[base_len] = '\0';
+                        } else { var_name_raw[0] = '\0';}
+                    } else {
+                        strncpy(var_name_raw, tokens[i].text + 1, MAX_VAR_NAME_LEN - 1);
+                        var_name_raw[MAX_VAR_NAME_LEN - 1] = '\0';
+                    }
+                }
+
+                if (strlen(var_name_raw) > 0) {
+                    char object_type_var_name[MAX_VAR_NAME_LEN + 30];
+                    snprintf(object_type_var_name, sizeof(object_type_var_name), "%s_BSH_STRUCT_TYPE", var_name_raw);
+                    char* struct_type = get_variable_scoped(object_type_var_name);
+
+                    if (struct_type && strcmp(struct_type, "BSH_OBJECT_ROOT") == 0) {
+                        // It's a BSH object, attempt to stringify it
+                        if (stringify_bsh_object_to_string(var_name_raw, object_stringified_buffer, sizeof(object_stringified_buffer))) {
+                            string_to_print = object_stringified_buffer;
+                            is_bsh_object_to_stringify = true;
+                        } else {
+                            // Stringification failed, print an error marker or the raw variable token
+                            snprintf(expanded_arg_buffer, sizeof(expanded_arg_buffer), "[Error stringifying object: %s]", var_name_raw);
+                            string_to_print = expanded_arg_buffer;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!is_bsh_object_to_stringify) {
+            // Not a BSH object or not a variable, so expand normally
+            if (tokens[i].type == TOKEN_STRING) {
+                char unescaped_val[INPUT_BUFFER_SIZE];
+                unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
+                expand_variables_in_string_advanced(unescaped_val, expanded_arg_buffer, sizeof(expanded_arg_buffer));
+            } else {
+                expand_variables_in_string_advanced(tokens[i].text, expanded_arg_buffer, sizeof(expanded_arg_buffer));
+            }
+            string_to_print = expanded_arg_buffer;
+        }
+
+        printf("%s%s", string_to_print,
+               (i == num_tokens - 1 || (i + 1 < num_tokens && tokens[i + 1].type == TOKEN_COMMENT)) ? "" : " ");
+    }
+    printf("\n");
+}
+
+/////
+///// Scope functions
+/////
+
+// --- Variable & Scope Management ---
+// ... (rest of variable and scope management functions remain the same)
+int enter_scope() {
+    if (scope_stack_top + 1 >= MAX_SCOPE_DEPTH) {
+        fprintf(stderr, "Error: Maximum scope depth exceeded (%d).\n", MAX_SCOPE_DEPTH);
+        return -1; 
+    }
+    scope_stack_top++;
+    scope_stack[scope_stack_top].scope_id = (scope_stack_top == 0 && next_scope_id == 1) ? GLOBAL_SCOPE_ID : next_scope_id++;
+    if (scope_stack_top == 0) scope_stack[scope_stack_top].scope_id = GLOBAL_SCOPE_ID;
+
+    return scope_stack[scope_stack_top].scope_id;
+}
+
+void leave_scope(int scope_id_to_leave) {
+    if (scope_stack_top < 0 ) { 
+        return;
+    }
+    if (scope_stack[scope_stack_top].scope_id != scope_id_to_leave) {
+        if (scope_id_to_leave != GLOBAL_SCOPE_ID || scope_stack[scope_stack_top].scope_id != GLOBAL_SCOPE_ID) {
+             fprintf(stderr, "Error: Scope mismatch on leave_scope. Trying to leave %d, current top is %d.\n",
+                scope_id_to_leave, scope_stack[scope_stack_top].scope_id );
+        }
+        scope_stack_top--;
+        return;
+    }
+    if (scope_id_to_leave != GLOBAL_SCOPE_ID) { 
+        cleanup_variables_for_scope(scope_id_to_leave);
+    }
+    scope_stack_top--;
+}
+
+void cleanup_variables_for_scope(int scope_id) {
+    if (scope_id == GLOBAL_SCOPE_ID) return; 
+
+    Variable *current = variable_list_head;
+    Variable *prev = NULL;
+    while (current != NULL) {
+        if (current->scope_id == scope_id) {
+            Variable *to_delete = current;
+            if (prev == NULL) { 
+                variable_list_head = current->next;
+            } else { 
+                prev->next = current->next;
+            }
+            current = current->next; 
+            if (to_delete->value) free(to_delete->value);
+            free(to_delete);
+        } else {
+            prev = current;
+            current = current->next;
+        }
+    }
+}
+
+void free_all_variables() {
+    Variable *current = variable_list_head;
+    Variable *next_var;
+    while (current != NULL) {
+        next_var = current->next;
+        if (current->value) free(current->value);
+        free(current);
+        current = next_var;
+    }
+    variable_list_head = NULL;
+}
+
+char* get_variable_scoped(const char *name_raw) {
+    char clean_name[MAX_VAR_NAME_LEN];
+    strncpy(clean_name, name_raw, MAX_VAR_NAME_LEN -1); clean_name[MAX_VAR_NAME_LEN-1] = '\0';
+    trim_whitespace(clean_name);
+    if (strlen(clean_name) == 0) return NULL;
+
+    for (int i = scope_stack_top; i >= 0; i--) {
+        int current_search_scope_id = scope_stack[i].scope_id;
+        Variable *current_node = variable_list_head;
+        while (current_node != NULL) {
+            if (current_node->scope_id == current_search_scope_id && strcmp(current_node->name, clean_name) == 0) {
+                return current_node->value; 
+            }
+            current_node = current_node->next;
+        }
+    }
+    return NULL; 
+}
+
+void set_variable_scoped(const char *name_raw, const char *value_to_set, bool is_array_elem) {
+    if (scope_stack_top < 0) {
+        fprintf(stderr, "Critical Error: No active scope to set variable '%s'. Shell not initialized?\n", name_raw);
+        return;
+    }
+    int current_scope_id = scope_stack[scope_stack_top].scope_id;
+
+    char clean_name[MAX_VAR_NAME_LEN];
+    strncpy(clean_name, name_raw, MAX_VAR_NAME_LEN -1); clean_name[MAX_VAR_NAME_LEN-1] = '\0';
+    trim_whitespace(clean_name);
+    if (strlen(clean_name) == 0) { fprintf(stderr, "Error: Cannot set variable with empty name.\n"); return; }
+
+    Variable *current_node = variable_list_head;
+    while (current_node != NULL) {
+        if (current_node->scope_id == current_scope_id && strcmp(current_node->name, clean_name) == 0) {
+            if (current_node->value) free(current_node->value); 
+            current_node->value = strdup(value_to_set);
+            if (!current_node->value) { perror("strdup failed for variable value update"); current_node->value = strdup("");  }
+            current_node->is_array_element = is_array_elem;
+            return;
+        }
+        current_node = current_node->next;
+    }
+
+    Variable *new_var = (Variable*)malloc(sizeof(Variable));
+    if (!new_var) { perror("malloc for new variable failed"); return; }
+    strncpy(new_var->name, clean_name, MAX_VAR_NAME_LEN - 1); new_var->name[MAX_VAR_NAME_LEN - 1] = '\0';
+    new_var->value = strdup(value_to_set);
+    if (!new_var->value) { perror("strdup failed for new variable value"); free(new_var); new_var = NULL;  return; }
+    new_var->is_array_element = is_array_elem;
+    new_var->scope_id = current_scope_id;
+    new_var->next = variable_list_head; 
+    variable_list_head = new_var;
+}
+
+void expand_variables_in_string_advanced(const char *input_str, char *expanded_str, size_t expanded_str_size) {
+    const char *p_in = input_str;
+    char *p_out = expanded_str;
+    size_t remaining_size = expanded_str_size - 1; // For null terminator
+    expanded_str[0] = '\0';
+
+    while (*p_in && remaining_size > 0) {
+        if (*p_in == '$') {
+            p_in++; // Consume '$'
+            
+            char current_mangled_name[MAX_VAR_NAME_LEN * 4] = ""; // Buffer for var_prop1_prop2 etc. (increased size)
+            char segment_buffer[MAX_VAR_NAME_LEN]; // For individual segment (base var or property name)
+            char* pv = segment_buffer;
+            bool first_segment = true;
+
+            do { // Loop for base variable and subsequent dot-separated properties
+                pv = segment_buffer; // Reset for current segment
+                segment_buffer[0] = '\0';
+
+                if (first_segment) { // Parsing the base variable name
+                    if (*p_in == '{') {
+                        p_in++; // Consume '{'
+                        while (*p_in && *p_in != '}' && (pv - segment_buffer < MAX_VAR_NAME_LEN - 1)) {
+                            *pv++ = *p_in++;
+                        }
+                        if (*p_in == '}') p_in++; // Consume '}'
+                    } else {
+                        while (isalnum((unsigned char)*p_in) || *p_in == '_') {
+                            if (pv - segment_buffer < MAX_VAR_NAME_LEN - 1) *pv++ = *p_in++; else break;
+                        }
+                    }
+                    *pv = '\0';
+                    if (strlen(segment_buffer) == 0) { // Invalid: $ or ${}
+                        // Output literal '$' and potentially braces if they were consumed
+                        if (remaining_size > 0) { *p_out++ = '$'; remaining_size--; }
+                        const char* temp_p = p_in -1; // Check what was before current p_in
+                        if (*temp_p == '{' && remaining_size > 0) { *p_out++ = '{'; remaining_size--; }
+                        if (*temp_p == '}' && remaining_size > 0) { *p_out++ = '}'; remaining_size--; }
+                        goto next_char_in_input; // Break from $ processing, continue outer while
+                    }
+                    strncpy(current_mangled_name, segment_buffer, sizeof(current_mangled_name) - 1);
+                    first_segment = false;
+                } else { // Parsing a property name after a dot
+                    if (*p_in == '$') { // Dynamic property: .$dynamicProp
+                        p_in++; // Consume '$' for the dynamic part
+                        char dynamic_prop_source_var_name[MAX_VAR_NAME_LEN];
+                        char* pdv = dynamic_prop_source_var_name;
+                        if (*p_in == '{') {
+                            p_in++;
+                            while (*p_in && *p_in != '}' && (pdv - dynamic_prop_source_var_name < MAX_VAR_NAME_LEN - 1)) {
+                                *pdv++ = *p_in++;
+                            }
+                            if (*p_in == '}') p_in++;
+                        } else {
+                            while (isalnum((unsigned char)*p_in) || *p_in == '_') {
+                                if (pdv - dynamic_prop_source_var_name < MAX_VAR_NAME_LEN - 1) *pdv++ = *p_in++; else break;
+                            }
+                        }
+                        *pdv = '\0';
+                        char* prop_name_from_var = get_variable_scoped(dynamic_prop_source_var_name);
+                        if (prop_name_from_var) {
+                            strncpy(segment_buffer, prop_name_from_var, MAX_VAR_NAME_LEN -1);
+                            segment_buffer[MAX_VAR_NAME_LEN -1] = '\0';
+                        } else {
+                            segment_buffer[0] = '\0'; // Dynamic property name var not found
+                        }
+                    } else { // Literal property name: .prop
+                        while (isalnum((unsigned char)*p_in) || *p_in == '_') { // Property names are like var names
+                            if (pv - segment_buffer < MAX_VAR_NAME_LEN - 1) *pv++ = *p_in++; else break;
+                        }
+                        *pv = '\0';
+                    }
+
+                    if (strlen(segment_buffer) > 0) {
+                        if (strlen(current_mangled_name) + 1 + strlen(segment_buffer) < sizeof(current_mangled_name)) {
+                            strcat(current_mangled_name, "_");
+                            strcat(current_mangled_name, segment_buffer);
+                        } else {
+                            segment_buffer[0] = '\0'; // Prevent overflow, effectively ending chain
+                        }
+                    } else {
+                        // Invalid or empty property segment, chain broken.
+                        // The value of current_mangled_name up to this point will be sought.
+                        break; // Exit dot processing loop
+                    }
+                }
+            } while (*p_in == '.'); // Check for next dot only if a valid segment was parsed
+            // End of loop for base var and subsequent dot-separated properties
+
+            char* value_to_insert = get_variable_scoped(current_mangled_name);
+            if (value_to_insert) {
+                size_t val_len = strlen(value_to_insert);
+                if (val_len <= remaining_size) { // Check if it fits
+                    strcpy(p_out, value_to_insert);
+                    p_out += val_len;
+                    remaining_size -= val_len;
+                } else { // Not enough space
+                    strncpy(p_out, value_to_insert, remaining_size);
+                    p_out += remaining_size;
+                    remaining_size = 0;
+                }
+            }
+            // If value_to_insert is NULL, nothing is inserted for this $... sequence.
+
+        } else if (*p_in == '\\' && *(p_in + 1) == '$') { // Escaped $
+            p_in++; // Skip '\'
+            if (remaining_size > 0) { *p_out++ = *p_in++; remaining_size--; }
+        } else { // Regular character
+            if (remaining_size > 0) { *p_out++ = *p_in++; remaining_size--; }
+        }
+        next_char_in_input:; // Label for goto
+    }
+    *p_out = '\0'; // Null-terminate the expanded string
+}
+
+char* get_array_element_scoped(const char* array_base_name, const char* index_str_raw_param) {
+    char mangled_name[MAX_VAR_NAME_LEN * 2]; 
+    snprintf(mangled_name, sizeof(mangled_name), "%s_ARRAYIDX_%s", array_base_name, index_str_raw_param);
+    return get_variable_scoped(mangled_name);
+}
+
+void set_array_element_scoped(const char* array_base_name, const char* index_str_raw_param, const char* value) {
+    char index_str_raw[INPUT_BUFFER_SIZE];
+    strncpy(index_str_raw, index_str_raw_param, sizeof(index_str_raw) -1);
+    index_str_raw[sizeof(index_str_raw)-1] = '\0';
+
+    char expanded_index_val[INPUT_BUFFER_SIZE];
+    if (index_str_raw[0] == '"' && index_str_raw[strlen(index_str_raw)-1] == '"') {
+        char unescaped_idx[INPUT_BUFFER_SIZE];
+        unescape_string(index_str_raw, unescaped_idx, sizeof(unescaped_idx));
+        expand_variables_in_string_advanced(unescaped_idx, expanded_index_val, sizeof(expanded_index_val));
+    } else if (index_str_raw[0] == '$') {
+        expand_variables_in_string_advanced(index_str_raw, expanded_index_val, sizeof(expanded_index_val));
+    } else { 
+        strncpy(expanded_index_val, index_str_raw, sizeof(expanded_index_val)-1);
+        expanded_index_val[sizeof(expanded_index_val)-1] = '\0';
+    }
+    char mangled_name[MAX_VAR_NAME_LEN * 2];
+    snprintf(mangled_name, sizeof(mangled_name), "%s_ARRAYIDX_%s", array_base_name, expanded_index_val);
+    set_variable_scoped(mangled_name, value, true); 
+}
+
+
+
+// --- Command Execution ---
+// ... (find_command_in_path_dynamic, find_module_in_path, execute_external_command, execute_user_function remain the same)
+bool find_command_in_path_dynamic(const char *command, char *full_path) {
+    if (strchr(command, '/') != NULL) { 
+        if (access(command, X_OK) == 0) {
+            strncpy(full_path, command, MAX_FULL_PATH_LEN -1); full_path[MAX_FULL_PATH_LEN-1] = '\0';
+            return true;
+        }
+        return false;
+    }
+    PathDirNode *current_path_node = path_list_head;
+    while (current_path_node) {
+        snprintf(full_path, MAX_FULL_PATH_LEN, "%s/%s", current_path_node->path, command);
+        if (access(full_path, X_OK) == 0) return true;
+        current_path_node = current_path_node->next;
+    }
+    return false;
+}
+
+bool find_module_in_path(const char* module_spec, char* result_full_path) {
+    char module_path_part[MAX_FULL_PATH_LEN];
+    strncpy(module_path_part, module_spec, sizeof(module_path_part) - 1);
+    module_path_part[sizeof(module_path_part) - 1] = '\0';
+
+    char *dot = strrchr(module_path_part, '.');
+    if (dot && strchr(module_path_part, '/') == NULL) { 
+        *dot = '/'; 
+        strncat(module_path_part, ".bsh", sizeof(module_path_part) - strlen(module_path_part) - 1);
+    } else if (strchr(module_path_part, '/') == NULL && (strstr(module_path_part, ".bsh") == NULL) ) {
+        strncat(module_path_part, ".bsh", sizeof(module_path_part) - strlen(module_path_part) - 1);
+    }
+
+    char temp_path[PATH_MAX];
+    if (realpath(module_path_part, temp_path) && access(temp_path, F_OK) == 0) {
+        strncpy(result_full_path, temp_path, MAX_FULL_PATH_LEN -1);
+        result_full_path[MAX_FULL_PATH_LEN-1] = '\0';
+        return true;
+    }
+    if (access(module_path_part, F_OK) == 0) {
+         strncpy(result_full_path, module_path_part, MAX_FULL_PATH_LEN -1); 
+         result_full_path[MAX_FULL_PATH_LEN-1] = '\0';
+         return true;
+    }
+
+
+    if (strchr(module_spec, '/') != NULL) { 
+        return false;
+    }
+
+    PathDirNode *current_module_dir = module_path_list_head;
+    while (current_module_dir) {
+        snprintf(result_full_path, MAX_FULL_PATH_LEN, "%s/%s", current_module_dir->path, module_path_part);
+        if (realpath(result_full_path, temp_path) && access(temp_path, F_OK) == 0) {
+             strncpy(result_full_path, temp_path, MAX_FULL_PATH_LEN -1);
+             result_full_path[MAX_FULL_PATH_LEN-1] = '\0';
+            return true;
+        } else if (access(result_full_path, F_OK) == 0) { 
+            return true;
+        }
+        current_module_dir = current_module_dir->next;
+    }
+    result_full_path[0] = '\0'; 
+    return false;
+}
+
+///
+///
+///
+
+int execute_external_command(char *command_path, char **args, int arg_count, char *output_buffer, size_t output_buffer_size) {
+    pid_t pid; int status; int pipefd[2] = {-1, -1};
+    if (output_buffer) { if (pipe(pipefd) == -1) { perror("pipe failed for cmd output"); return -1; } }
+    pid = fork();
+    if (pid == 0) { 
+        if (output_buffer) { close(pipefd[0]); dup2(pipefd[1], STDOUT_FILENO); dup2(pipefd[1], STDERR_FILENO); close(pipefd[1]); }
+        execv(command_path, args);
+        perror("execv failed"); exit(EXIT_FAILURE);
+    } else if (pid < 0) { 
+        perror("fork failed"); if (output_buffer) { close(pipefd[0]); close(pipefd[1]); } return -1;
+    } else { 
+        if (output_buffer) {
+            close(pipefd[1]); ssize_t bytes_read; size_t total_bytes_read = 0;
+            char read_buf[INPUT_BUFFER_SIZE]; output_buffer[0] = '\0';
+            while((bytes_read = read(pipefd[0], read_buf, sizeof(read_buf)-1)) > 0) {
+                if (total_bytes_read + bytes_read < output_buffer_size) {
+                    read_buf[bytes_read] = '\0'; strcat(output_buffer, read_buf); total_bytes_read += bytes_read;
+                } else { strncat(output_buffer, read_buf, output_buffer_size - total_bytes_read -1); break; }
+            } close(pipefd[0]);
+            char* nl = strrchr(output_buffer, '\n');
+            while(nl && (nl == output_buffer + strlen(output_buffer) -1)) { *nl = '\0'; nl = strrchr(output_buffer, '\n');}
+        }
+        do { waitpid(pid, &status, WUNTRACED); } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        char status_str[12]; snprintf(status_str, sizeof(status_str), "%d", WEXITSTATUS(status));
+        set_variable_scoped("LAST_COMMAND_STATUS", status_str, false);
+        return WEXITSTATUS(status);
+    }
+    return -1; 
+}
+
+void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context) {
+    if (!func) return;
+    int function_scope_id = enter_scope();
+    if (function_scope_id == -1) { return; }
+
+    for (int i = 0; i < func->param_count; ++i) {
+        if (i < call_arg_token_count) {
+            char expanded_arg_val[INPUT_BUFFER_SIZE]; 
+            if (call_arg_tokens[i].type == TOKEN_STRING) {
+                 char unescaped_temp[INPUT_BUFFER_SIZE];
+                 unescape_string(call_arg_tokens[i].text, unescaped_temp, sizeof(unescaped_temp));
+                 expand_variables_in_string_advanced(unescaped_temp, expanded_arg_val, sizeof(expanded_arg_val));
+            } else {
+                 expand_variables_in_string_advanced(call_arg_tokens[i].text, expanded_arg_val, sizeof(expanded_arg_val));
+            }
+            set_variable_scoped(func->params[i], expanded_arg_val, false);
+        } else {
+            set_variable_scoped(func->params[i], "", false); 
+        }
+    }
+
+    int func_outer_block_stack_top_bf = block_stack_top_bf;
+    ExecutionState func_outer_exec_state = current_exec_state;
+    current_exec_state = STATE_NORMAL; 
+
+    for (int i = 0; i < func->line_count; ++i) {
+        char line_copy[MAX_LINE_LENGTH]; 
+        strncpy(line_copy, func->body[i], MAX_LINE_LENGTH-1); line_copy[MAX_LINE_LENGTH-1] = '\0';
+        process_line(line_copy, NULL, i + 1, STATE_NORMAL); 
+    }
+
+    while(block_stack_top_bf > func_outer_block_stack_top_bf) {
+        pop_block_bf();
+    }
+    current_exec_state = func_outer_exec_state;
+
+    leave_scope(function_scope_id); 
 }
