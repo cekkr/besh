@@ -1158,7 +1158,7 @@ bool parse_expression_recursive(ExprParseContext* ctx, int min_precedence) {
 
         } else if (op_def->op_type_prop == OP_TYPE_UNARY_POSTFIX) {
             // This block handles unary postfix operators.
-            
+
             // Check if the operator string is "++" or "--".
             if (strcmp(op_def->op_str, "++") == 0 || strcmp(op_def->op_str, "--") == 0) {
                 // For postfix operators, the "operand" is what was just parsed into lhs_value.
@@ -1885,7 +1885,34 @@ void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_sou
     // ... rest of brace checking ...
 }
 
-// Similar changes for handle_while_statement_advanced and handle_else_statement_advanced (for 'else if' conditions).
+// --- Path Management Implementations ---
+void add_path_to_list(PathDirNode **list_head, const char* dir_path) {
+    PathDirNode *new_node = (PathDirNode*)malloc(sizeof(PathDirNode));
+    if (!new_node) {
+        perror("bsh: malloc for path node failed");
+        return;
+    }
+    new_node->path = strdup(dir_path);
+    if (!new_node->path) {
+        perror("bsh: strdup for path string failed");
+        free(new_node);
+        return;
+    }
+    new_node->next = *list_head;
+    *list_head = new_node;
+}
+
+void free_path_dir_list(PathDirNode **list_head) {
+    PathDirNode *current = *list_head;
+    PathDirNode *next_node;
+    while (current) {
+        next_node = current->next;
+        if(current->path) free(current->path);
+        free(current);
+        current = next_node;
+    }
+    *list_head = NULL;
+}
 
 void initialize_shell() {
     scope_stack_top = -1; 
@@ -1893,8 +1920,8 @@ void initialize_shell() {
 
     // Initialize core structural operators if they are not dynamically defined
     initialize_operators_core_structural(); // Call the new initializer
-
-    // ... rest of initialize_shell (PATH, BSH_MODULE_PATH, default vars) ...
+    
+    // Populate PATH list from environment variable
     char *path_env = getenv("PATH"); //
     if (path_env) { //
         char *path_copy = strdup(path_env); //
@@ -1905,7 +1932,9 @@ void initialize_shell() {
                 token_path = strtok(NULL, ":"); //
             }
             free(path_copy); //
-        } else { perror("strdup for PATH failed in initialize_shell"); } //
+        } else {
+            perror("bsh: strdup for PATH failed in initialize_shell"); //
+        }
     }
 
     initialize_module_path();  //
