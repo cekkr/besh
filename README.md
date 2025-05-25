@@ -1,5 +1,7 @@
 # Basic [extensible] Shell (B[e]SH)
 
+![BeSH guy](https://github.com/cekkr/besh/blob/main/assets/eGuy.png?raw=true)
+
 # Research Exploration
 
 ## Overview
