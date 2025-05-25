@@ -528,7 +528,6 @@ void free_operator_list() {
     operator_list_head = NULL;
 }
 
-
 // Updated tokenizer to be simpler and use new types/operator matching
 int advanced_tokenize_line(const char *line_text, int line_num, Token *tokens, int max_tokens, char *token_storage, size_t storage_size) {
     int token_count = 0;
@@ -657,7 +656,7 @@ int advanced_tokenize_line(const char *line_text, int line_num, Token *tokens, i
 
 
         // 7. Words (keywords, command names, identifiers)
-        if (isalnum((unsigned char)*p) || *p == '_') { // Start of a word
+        if (isalnum((unsigned char)*p) || *p == '_' || *p == '-') { // Start of a word
             while (isalnum((unsigned char)*p) || *p == '_') {
                 p++; current_col++;
             }
@@ -901,6 +900,45 @@ bool invoke_bsh_operator_handler(const char* bsh_handler_name_param,
 
 // --- Expression Evaluation (New/Rewritten using Precedence Climbing) ---
 
+// Helper function for parse_operand
+static bool extract_clean_variable_name_for_expr(const char* token_text, char* out_name, size_t out_name_size) {
+    if (token_text == NULL || out_name == NULL || out_name_size == 0) return false;
+
+    const char* p = token_text;
+    if (*p != '$') return false; // Deve iniziare con $
+    p++;
+
+    char temp_name[MAX_VAR_NAME_LEN];
+    char* t = temp_name;
+
+    if (*p == '{') {
+        p++;
+        while (*p && *p != '}' && (size_t)(t - temp_name) < MAX_VAR_NAME_LEN - 1) {
+            *t++ = *p++;
+        }
+        if (*p != '}') return false; // Parentesi graffa non chiusa
+        // p++; // Non serve consumare '}' qui, solo per estrazione nome
+    } else {
+        while (*p && (isalnum((unsigned char)*p) || *p == '_') && (size_t)(t - temp_name) < MAX_VAR_NAME_LEN - 1) {
+            *t++ = *p++;
+        }
+    }
+    *t = '\0';
+
+    if (strlen(temp_name) == 0) return false; // Nome vuoto
+
+    // Verifica se c'è un accesso array, che non supportiamo per la modifica diretta con ++/-- qui
+    // (gli handler BSH dovrebbero gestire $arr[$idx] se necessario tramite altre forme)
+    if (strchr(temp_name, '[') || strchr(temp_name, '.')) { // Non supporta $arr[idx]++ o $obj.prop++ direttamente qui
+        // fprintf(stderr, "Expression parser: '++/--' on array elements or properties not directly supported in this C-parser stage.\n");
+        return false; // Indica che non è un nome di variabile semplice "pulibile" per ++/--
+    }
+
+    strncpy(out_name, temp_name, out_name_size -1);
+    out_name[out_name_size-1] = '\0';
+    return true;
+}
+
 // Parses a primary: number, variable, string, or parenthesized expression
 // Also handles UNARY_PREFIX operators here as they have high precedence.
 bool parse_operand(ExprParseContext* ctx, char* operand_result_buffer, size_t operand_buffer_size) {
@@ -946,26 +984,89 @@ bool parse_operand(ExprParseContext* ctx, char* operand_result_buffer, size_t op
     } else if (current_token.type == TOKEN_OPERATOR) {
         OperatorDefinition* op_def = get_operator_definition(current_token.text);
         if (op_def && op_def->op_type_prop == OP_TYPE_UNARY_PREFIX) {
-            ctx->current_token_idx++; // Consume prefix operator
-            char rhs_operand_value[INPUT_BUFFER_SIZE];
-            // The operand of a prefix operator is parsed with a precedence higher than the prefix operator itself,
-            // or as a primary. Let's use op_def->precedence to be general.
-            if (!parse_expression_recursive(ctx, op_def->precedence)) { // Parse operand for prefix op
-                strncpy(operand_result_buffer, "EXPR_PARSE_ERROR_PREFIX_OPERAND", operand_buffer_size-1);
-                ctx->recursion_depth--; return false;
-            }
-            // Result of RHS is in ctx->result_buffer
-            strncpy(rhs_operand_value, ctx->result_buffer, sizeof(rhs_operand_value)-1);
+            // Check if the operator string in op_def is "++" or "--".
+            if (strcmp(op_def->op_str, "++") == 0 || strcmp(op_def->op_str, "--") == 0) {
+                // If it is "++" or "--":
 
-            const char* bsh_args[] = {rhs_operand_value}; // Argument for unary prefix is the operand's value
-            char temp_bsh_result_var[MAX_VAR_NAME_LEN]; // Temporary BSH var for the handler
-            snprintf(temp_bsh_result_var, sizeof(temp_bsh_result_var), "__bsh_expr_temp_%d", rand());
+                ctx->current_token_idx++; // Increment the current token index. Comment: "Consume the ++ or -- operator"
+                Token operand_var_token = ctx->tokens[ctx->current_token_idx]; // Get the token that should be the operand.
 
-            if (!invoke_bsh_operator_handler(op_def->bsh_handler_name, op_def->op_str, 1, bsh_args,
-                                             temp_bsh_result_var, operand_result_buffer, operand_buffer_size)) {
-                // Error already printed by invoke_bsh_operator_handler or result indicates error
-                // operand_result_buffer might contain "BSH_HANDLER_NOT_FOUND", etc.
-            }
+                // Check if the operand token is of type TOKEN_VARIABLE.
+                if (operand_var_token.type == TOKEN_VARIABLE) {
+                    char var_name_clean[MAX_VAR_NAME_LEN]; // Declare a character array to store the cleaned variable name.
+
+                    // Try to extract a clean variable name from the token's text.
+                    if(extract_clean_variable_name_for_expr(operand_var_token.text, var_name_clean, sizeof(var_name_clean))) {
+                        // If extraction is successful:
+
+                        ctx->current_token_idx++; // Increment the current token index. Comment: "Consume the variable token"
+                        const char* bsh_args[] = {var_name_clean}; // Create an array of C strings for arguments to a shell handler, containing the cleaned variable name. Comment: "Pass the NAME of the variable"
+                        char temp_bsh_result_var[MAX_VAR_NAME_LEN]; // Declare a character array for a temporary shell result variable name.
+
+                        // Create a temporary variable name string (e.g., "__bsh_expr_temp_<random_number>_pf").
+                        snprintf(temp_bsh_result_var, sizeof(temp_bsh_result_var), "__bsh_expr_temp_%d_pf", rand());
+
+                        // Invoke a shell operator handler.
+                        if (!invoke_bsh_operator_handler(op_def->bsh_handler_name, op_def->op_str, 1, bsh_args, temp_bsh_result_var, operand_result_buffer, operand_buffer_size)) {
+                            // If the handler returns an error (false). Comment: "Error handled by invoke_bsh_operator_handler or the result buffer contains the error"
+                            // The BSH handler (e.g., bsh_op_prefix_increment) has modified var_name_clean
+                            // and has put the value of the expression (e.g., incremented value) in temp_bsh_result_var,
+                            // which invoke_bsh_operator_handler has copied into operand_result_buffer.
+                        }
+                        // The BSH (Bourne Shell, likely) handler (e.g., bsh_op_prefix_increment) has modified var_name_clean
+                        // and has put the value of the expression (e.g., the incremented value) into temp_bsh_result_var,
+                        // which invoke_bsh_operator_handler has then copied into operand_result_buffer.
+                    } else {
+                        // If extracting the clean variable name fails:
+
+                        // Print an error message to standard error.
+                        fprintf(stderr, "Expression parser: Prefix '++' or '--' requires a simple variable operand (e.g., $var), got '%s'.\n", operand_var_token.text);
+                        // Copy an error string to the operand result buffer.
+                        strncpy(operand_result_buffer, "EXPR_PARSE_ERROR_PREFIX_NON_VAR", operand_buffer_size-1);
+                        ctx->recursion_depth--; // Decrement the recursion depth.
+                        return false; // Return false, indicating an error.
+                    }
+                } else {
+                    // If the operand token is not of type TOKEN_VARIABLE:
+
+                    // Print an error message to standard error.
+                    fprintf(stderr, "Expression parser: Prefix '++' or '--' requires a variable operand, got token type %d.\n", operand_var_token.type);
+                    // Copy an error string to the operand result buffer.
+                    strncpy(operand_result_buffer, "EXPR_PARSE_ERROR_PREFIX_OPERAND_TYPE", operand_buffer_size-1);
+                    ctx->recursion_depth--; // Decrement the recursion depth.
+                    return false; // Return false, indicating an error.
+                }
+            } else {
+                // If the operator is not "++" or "--" (handles other unary prefix operators):
+                // Comment: "Other unary prefix operators (e.g., negation '-')"
+                // Comment: "--- END OF MODIFICATION for prefix ++/-- ---"
+
+                ctx->current_token_idx++; // Increment the current token index. Comment: "Consume prefix operator (original)"
+                char rhs_operand_value[INPUT_BUFFER_SIZE]; // Declare a character array to store the right-hand side operand's value.
+
+                // Recursively parse the expression for the operand of this prefix operator.
+                if(!parse_expression_recursive(ctx, op_def->precedence)) { // Comment: "Parse operand for prefix op"
+                    // If parsing the operand fails:
+
+                    // Copy an error string to the operand result buffer.
+                    strncpy(operand_result_buffer, "EXPR_PARSE_ERROR_PREFIX_OPERAND", operand_buffer_size-1);
+                    ctx->recursion_depth--; // Decrement the recursion depth.
+                    return false; // Return false, indicating an error.
+                }
+                // Copy the result from the recursive parse (presumably in ctx->result_buffer) to rhs_operand_value.
+                strncpy(rhs_operand_value, ctx->result_buffer, sizeof(rhs_operand_value)-1);
+                const char* bsh_args[] = {rhs_operand_value}; // Create an array of C strings for arguments to a shell handler, containing the operand's value.
+                char temp_bsh_result_var[MAX_VAR_NAME_LEN]; // Declare a character array for a temporary shell result variable name.
+
+                // Create a temporary variable name string (e.g., "__bsh_expr_temp_<random_number>").
+                snprintf(temp_bsh_result_var, sizeof(temp_bsh_result_var), "__bsh_expr_temp_%d", rand());
+
+                // Invoke a shell operator handler.
+                if (!invoke_bsh_operator_handler(op_def->bsh_handler_name, op_def->op_str, 1, bsh_args, temp_bsh_result_var, operand_result_buffer, operand_buffer_size)) {
+                    // If the handler returns an error (false). Comment: "Error handling (original)"
+                }
+                // Comment: "--- START OF RE-ENTRY for other unary prefixes ---"
+            } // End of the if statement for "++"/"--" vs other unary prefix operators.
         } else {
             fprintf(stderr, "Expression parser: Unexpected token '%s' (type %d) when expecting operand or prefix op at line %d col %d.\n",
                     current_token.text, current_token.type, current_token.line, current_token.col);
@@ -1056,20 +1157,137 @@ bool parse_expression_recursive(ExprParseContext* ctx, int min_precedence) {
             strncpy(ctx->result_buffer, lhs_value, ctx->result_buffer_size-1); // Update main result with new LHS
 
         } else if (op_def->op_type_prop == OP_TYPE_UNARY_POSTFIX) {
-            // Postfix operators usually have high precedence and are applied immediately
-            // The check "op_def->precedence < min_precedence" should correctly handle when to stop.
-            ctx->current_token_idx++; // Consume postfix operator
+            // This block handles unary postfix operators.
+            
+            // Check if the operator string is "++" or "--".
+            if (strcmp(op_def->op_str, "++") == 0 || strcmp(op_def->op_str, "--") == 0) {
+                // For postfix operators, the "operand" is what was just parsed into lhs_value.
+                // However, if lhs_value is the RESULT of an expression (e.g., (a+b)++), it's not a modifiable variable.
+                // We need to know if the *original* token that produced lhs_value was a variable.
+                // This is difficult to track here without more extensive refactoring.
+                // The simplest approach is for $var++ to be handled like this:
+                // 1. $var is parsed by parse_operand() and its value ends up in lhs_value.
+                // 2. The parser sees '++' (postfix).
+                // To modify the original variable, we would need its NAME.
+                // The semantics of (expr)++ are usually an error or undefined. Only var++.
+                // This is a limitation of a simple parser.
+                // For $var++, we could try to see if `lhs_value` is *identical* to the text of a previous variable token.
+                // But that's fragile. A more robust approach:
+                // The postfix operator in C (as in many compiled languages)
+                // requires the LHS (Left Hand Side) to be an l-value (a modifiable memory location). Our current parser doesn't track "l-valueness".
+                // PRAGMATIC (but limited) SOLUTION:
+                // If `lhs_value` was produced by a single `TOKEN_VARIABLE`
+                // (i.e., it's not the result of a complex expression),
+                // then we could attempt to extract the name.
+                // But `lhs_value` is already the *expanded value*.
+                // For now, let's make an assumption: if the BSH (Bourne Shell) handler for 'var++' (e.g., bsh_op_postfix_increment)
+                // receives the NAME of 'var' as its first argument, and the C parser can provide it.
+                // If `lhs_value` (the value) is passed, the BSH handler cannot modify the original variable.
+                // Compromise: postfix ++/-- operators in this parser might only work
+                // if the BSH handler is VERY intelligent and perhaps uses a special convention.
+                // OR, we need to redesign how `lhs_value` is obtained if the next operator is `++`/`--`.
 
-            // LHS is in lhs_value. Apply postfix op to it.
-            const char* bsh_args[] = {lhs_value}; // For postfix, operand is the LHS.
-            char temp_bsh_result_var[MAX_VAR_NAME_LEN];
-            snprintf(temp_bsh_result_var, sizeof(temp_bsh_result_var), "__bsh_expr_temp_%d", rand());
+                // ATTEMPT AT A FIX (requires that the LHS of the postfix operator is a simple variable):
+                // We need to go back to the token that produced `lhs_value`.
+                // The current index `ctx->current_token_idx` points to the postfix operator.
+                // The token *before* the postfix operator was the operand.
+                if (ctx->current_token_idx > 0) { // Check if there's a token before the current one.
+                    // Get the token immediately preceding the postfix operator.
+                    Token potential_var_token = ctx->tokens[ctx->current_token_idx - 1]; // Comment: "The token before the postfix op"
 
-            if (!invoke_bsh_operator_handler(op_def->bsh_handler_name, op_def->op_str, 1, bsh_args,
-                                             temp_bsh_result_var, lhs_value, sizeof(lhs_value))) { // Result stored back
-                // Error from BSH handler
+                    // Check if this preceding token was a variable.
+                    if (potential_var_token.type == TOKEN_VARIABLE) {
+                        char var_name_clean[MAX_VAR_NAME_LEN]; // Buffer for the cleaned variable name.
+
+                        // Try to extract a clean variable name from the text of the potential variable token.
+                        if(extract_clean_variable_name_for_expr(potential_var_token.text, var_name_clean, sizeof(var_name_clean))) {
+                            // If extraction is successful:
+                            // Now we have the variable name: var_name_clean
+                            // The current value of the variable (before the postfix operation) is in lhs_value.
+
+                            ctx->current_token_idx++; // Consume the postfix ++ or -- operator.
+
+                            // Prepare arguments for the BSH handler, passing the NAME of the variable.
+                            const char* bsh_args[] = {var_name_clean}; // Comment: "Pass the NAME"
+                            char temp_bsh_result_var[MAX_VAR_NAME_LEN]; // Temporary variable name for BSH result.
+
+                            // Create a unique temporary variable name for the BSH script (e.g., __bsh_expr_temp_12345_pof).
+                            snprintf(temp_bsh_result_var, sizeof(temp_bsh_result_var), "__bsh_expr_temp_%d_pof", rand());
+
+                            // The BSH handler for postfix (e.g., bsh_op_postfix_increment)
+                            // should:
+                            // 1. Modify the variable 'var_name_clean'.
+                            // 2. Set 'temp_bsh_result_var' to the *original* value of 'var_name_clean' (which is currently in lhs_value).
+                            // To do this, invoke_bsh_operator_handler might need an extra argument for the original value,
+                            // or the BSH handler would need to fetch the original value before modifying it.
+                            // The current `bsh_op_postfix_increment` in `core_operators.bsh` does this:
+                            // original_value = $($target_var_name_str)  // Get original value
+                            // ... modify $($target_var_name_str) ...     // Modify the variable
+                            // $($result_holder_var_name) = "$original_value" // Set result to original value
+
+                            // Here we pass the variable name. The value in `lhs_value` will be used as
+                            // the value of the expression (the value before the increment/decrement).
+                            char result_of_op_application[INPUT_BUFFER_SIZE]; // Buffer for the result from the BSH handler
+                                                                            // (which will actually be the original value for postfix).
+
+                            // Invoke the BSH operator handler.
+                            if (!invoke_bsh_operator_handler(op_def->bsh_handler_name, op_def->op_str, 1, bsh_args, temp_bsh_result_var, result_of_op_application, sizeof(result_of_op_application))) {
+                                // If there was an error:
+                                // Copy the error message (which should be in result_of_op_application) to the main result buffer.
+                                strncpy(ctx->result_buffer, result_of_op_application, ctx->result_buffer_size-1); // Propagate error
+                            } else {
+                                // If successful:
+                                // The result of the expression var++ is the value *before* the increment.
+                                // The BSH handler `bsh_op_postfix_increment` is already set up to put this into `result_holder_var_name`.
+                                // So `result_of_op_application` contains the original value.
+
+                                // Copy the original value (result of the postfix expression) to the main context result buffer.
+                                strncpy(ctx->result_buffer, result_of_op_application, ctx->result_buffer_size-1);
+
+                                // `lhs_value` is overwritten for the next iteration of the parsing loop, if there is one.
+                                // For postfix, the value of the entire sub-expression (var++) is the original value.
+                                // So, update lhs_value to reflect the result of this postfix operation.
+                                strncpy(lhs_value, result_of_op_application, sizeof(lhs_value)-1);
+                            }
+                        } else {
+                            // If the token before '++' or '--' was a variable, but not a simple one (e.g., $var):
+                            fprintf(stderr, "Expression parser: Postfix '++' or '--' requires a simple variable operand.\n");
+                            strncpy(ctx->result_buffer, "EXPR_PARSE_ERROR_POSTFIX_LHS", ctx->result_buffer_size-1);
+                            ctx->recursion_depth--; // Decrement recursion depth as we are exiting this parsing path.
+                            return false; // Indicate failure.
+                        }
+                    } else {
+                        // If the token before '++' or '--' was not a variable token:
+                        fprintf(stderr, "Expression parser: Postfix '++' or '--' must follow a variable.\n");
+                        strncpy(ctx->result_buffer, "EXPR_PARSE_ERROR_POSTFIX_OPERAND", ctx->result_buffer_size-1);
+                        ctx->recursion_depth--;
+                        return false;
+                    }
+                } else {
+                    // If '++' or '--' is at the beginning of the expression, so there's no preceding token to be its operand:
+                    fprintf(stderr, "Expression parser: Invalid use of postfix '++' or '--'.\n");
+                    strncpy(ctx->result_buffer, "EXPR_PARSE_ERROR_POSTFIX_START", ctx->result_buffer_size-1);
+                    ctx->recursion_depth--;
+                    return false;
+                }
+            } else {
+                // If it's a unary postfix operator but NOT "++" or "--" (if any such operators exist):
+                ctx->current_token_idx++; // Consume the postfix operator.
+
+                // Prepare arguments for BSH handler, passing the current VALUE of the left-hand side.
+                const char* bsh_args[] = {lhs_value}; // Comment: "Pass the VALUE of LHS"
+                char temp_bsh_result_var[MAX_VAR_NAME_LEN]; // Temporary variable name for BSH result.
+
+                // Create a unique temporary variable name for the BSH script.
+                snprintf(temp_bsh_result_var, sizeof(temp_bsh_result_var), "__bsh_expr_temp_%d_otherpof", rand());
+
+                // Invoke the BSH operator handler. The result of the operation will be placed back into lhs_value.
+                if(!invoke_bsh_operator_handler(op_def->bsh_handler_name, op_def->op_str, 1, bsh_args, temp_bsh_result_var, lhs_value, sizeof(lhs_value))) {
+                    // If there was an error (the error message would likely be in lhs_value or handled by the function).
+                }
+                // Copy the result (which is in lhs_value) to the main context result buffer.
+                strncpy(ctx->result_buffer, lhs_value, ctx->result_buffer_size-1);
             }
-            strncpy(ctx->result_buffer, lhs_value, ctx->result_buffer_size-1); // Update main result
 
         } else if (op_def->op_type_prop == OP_TYPE_TERNARY_PRIMARY && strcmp(op_def->op_str, "?") == 0) {
             // Special handling for ternary "A ? B : C"
@@ -1291,32 +1509,249 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
         else if (strcmp(command_name, "exit") == 0) { handle_exit_statement(tokens, num_tokens); }
         // Add other built-ins here
         else {
-            // Not a built-in keyword. Could be user function or external command OR standalone expression.
-            UserFunction* func_to_run = function_list; /* ... find func ... */
+            UserFunction* func_to_run = function_list; /* ... find func ... */ // Search for the user function (existing code)
+            // while(func_to_run) {
+            // if (strcmp(func_to_run->name, command_name) == 0) break;
+            // func_to_run = func_to_run->next;
+            // }
+
             if (func_to_run) {
-                execute_user_function(func_to_run, &tokens[1], num_tokens - 1, input_source);
+                // If it's a user function           
+                Token* call_arg_tokens = (num_tokens > 1) ? &tokens[1] : NULL;
+                int call_arg_token_count = (num_tokens > 1) ? num_tokens - 1 : 0;
+                execute_user_function(func_to_run, call_arg_tokens, call_arg_token_count, input_source);
             } else {
-                // Try as external command OR evaluate the whole line as an expression
+                // It's not a user function, try as an external command or expression
                 char command_path_ext[MAX_FULL_PATH_LEN];
                 if (find_command_in_path_dynamic(tokens[0].text, command_path_ext)) {
-                    // ... (original external command execution logic) ...
-                     char *args[MAX_ARGS + 1]; /* ... populate args ... */
-                     execute_external_command(command_path_ext, args, num_tokens /*adjust*/, NULL, 0);
-                } else {
-                    // Not a known command, try to evaluate the whole line as an expression
-                    char expression_result_buffer[INPUT_BUFFER_SIZE];
-                    if (evaluate_expression_from_tokens(tokens, num_tokens, expression_result_buffer, sizeof(expression_result_buffer))) {
-                        if (strlen(expression_result_buffer) > 0 &&
-                            strncmp(expression_result_buffer, "EXPR_PARSE_ERROR", strlen("EXPR_PARSE_ERROR")) != 0 &&
-                            strncmp(expression_result_buffer, "BSH_HANDLER_NOT_FOUND", strlen("BSH_HANDLER_NOT_FOUND")) !=0 &&
-                            strncmp(expression_result_buffer, "BSH_HANDLER_NO_RESULT", strlen("BSH_HANDLER_NO_RESULT")) !=0 ) {
-                            printf("%s\n", expression_result_buffer); // Print result of standalone expression
+                    // Prepare arguments for external command ---
+                    char* args[MAX_ARGS + 1];
+                    char arg_buffer[MAX_ARGS][MAX_LINE_LENGTH]; // Buffer to store combined or copied arguments
+                    int arg_current = 0;
+                    args[arg_current++] = command_path_ext; // The command itself
+
+                    int i = 1; // Index to iterate through argument tokens
+                    while (i < num_tokens && arg_current < MAX_ARGS) {
+                        if (tokens[i].type == TOKEN_COMMENT) break; // Ignore comments
+
+                        if (tokens[i].type == TOKEN_OPERATOR && strcmp(tokens[i].text, "-") == 0 &&
+                            (i + 1 < num_tokens && tokens[i + 1].type == TOKEN_WORD && tokens[i+1].text[0] != '\0' && // Ensures WORD is not empty
+                            !isdigit(tokens[i+1].text[0])) // Ensures it's not like "- 5" but "-option"
+                        ) {
+                            // Combine "-" and the next word (e.g., "-option")
+                            snprintf(arg_buffer[arg_current -1], MAX_LINE_LENGTH, "-%s", tokens[i + 1].text);
+                            args[arg_current++] = arg_buffer[arg_current-1];
+                            i += 2; // Skip the "-" operator and the combined word
+                        } else {
+                            // Normal argument, expand variables and unescape strings
+                            char expanded_arg_temp[INPUT_BUFFER_SIZE];
+                            if(tokens[i].type == TOKEN_STRING) {
+                                char unescaped_val[INPUT_BUFFER_SIZE];
+                                unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
+                                expand_variables_in_string_advanced(unescaped_val, expanded_arg_temp, sizeof(expanded_arg_temp));
+                            } else {
+                                expand_variables_in_string_advanced(tokens[i].text, expanded_arg_temp, sizeof(expanded_arg_temp));
+                            }
+                            // Copy the expanded argument into the dedicated buffer
+                            strncpy(arg_buffer[arg_current-1], expanded_arg_temp, MAX_LINE_LENGTH -1);
+                            arg_buffer[arg_current-1][MAX_LINE_LENGTH-1] = '\0';
+                            args[arg_current++] = arg_buffer[arg_current-1];
+                            i++;
                         }
-                        set_variable_scoped("LAST_OP_RESULT", expression_result_buffer, false);
+                    }
+                    args[arg_current] = NULL; // Terminator for arguments array
+
+                    // Note: output_buffer and output_buffer_size are NULL and 0 if not capturing output for bsh
+                    execute_external_command(command_path_ext, args, arg_current, NULL, 0);
+                } else {
+                    // Normal expression evaluation
+                    // Check for standalone unary prefix operations: e.g., ++$var or --$var
+                    if (num_tokens == 2 &&
+                        tokens[0].type == TOKEN_OPERATOR &&
+                        (strcmp(tokens[0].text, "++") == 0 || strcmp(tokens[0].text, "--") == 0) &&
+                        tokens[1].type == TOKEN_VARIABLE) {
+                        
+                        char var_name_clean[MAX_VAR_NAME_LEN];
+                        // Extract clean variable name from tokens[1].text (e.g., "$myvar" -> "myvar")
+                        // This logic needs to be robust for $var, ${var}
+                        if (tokens[1].text[0] == '$') {
+                            if (tokens[1].text[1] == '{') {
+                                const char* end_brace = strchr(tokens[1].text + 2, '}');
+                                if (end_brace && (end_brace - (tokens[1].text + 2) < MAX_VAR_NAME_LEN)) {
+                                    strncpy(var_name_clean, tokens[1].text + 2, end_brace - (tokens[1].text + 2));
+                                    var_name_clean[end_brace - (tokens[1].text + 2)] = '\0';
+                                } else { /* error or malformed */ strcpy(var_name_clean, ""); }
+                            } else {
+                                strncpy(var_name_clean, tokens[1].text + 1, MAX_VAR_NAME_LEN - 1);
+                                var_name_clean[MAX_VAR_NAME_LEN - 1] = '\0';
+                            }
+                            // Note: Array element unary ops like ++$arr[idx] are complex to parse here simply.
+                            // The BSH __dynamic_op_handler would need to handle var_name_clean if it's "arr[idx]".
+                        } else { strcpy(var_name_clean, ""); /* Should not happen if TOKEN_VARIABLE */ }
+
+
+                        if (strlen(var_name_clean) > 0) {
+                            char result_c_buffer[INPUT_BUFFER_SIZE];
+                            const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES";
+                            
+                            // Call BSH __dynamic_op_handler: (var_name, op_str, "prefix", result_holder)
+                            if (invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                                        var_name_clean,         // Variable Name
+                                                        tokens[0].text,         // Operator "++" or "--"
+                                                        "prefix",               // Context
+                                                        temp_bsh_result_var,
+                                                        result_c_buffer, sizeof(result_c_buffer))) {
+                                if (strlen(result_c_buffer) > 0 && strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0) {
+                                    printf("%s\n", result_c_buffer); // Print result of standalone prefix op
+                                }
+                                set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
+                            } else {
+                                fprintf(stderr, "Error executing standalone prefix operation for: %s %s\n", tokens[0].text, var_name_clean);
+                                set_variable_scoped("LAST_OP_RESULT", "STANDALONE_OP_ERROR", false);
+                            }
+                        } else {
+                            fprintf(stderr, "Error: Malformed variable for prefix operation: %s\n", tokens[1].text);
+                        }
+
+                    } // Check for standalone unary postfix operations: e.g., $var++ or $var--
+                    else if (num_tokens == 2 &&
+                            tokens[0].type == TOKEN_VARIABLE &&
+                            tokens[1].type == TOKEN_OPERATOR &&
+                            (strcmp(tokens[1].text, "++") == 0 || strcmp(tokens[1].text, "--") == 0)) {
+
+                        char var_name_clean[MAX_VAR_NAME_LEN];
+                        // Extract clean variable name from tokens[0].text
+                        if (tokens[0].text[0] == '$') {
+                            if (tokens[0].text[1] == '{') {
+                                // Similar to prefix block
+                                const char* end_brace = strchr(tokens[0].text + 2, '}');
+                                if (end_brace && (end_brace - (tokens[0].text + 2) < MAX_VAR_NAME_LEN)) {
+                                    strncpy(var_name_clean, tokens[0].text + 2, end_brace - (tokens[0].text + 2));
+                                    var_name_clean[end_brace - (tokens[0].text + 2)] = '\0';
+                                } else { strcpy(var_name_clean, ""); }
+                            } else {
+                                strncpy(var_name_clean, tokens[0].text + 1, MAX_VAR_NAME_LEN - 1);
+                                var_name_clean[MAX_VAR_NAME_LEN - 1] = '\0';
+                            }
+                        } else { strcpy(var_name_clean, "");}
+
+                        if (strlen(var_name_clean) > 0) {
+                            char result_c_buffer[INPUT_BUFFER_SIZE];
+                            const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES";
+
+                            // Call BSH __dynamic_op_handler: (var_name, op_str, "postfix", result_holder)
+                            if (invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                                        var_name_clean,         // Variable Name
+                                                        tokens[1].text,         // Operator "++" or "--"
+                                                        "postfix",              // Context
+                                                        temp_bsh_result_var,
+                                                        result_c_buffer, sizeof(result_c_buffer))) {
+                                if (strlen(result_c_buffer) > 0 && strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0) {
+                                    printf("%s\n", result_c_buffer); // Print result of standalone postfix op
+                                }
+                                set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
+                            } else {
+                                fprintf(stderr, "Error executing standalone postfix operation for: %s %s\n", var_name_clean, tokens[1].text);
+                                set_variable_scoped("LAST_OP_RESULT", "STANDALONE_OP_ERROR", false);
+                            }
+                        } else {
+                            fprintf(stderr, "Error: Malformed variable for postfix operation: %s\n", tokens[0].text);
+                        }
+                    }
+                    // Standalone dynamic binary operator pattern: val1 op val2 (e.g. 10 + 5 at prompt)
+                    // This was the existing logic.
+                    else if ( (num_tokens == 3 || (num_tokens == 4 && tokens[3].type == TOKEN_COMMENT)) &&
+                        (tokens[0].type == TOKEN_VARIABLE || tokens[0].type == TOKEN_NUMBER || tokens[0].type == TOKEN_STRING || tokens[0].type == TOKEN_WORD) && 
+                        tokens[1].type == TOKEN_OPERATOR && !is_comparison_or_assignment_operator(tokens[1].text) && // keep this check
+                        (tokens[2].type == TOKEN_VARIABLE || tokens[2].type == TOKEN_NUMBER || tokens[2].type == TOKEN_STRING || tokens[2].type == TOKEN_WORD) 
+                    ) {
+                            char op1_expanded[INPUT_BUFFER_SIZE];
+                            char op2_expanded[INPUT_BUFFER_SIZE];
+                            char result_c_buffer[INPUT_BUFFER_SIZE];
+                            const char* operator_str = tokens[1].text;
+                            const char* temp_bsh_result_var = "__TEMP_STANDALONE_OP_RES"; 
+
+                            // ... (expansion of op1_expanded, op2_expanded as before)
+                            if (tokens[0].type == TOKEN_STRING) { /* ... */ } else { /* ... */ }
+                            expand_variables_in_string_advanced(tokens[0].text, op1_expanded, sizeof(op1_expanded)); // Simplified for snippet
+                            if (tokens[2].type == TOKEN_STRING) { /* ... */ } else { /* ... */ }
+                            expand_variables_in_string_advanced(tokens[2].text, op2_expanded, sizeof(op2_expanded)); // Simplified for snippet
+                            
+                            // Call BSH __dynamic_op_handler: (val1, val2, op_str, result_holder)
+                            if (invoke_bsh_dynamic_op_handler("__dynamic_op_handler",
+                                                        op1_expanded, op2_expanded, operator_str, 
+                                                        temp_bsh_result_var,
+                                                        result_c_buffer, sizeof(result_c_buffer))) {
+                                if (strlen(result_c_buffer) > 0 &&
+                                    strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0 &&
+                                    /* ... other error checks ... */ ) {
+                                    printf("%s\n", result_c_buffer); 
+                                }
+                                set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
+                            } else {
+                                fprintf(stderr, "Error executing standalone dynamic binary operation for: %s %s %s\n", op1_expanded, operator_str, op2_expanded);
+                                set_variable_scoped("LAST_OP_RESULT", "STANDALONE_OP_ERROR", false);
+                            }
                     } else {
-                        // evaluate_expression_from_tokens returned false, error already printed or in buffer
-                         fprintf(stderr, "bsh: Command not found and failed to evaluate as expression: %s (line %d)\n", tokens[0].text, current_line_no);
-                         set_variable_scoped("LAST_OP_RESULT", expression_result_buffer, false); // Store error string
+
+                        // Try to evaluate the whole line as an expression if it's not assignment/command.
+                        char expression_result_buffer[INPUT_BUFFER_SIZE];
+                        if (evaluate_expression_tokens(tokens, 0, num_tokens - 1, expression_result_buffer, sizeof(expression_result_buffer))) {
+                            if (strlen(expression_result_buffer) > 0 &&
+                                strncmp(expression_result_buffer, "TERNARY_COND_EVAL_ERROR", strlen("TERNARY_COND_EVAL_ERROR")) != 0 &&
+                                strncmp(expression_result_buffer, "EXPR_EVAL_ERROR", strlen("EXPR_EVAL_ERROR")) != 0 &&
+                                // Also check against results from invoke_bsh_dynamic_op_handler if they indicate errors
+                                strncmp(expression_result_buffer, "OP_HANDLER_NO_RESULT_VAR", strlen("OP_HANDLER_NO_RESULT_VAR")) !=0 &&
+                                strncmp(expression_result_buffer, "NO_HANDLER_ERROR", strlen("NO_HANDLER_ERROR")) !=0 &&
+                                strncmp(expression_result_buffer, "UNKNOWN_HANDLER_ERROR", strlen("UNKNOWN_HANDLER_ERROR")) !=0 &&
+                                strncmp(expression_result_buffer, "UNKNOWN_PREFIX_OP_ERROR", strlen("UNKNOWN_PREFIX_OP_ERROR")) !=0 &&
+                                strncmp(expression_result_buffer, "UNARY_PREFIX_OP_ERROR", strlen("UNARY_PREFIX_OP_ERROR")) !=0 &&
+                                // ... etc. for other error strings from invoke_bsh_dynamic_op_handler or its BSH callees
+                                true /* add more positive checks if needed, or fewer error checks */
+                                ) {
+                                printf("%s\n", expression_result_buffer);
+                            }
+                            set_variable_scoped("LAST_OP_RESULT", expression_result_buffer, false); // Or a new var like LAST_EXPR_RESULT
+                        } else {
+                            // If evaluate_expression_tokens returned false, it's a more fundamental parsing error
+                            // OR it could be an external command if no expression pattern matched.
+                            // This 'else' branch would now contain the logic to try it as an external command.
+                            char command_path_ext[MAX_FULL_PATH_LEN];
+                            if (find_command_in_path_dynamic(tokens[0].text, command_path_ext)) {
+                                // External command
+                                char command_path[MAX_FULL_PATH_LEN];
+                                if (find_command_in_path_dynamic(command_name, command_path)) {
+                                    char *args[MAX_ARGS + 1];
+                                    char expanded_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
+                                    args[0] = command_path; 
+                                    int arg_count = 1;
+
+                                    for (int i = 1; i < num_tokens; ++i) {
+                                        if (tokens[i].type == TOKEN_COMMENT) break; 
+                                        if (arg_count < MAX_ARGS) {
+                                            if (tokens[i].type == TOKEN_STRING) {
+                                                char unescaped_val[INPUT_BUFFER_SIZE];
+                                                unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
+                                                expand_variables_in_string_advanced(unescaped_val, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
+                                            } else {
+                                                expand_variables_in_string_advanced(tokens[i].text, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
+                                            }
+                                            args[arg_count++] = expanded_args_storage[arg_count-1];
+                                        } else {
+                                            fprintf(stderr, "Warning: Too many arguments for command '%s'. Max %d allowed.\n", command_name, MAX_ARGS);
+                                            break;
+                                        }
+                                    }
+                                    args[arg_count] = NULL; 
+
+                                    execute_external_command(command_path, args, arg_count, NULL, 0); 
+                                } else {
+                                    fprintf(stderr, "Command not found: %s (line %d)\n", command_name, current_line_no);
+                                }
+                            } else {
+                                fprintf(stderr, "Command not found or syntax error: %s\n", tokens[0].text);
+                            }
+                        }                        
                     }
                 }
             }
