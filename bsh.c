@@ -1056,6 +1056,7 @@ bool parse_operand(ExprParseContext* ctx, char* operand_result_buffer, size_t op
         OperatorDefinition* op_def = get_operator_definition(current_token.text);
         if (op_def && op_def->op_type_prop == OP_TYPE_UNARY_PREFIX) {
             // Check if the operator string in op_def is "++" or "--".
+            //todo: dynamic operator
             if (strcmp(op_def->op_str, "++") == 0 || strcmp(op_def->op_str, "--") == 0) {
                 // If it is "++" or "--":
 
