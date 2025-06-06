@@ -710,8 +710,44 @@ int advanced_tokenize_line(const char *line_text, int line_num, Token *tokens, i
         
         // 5. Punctuation/Structural tokens
         TokenType fixed_punct_type = TOKEN_EMPTY;
-        // ... (switch case) ...
-        //TODO!!
+        // 5. Punctuation/Structural tokens
+        TokenType fixed_punct_type = TOKEN_EMPTY;
+        switch (*p) {
+            case '(':
+                fixed_punct_type = TOKEN_LPAREN;
+                break;
+            case ')':
+                fixed_punct_type = TOKEN_RPAREN;
+                break;
+            case '{':
+                fixed_punct_type = TOKEN_LBRACE;
+                break;
+            case '}':
+                fixed_punct_type = TOKEN_RBRACE;
+                break;
+            case '[':
+                fixed_punct_type = TOKEN_LBRACKET;
+                break;
+            case ']':
+                fixed_punct_type = TOKEN_RBRACKET;
+                break;
+            case ';':
+                fixed_punct_type = TOKEN_SEMICOLON;
+                break;
+            case '=':
+                // This is a special case. We must check if '=' is the beginning of a
+                // longer, script-defined operator (like '=='). If it is, we should let
+                // the next section for TOKEN_OPERATOR handle it to get the longest match.
+                if (match_operator_text(p, NULL) > 1) {
+                    // It's a longer operator (e.g., '=='). Let the next block handle it.
+                    fixed_punct_type = TOKEN_EMPTY;
+                } else {
+                    // It's a standalone '=', so treat it as an assignment.
+                    fixed_punct_type = TOKEN_ASSIGN;
+                }
+                break;
+        }
+
         if (fixed_punct_type != TOKEN_EMPTY) {
             add_token_refactored(fixed_punct_type, p_token_start, 1, line_num, initial_col_for_token, tokens, max_tokens, &storage_ptr, &remaining_storage, &token_count);
             p++; current_col++;
