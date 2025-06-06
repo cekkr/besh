@@ -1704,7 +1704,6 @@ bool evaluate_expression_tokens(Token* tokens_arr, int start_idx, int end_idx, c
 }
 
 bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, Token* operand2_token) {
-    // ... (remains the same)
     if (!operand1_token || !operator_token || !operand2_token) return false;
 
     char val1_expanded[INPUT_BUFFER_SIZE], val2_expanded[INPUT_BUFFER_SIZE];
@@ -2164,9 +2163,9 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
             // Evaluation failed, error already printed or in rhs_value_buffer.
             // Optionally, set target variable to error string or do nothing.
             // For now, let's proceed to set whatever is in rhs_value_buffer (could be an error marker string).
-             fprintf(stderr, "Error evaluating RHS for assignment to '%s'. Result: %s\n", base_var_name, rhs_value_buffer);
-             // Decide if assignment should still happen with the error string, or if it should be skipped.
-             // Let's assign the error string for now, so it's visible.
+            fprintf(stderr, "Error evaluating RHS for assignment to '%s'. Result: %s\n", base_var_name, rhs_value_buffer);
+            // Decide if assignment should still happen with the error string, or if it should be skipped.
+            // Let's assign the error string for now, so it's visible.
         }
     } else { // No RHS (e.g., $var =), set to empty string
         rhs_value_buffer[0] = '\0';
@@ -2419,7 +2418,6 @@ int main(int argc, char *argv[]) {
 /////
 
 void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
-    // ... (remains the same) (is it missing something? pt 2)
     if (num_tokens < 2) {
         fprintf(stderr, "Syntax error for 'while'. Expected: while [!] <condition_value_or_variable_or_expr> [{]\n");
         if (block_stack_top_bf < MAX_NESTING_DEPTH -1 && current_exec_state != STATE_BLOCK_SKIP) {
@@ -2489,7 +2487,6 @@ void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_
 }
 
 void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
-    // ... (remains the same)
     BlockFrame* prev_block_frame = peek_block_bf();
     if (!prev_block_frame || (prev_block_frame->type != BLOCK_TYPE_IF && prev_block_frame->type != BLOCK_TYPE_ELSE)) {
         fprintf(stderr, "Error: 'else' without a preceding 'if' or 'else if' block on line %d.\n", current_line_no);
@@ -2578,7 +2575,6 @@ void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_s
 }
 
 void handle_defunc_statement_advanced(Token *tokens, int num_tokens) {
-    // ... (remains the same)
     if (num_tokens < 2 || tokens[1].type != TOKEN_WORD) {
         fprintf(stderr, "Syntax: defunc <funcname> [(param1 ...)] [{]\n"); return;
     }
@@ -2699,7 +2695,6 @@ void handle_inc_dec_statement_advanced(Token *tokens, int num_tokens, bool incre
 }
 
 void handle_loadlib_statement(Token *tokens, int num_tokens) {
-    // ... (remains the same)
     if (num_tokens != 3) { fprintf(stderr, "Syntax: loadlib <path_or_$var> <alias_or_$var>\n"); return; }
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     char lib_path[MAX_FULL_PATH_LEN], alias[MAX_VAR_NAME_LEN];
@@ -2731,7 +2726,6 @@ void handle_loadlib_statement(Token *tokens, int num_tokens) {
 }
 
 void handle_calllib_statement(Token *tokens, int num_tokens) {
-    // ... (remains the same)
     if (num_tokens < 3) { fprintf(stderr, "Syntax: calllib <alias> <func_name> [args...]\n"); return; }
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     char alias[MAX_VAR_NAME_LEN], func_name[MAX_VAR_NAME_LEN];
@@ -2777,7 +2771,6 @@ void handle_calllib_statement(Token *tokens, int num_tokens) {
 }
 
 void handle_import_statement(Token *tokens, int num_tokens) {
-    // ... (remains the same)
     if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) { 
         return;
     }
@@ -2823,7 +2816,6 @@ void handle_defkeyword_statement(Token *tokens, int num_tokens) {
 }
 
 void handle_update_cwd_statement(Token *tokens, int num_tokens) {
-    // ... (remains the same)
     if (current_exec_state == STATE_BLOCK_SKIP) return;
 
     if (num_tokens != 1) {
