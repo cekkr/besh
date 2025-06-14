@@ -1,0 +1,12 @@
+[package]
+name = "bsh-rs"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+logos = "0.14.0"
+thiserror = "1.0.61"
+libloading = "0.8.3"
+rustyline = "14.0.0"
+serde_json = "1.0.117"
+rand = "0.8.5"
