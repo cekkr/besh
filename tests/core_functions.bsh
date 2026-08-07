@@ -1,0 +1,149 @@
+# Functions: parameters, scopes, the result-variable convention, return,
+# recursion, and loops inside function bodies.
+import tests.lib.assert
+
+assert_start "core: functions and scopes"
+
+function double (value result_var) {
+    $doubled = $value + $value
+    $($result_var) = "$doubled"
+}
+
+$out = ""
+double "21" out
+assert_eq "$out" "42" "result-variable convention returns a value"
+
+# The caller owns the name it passes, so nested calls cannot collide.
+function outer_calls_inner (result_var) {
+    $inner = ""
+    double "5" inner
+    $bumped = $inner + 1
+    $($result_var) = "$bumped"
+}
+$nested = ""
+outer_calls_inner nested
+assert_eq "$nested" "11" "nested call writes into its own caller's frame"
+
+# --- Scope ---------------------------------------------------------------
+
+$shared = "global value"
+function reads_global (result_var) {
+    $($result_var) = "$shared"
+}
+$seen = ""
+reads_global seen
+assert_eq "$seen" "global value" "a function reads an enclosing variable"
+
+function makes_local () {
+    $shared = "local value"
+}
+makes_local
+assert_eq "$shared" "global value" "a plain assignment inside a function stays local"
+
+function param_is_local (shared) {
+    $ignored = "$shared"
+}
+param_is_local "argument"
+assert_eq "$shared" "global value" "a parameter does not overwrite the caller's variable"
+
+# --- return --------------------------------------------------------------
+
+function stops_early (result_var) {
+    $($result_var) = "before"
+    return
+    $($result_var) = "after"
+}
+$r = ""
+stops_early r
+assert_eq "$r" "before" "return ends the function body"
+
+function returns_from_block (n result_var) {
+    if $n > "10" {
+        $($result_var) = "big"
+        return
+    }
+    $($result_var) = "small"
+}
+$size = ""
+returns_from_block "50" size
+assert_eq "$size" "big" "return from inside an if block"
+returns_from_block "2" size
+assert_eq "$size" "small" "falls through when the branch is not taken"
+
+function returns_a_value () {
+    return "explicit"
+}
+returns_a_value
+assert_eq "$LAST_RETURN_VALUE" "explicit" "return <expr> publishes LAST_RETURN_VALUE"
+
+# --- Loops inside a function body ---------------------------------------
+#
+# Function bodies are replayed from stored lines, not from a seekable file, so
+# loops there use a different mechanism than loops at script level.
+
+function count_to (limit result_var) {
+    $i = 0
+    $total = 0
+    while $i < $limit {
+        $total = $total + $i
+        $i = $i + 1
+    }
+    $($result_var) = "$total"
+}
+$total = ""
+count_to "6" total
+assert_eq "$total" "15" "while loop inside a function body"
+
+function nested_loops (result_var) {
+    $outer = 0
+    $count = 0
+    while $outer < 3 {
+        $inner = 0
+        while $inner < 3 {
+            $count = $count + 1
+            $inner = $inner + 1
+        }
+        $outer = $outer + 1
+    }
+    $($result_var) = "$count"
+}
+$count = ""
+nested_loops count
+assert_eq "$count" "9" "nested while loops inside a function body"
+
+# --- Recursion -----------------------------------------------------------
+
+function factorial (n result_var) {
+    if $n <= "1" {
+        $($result_var) = "1"
+        return
+    }
+    $less = $n - 1
+    $sub = ""
+    factorial "$less" sub
+    $product = $n * $sub
+    $($result_var) = "$product"
+}
+$fact = ""
+factorial "6" fact
+assert_eq "$fact" "720" "recursive function with per-frame result holders"
+
+function fib (n result_var) {
+    if $n < "2" {
+        $($result_var) = "$n"
+        return
+    }
+    $a = $n - 1
+    $b = $n - 2
+    $fa = ""
+    $fb = ""
+    fib "$a" fa
+    fib "$b" fb
+    $sum = $fa + $fb
+    $($result_var) = "$sum"
+}
+$f = ""
+fib "10" f
+assert_eq "$f" "55" "double recursion keeps each frame's results separate"
+
+assert_summary

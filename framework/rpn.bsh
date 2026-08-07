@@ -1,0 +1,343 @@
+# rpn.bsh - A second, deliberately unlike-cDiesis language framework.
+#
+# STATUS: experimental implementation. Its lifecycle and symmetric call
+# boundary with cDiesis are covered by tests/cdiesis_interop.bsh.
+#
+# WHY THIS EXISTS
+#   cDiesis alone cannot show that B[e]SH hosts *languages* rather than one
+#   language: a single framework could always be mistaken for a large library.
+#   RPN is the control. It is stack-based, untyped, has no classes, no
+#   declarations and no compiler - it walks its source and executes as it goes -
+#   and yet it plugs into exactly the same lifecycle (lang_load / lang_unload)
+#   and the same call boundary (lang_call) as cDiesis does.
+#
+#   Consequently a cDiesis method can call an RPN word, an RPN word can call a
+#   cDiesis method, and both can call BSH, without any of the three knowing how
+#   the others are implemented.
+#
+# LANGUAGE
+#   42 7 +            push, push, add
+#   dup drop swap     stack shuffling
+#   .                 print top of stack
+#   : name ... ;      define a word
+#   name              invoke a word
+#   @lang:symbol/N    call symbol in another language framework with N arguments
+#                     (arguments are popped left-to-right, result is pushed)
+#
+# STORAGE
+#   RPN_STACK_N / RPN_STACK_<i>    the operand stack
+#   RPN_W_<word>_DEF / _BODY       user-defined words
+#   RPN_W_LIST_N / RPN_W_LIST_<i>  for teardown
+#   RPN_ACTIVE                     gate, same discipline as CDS_ACTIVE
+
+echo "Loading RPN Language Framework (rpn.bsh)..."
+
+import lang
+import cdiesis.strutil
+
+$(RPN_VERSION) = "0.1"
+$(RPN_ACTIVE) = "0"
+
+function rpn_on_load () {
+    $(RPN_ACTIVE) = "1"
+    $(RPN_STACK_N) = "0"
+    $(RPN_W_LIST_N) = "0"
+    $(RPN_ERROR) = ""
+    $(RPN_LAST_OUTPUT) = ""
+    echo "rpn $RPN_VERSION active."
+}
+
+function rpn_on_unload () {
+    $idx = "0"
+    while $idx < $RPN_W_LIST_N {
+        $entry = "RPN_W_LIST_${idx}"
+        $word = $($entry)
+        $def = "RPN_W_${word}_DEF"
+        $($def) = ""
+        $body = "RPN_W_${word}_BODY"
+        $($body) = ""
+        $($entry) = ""
+        $idx = $idx + 1
+    }
+    $(RPN_W_LIST_N) = "0"
+    $(RPN_STACK_N) = "0"
+    $(RPN_ACTIVE) = "0"
+    $(RPN_LAST_OUTPUT) = ""
+    echo "rpn unloaded: word dictionary and stack dropped."
+}
+
+# --- Stack ----------------------------------------------------------------
+
+function rpn_push (value) {
+    $idx = $RPN_STACK_N
+    $slot = "RPN_STACK_${idx}"
+    $($slot) = "$value"
+    $(RPN_STACK_N) = $idx + 1
+}
+
+function rpn_pop (result_var) {
+    if $RPN_STACK_N == "0" {
+        $(RPN_ERROR) = "stack underflow"
+        $($result_var) = ""
+        return
+    }
+    $idx = $RPN_STACK_N - 1
+    $slot = "RPN_STACK_${idx}"
+    $($result_var) = $($slot)
+    $($slot) = ""
+    $(RPN_STACK_N) = "$idx"
+}
+
+function rpn_peek (result_var) {
+    if $RPN_STACK_N == "0" {
+        $($result_var) = ""
+        return
+    }
+    $idx = $RPN_STACK_N - 1
+    $slot = "RPN_STACK_${idx}"
+    $($result_var) = $($slot)
+}
+
+# --- Execution ------------------------------------------------------------
+
+function rpn_eval (source_var result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $count = ""
+    $token = ""
+    $idx = ""
+    $top = ""
+    if $RPN_ACTIVE != "1" {
+        echo "rpn error: framework is not loaded"
+        $($result_var) = ""
+        return
+    }
+
+    $source = $($source_var)
+    $(RPN_ERROR) = ""
+    $(RPN_LAST_OUTPUT) = ""
+    cds_str_field_count "$source" count
+    $idx = "0"
+
+    while $idx < $count {
+        cds_str_field "$source" "$idx" token
+
+        if $token == ":" {
+            rpn_define "$source" "$idx" idx
+        } else {
+            rpn_exec_token "$token"
+            $idx = $idx + 1
+        }
+
+        if $RPN_ERROR != "" {
+            echo "rpn error: $RPN_ERROR"
+            $($result_var) = ""
+            return
+        }
+    }
+
+    rpn_peek top
+    if $top == "" {
+        $top = "$RPN_LAST_OUTPUT"
+    }
+    $($result_var) = "$top"
+}
+
+# ': name body... ;' - collects the body into the dictionary and answers the
+# index just past the terminating ';'.
+function rpn_define (source start next_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $word = ""
+    $count = ""
+    $token = ""
+    $idx = $start + 1
+    cds_str_field "$source" "$idx" word
+    $body = ""
+    $idx = $idx + 1
+    cds_str_field_count "$source" count
+
+    while $idx < $count {
+        cds_str_field "$source" "$idx" token
+        if $token == ";" {
+            $def = "RPN_W_${word}_DEF"
+            $($def) = "1"
+            $body_slot = "RPN_W_${word}_BODY"
+            $($body_slot) = "$body"
+
+            $list_idx = $RPN_W_LIST_N
+            $entry = "RPN_W_LIST_${list_idx}"
+            $($entry) = "$word"
+            $(RPN_W_LIST_N) = $list_idx + 1
+
+            lang_export "rpn" "$word" "rpn_call"
+            $next = $idx + 1
+            $($next_var) = "$next"
+            return
+        }
+        $body = "$body $token"
+        $idx = $idx + 1
+    }
+    $(RPN_ERROR) = "unterminated definition of '$word'"
+    $($next_var) = "$count"
+}
+
+function rpn_exec_token (token) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $top = ""
+    $discarded = ""
+    $a = ""
+    $b = ""
+    $value = ""
+    $is_foreign = ""
+    $word_result = ""
+    if $token == "+" { rpn_binary "+"; return }
+    if $token == "-" { rpn_binary "-"; return }
+    if $token == "*" { rpn_binary "*"; return }
+    if $token == "/" { rpn_binary "/"; return }
+    if $token == "%" { rpn_binary "%"; return }
+    if $token == "<" { rpn_binary "<"; return }
+    if $token == ">" { rpn_binary ">"; return }
+    if $token == "==" { rpn_binary "=="; return }
+
+    if $token == "dup" {
+        rpn_peek top
+        rpn_push "$top"
+        return
+    }
+    if $token == "drop" {
+        rpn_pop discarded
+        return
+    }
+    if $token == "swap" {
+        rpn_pop a
+        rpn_pop b
+        rpn_push "$a"
+        rpn_push "$b"
+        return
+    }
+    if $token == "." {
+        rpn_pop value
+        $(RPN_LAST_OUTPUT) = "$value"
+        echo "$value"
+        return
+    }
+
+    cds_str_starts_with "$token" "@" is_foreign
+    if $is_foreign == "1" {
+        rpn_foreign_call "$token"
+        return
+    }
+
+    $def = "RPN_W_${token}_DEF"
+    if $($def) == "1" {
+        $body_slot = "RPN_W_${token}_BODY"
+        rpn_eval "$body_slot" word_result
+        return
+    }
+
+    # Anything else is a literal. RPN is untyped: a literal is whatever string
+    # it was written as, and the arithmetic words decide what it means - the
+    # same "explicit interpretation" rule the shell itself follows.
+    rpn_push "$token"
+}
+
+function rpn_binary (op) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $rhs = ""
+    $lhs = ""
+    $result = ""
+    rpn_pop rhs
+    rpn_pop lhs
+    cds_binary "$op" "$lhs" "$rhs" result
+    rpn_push "$result"
+}
+
+# '@cdiesis:Shapes.Area/1' - pops one argument, calls the foreign symbol
+# through lang.bsh, pushes the result.
+function rpn_foreign_call (token) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $rest = ""
+    $colon_at = ""
+    $target_lang = ""
+    $tail = ""
+    $slash_at = ""
+    $symbol = ""
+    $argc = ""
+    $value = ""
+    $call_result = ""
+    cds_str_rest "$token" "1" rest
+    cds_str_index_of "$rest" ":" colon_at
+    if $colon_at == "-1" {
+        $(RPN_ERROR) = "malformed foreign call '$token'"
+        return
+    }
+    cds_str_substring "$rest" "0" "$colon_at" target_lang
+    $after = $colon_at + 1
+    cds_str_rest "$rest" "$after" tail
+
+    cds_str_index_of "$tail" "/" slash_at
+    if $slash_at == "-1" {
+        $symbol = "$tail"
+        $argc = "0"
+    } else {
+        cds_str_substring "$tail" "0" "$slash_at" symbol
+        $after_slash = $slash_at + 1
+        cds_str_rest "$tail" "$after_slash" argc
+    }
+
+    lang_arg_reset
+    $idx = "0"
+    while $idx < $argc {
+        rpn_pop value
+        lang_arg_push "$value"
+        $idx = $idx + 1
+    }
+
+    lang_call "$target_lang" "$symbol" call_result
+    if $LANG_LAST_ERROR != "" {
+        $(RPN_ERROR) = "foreign call failed: $LANG_LAST_ERROR"
+        return
+    }
+    rpn_push "$call_result"
+}
+
+# Entry used by lang_call when another language invokes an RPN word.
+function rpn_call (symbol result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $argc = ""
+    $value = ""
+    $discarded = ""
+    $__fwd1 = ""
+    $def = "RPN_W_${symbol}_DEF"
+    if $($def) != "1" {
+        echo "rpn error: unknown word '$symbol'"
+        $($result_var) = ""
+        return
+    }
+
+    lang_arg_count argc
+    $idx = "0"
+    while $idx < $argc {
+        lang_arg_get "$idx" value
+        rpn_push "$value"
+        $idx = $idx + 1
+    }
+
+    $body_slot = "RPN_W_${symbol}_BODY"
+    $__fwd1 = ""
+    rpn_eval "$body_slot" __fwd1
+    # A boundary call has one return value. Remove that value from RPN's
+    # process-wide operand stack after copying it so one foreign call cannot
+    # leak a stale operand into the next independent evaluation.
+    rpn_pop discarded
+    $($result_var) = "$__fwd1"
+}
+
+lang_register "rpn" "$RPN_VERSION" "rpn" "rpn_on_load" "rpn_on_unload" "rpn_eval" "rpn_call"
+
+echo "RPN framework registered. Use: lang_load \"rpn\" ok"

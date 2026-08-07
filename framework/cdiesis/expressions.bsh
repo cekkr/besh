@@ -1,0 +1,828 @@
+# cdiesis/expressions.bsh - Expression productions.
+#
+# STATUS: experimental implementation (see framework/cdiesis.bsh header).
+#
+# Precedence is expressed as a chain of productions rather than a table, so the
+# emitted order of BIN ops is fixed by the grammar itself and no separate
+# operator registry can silently change it. cDiesis therefore does NOT inherit
+# the shell's runtime-defined operator precedence (framework/core_operators.bsh
+# owns that for BSH expressions); it only borrows the handlers that compute the
+# results, which is what keeps the two languages numerically consistent while
+# leaving each one in charge of its own syntax.
+#
+# COMPILE-TIME SLOT TYPES
+#   CDS_P_T_<slot>   static type of a temporary, used for 'var' inference,
+#                    string-vs-number '+', and the type of a field write.
+#
+# ASSIGNMENT TARGETS
+#   The postfix production records what it last resolved, so an '=' that follows
+#   knows whether to emit MOVE (local), FSET (instance field), STOREV (static
+#   field) or a VCALL to an indexer setter.
+#     CDS_P_LV_KIND  "local" | "field" | "static" | "index" | ""
+#     CDS_P_LV_OBJ   slot holding the object (field / index)
+#     CDS_P_LV_NAME  field name, variable name or index slot
+
+echo "Loading cDiesis expressions (cdiesis/expressions.bsh)..."
+
+function cds_p_slot_type_set (slot type_name) {
+    $entry = "CDS_P_T_${slot}"
+    $($entry) = "$type_name"
+}
+
+function cds_p_slot_type (slot result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $local_type = ""
+    $entry = "CDS_P_T_${slot}"
+    $value = $($entry)
+    if $value == "" {
+        cds_p_local_type "$slot" local_type
+        if $local_type != "" {
+            $($result_var) = "$local_type"
+            return
+        }
+        $($result_var) = "object"
+        return
+    }
+    $($result_var) = "$value"
+}
+
+# --- Assignment -----------------------------------------------------------
+
+function cds_parse_expression (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $lhs_slot = ""
+    $failed = ""
+    $is_assign = ""
+    $value_slot = ""
+    $op_found = ""
+    $rhs_slot = ""
+    $result_slot = ""
+    cds_parse_or lhs_slot
+    cds_p_failed failed
+    if $failed == "1" {
+        $($result_var) = "$lhs_slot"
+        return
+    }
+
+    $lv_kind = "$CDS_P_LV_KIND"
+    $lv_obj = "$CDS_P_LV_OBJ"
+    $lv_name = "$CDS_P_LV_NAME"
+
+    cds_p_accept "OP" "=" is_assign
+    if $is_assign == "1" {
+        cds_parse_expression value_slot
+        cds_p_store "$lv_kind" "$lv_obj" "$lv_name" "$value_slot"
+        $($result_var) = "$value_slot"
+        return
+    }
+
+    cds_p_compound_op op_found
+    if $op_found != "" {
+        cds_parse_expression rhs_slot
+        cds_new_temp result_slot
+        cds_pemit "BIN $result_slot $op_found $lhs_slot $rhs_slot"
+        cds_p_store "$lv_kind" "$lv_obj" "$lv_name" "$result_slot"
+        $($result_var) = "$result_slot"
+        return
+    }
+
+    $($result_var) = "$lhs_slot"
+}
+
+function cds_p_compound_op (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $plus = ""
+    $minus = ""
+    $times = ""
+    $divide = ""
+    cds_p_accept "OP" "+=" plus
+    if $plus == "1" { $($result_var) = "+"; return }
+    cds_p_accept "OP" "-=" minus
+    if $minus == "1" { $($result_var) = "-"; return }
+    cds_p_accept "OP" "*=" times
+    if $times == "1" { $($result_var) = "*"; return }
+    cds_p_accept "OP" "/=" divide
+    if $divide == "1" { $($result_var) = "/"; return }
+    $($result_var) = ""
+}
+
+function cds_p_store (kind obj name value_slot) {
+    if $kind == "local" {
+        cds_pemit "MOVE $name $value_slot"
+        return
+    }
+    if $kind == "field" {
+        cds_pemit "FSET $obj $name $value_slot"
+        return
+    }
+    if $kind == "static" {
+        cds_pemit "STOREV $name $value_slot"
+        return
+    }
+    if $kind == "index" {
+        cds_pemit "VCALL tdiscard $obj Set 2 $name $value_slot"
+        return
+    }
+    $(CDS_P_ERROR) = "left side of assignment is not assignable"
+}
+
+# --- Binary levels --------------------------------------------------------
+
+function cds_parse_or (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $left = ""
+    $matched = ""
+    $right = ""
+    $out = ""
+    cds_parse_and left
+    $scanning = "1"
+    while $scanning == "1" {
+        cds_p_accept "OP" "||" matched
+        if $matched == "1" {
+            cds_parse_and right
+            cds_new_temp out
+            cds_pemit "BIN $out || $left $right"
+            cds_p_slot_type_set "$out" "bool"
+            $left = "$out"
+        } else {
+            $scanning = "0"
+        }
+    }
+    $($result_var) = "$left"
+}
+
+function cds_parse_and (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $left = ""
+    $matched = ""
+    $right = ""
+    $out = ""
+    cds_parse_equality left
+    $scanning = "1"
+    while $scanning == "1" {
+        cds_p_accept "OP" "&&" matched
+        if $matched == "1" {
+            cds_parse_equality right
+            cds_new_temp out
+            cds_pemit "BIN $out && $left $right"
+            cds_p_slot_type_set "$out" "bool"
+            $left = "$out"
+        } else {
+            $scanning = "0"
+        }
+    }
+    $($result_var) = "$left"
+}
+
+function cds_parse_equality (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $left = ""
+    $eq = ""
+    $ne = ""
+    $right = ""
+    cds_parse_relational left
+    $scanning = "1"
+    while $scanning == "1" {
+        cds_p_accept "OP" "==" eq
+        cds_p_accept "OP" "!=" ne
+        if $eq == "1" {
+            cds_parse_relational right
+            cds_p_emit_binary "==" "$left" "$right" left
+        }
+        if $ne == "1" {
+            cds_parse_relational right
+            cds_p_emit_binary "!=" "$left" "$right" left
+        }
+        $scanning = "0"
+        if $eq == "1" { $scanning = "1" }
+        if $ne == "1" { $scanning = "1" }
+    }
+    $($result_var) = "$left"
+}
+
+function cds_parse_relational (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $left = ""
+    $lt = ""
+    $gt = ""
+    $le = ""
+    $ge = ""
+    cds_parse_additive left
+    $scanning = "1"
+    while $scanning == "1" {
+        cds_p_accept "OP" "<" lt
+        cds_p_accept "OP" ">" gt
+        cds_p_accept "OP" "<=" le
+        cds_p_accept "OP" ">=" ge
+        if $lt == "1" { cds_parse_additive right; cds_p_emit_binary "<" "$left" "$right" left }
+        if $gt == "1" { cds_parse_additive right; cds_p_emit_binary ">" "$left" "$right" left }
+        if $le == "1" { cds_parse_additive right; cds_p_emit_binary "<=" "$left" "$right" left }
+        if $ge == "1" { cds_parse_additive right; cds_p_emit_binary ">=" "$left" "$right" left }
+        $scanning = "0"
+        if $lt == "1" { $scanning = "1" }
+        if $gt == "1" { $scanning = "1" }
+        if $le == "1" { $scanning = "1" }
+        if $ge == "1" { $scanning = "1" }
+    }
+    $($result_var) = "$left"
+}
+
+function cds_parse_additive (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $left = ""
+    $plus = ""
+    $minus = ""
+    cds_parse_multiplicative left
+    $scanning = "1"
+    while $scanning == "1" {
+        cds_p_accept "OP" "+" plus
+        cds_p_accept "OP" "-" minus
+        if $plus == "1" { cds_parse_multiplicative right; cds_p_emit_binary "+" "$left" "$right" left }
+        if $minus == "1" { cds_parse_multiplicative right; cds_p_emit_binary "-" "$left" "$right" left }
+        $scanning = "0"
+        if $plus == "1" { $scanning = "1" }
+        if $minus == "1" { $scanning = "1" }
+    }
+    $($result_var) = "$left"
+}
+
+function cds_parse_multiplicative (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $left = ""
+    $times = ""
+    $divide = ""
+    $modulo = ""
+    cds_parse_unary left
+    $scanning = "1"
+    while $scanning == "1" {
+        cds_p_accept "OP" "*" times
+        cds_p_accept "OP" "/" divide
+        cds_p_accept "OP" "%" modulo
+        if $times == "1" { cds_parse_unary right; cds_p_emit_binary "*" "$left" "$right" left }
+        if $divide == "1" { cds_parse_unary right; cds_p_emit_binary "/" "$left" "$right" left }
+        if $modulo == "1" { cds_parse_unary right; cds_p_emit_binary "%" "$left" "$right" left }
+        $scanning = "0"
+        if $times == "1" { $scanning = "1" }
+        if $divide == "1" { $scanning = "1" }
+        if $modulo == "1" { $scanning = "1" }
+    }
+    $($result_var) = "$left"
+}
+
+# One place decides the static type of every binary result, and integer division
+# is where that matters: int / int must truncate, so the emitter appends a CAST
+# rather than hoping the runtime guesses.
+function cds_p_emit_binary (op left right result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $left_type = ""
+    $right_type = ""
+    $result_type = ""
+    $out = ""
+    $integral = ""
+    $truncated = ""
+    cds_p_slot_type "$left" left_type
+    cds_p_slot_type "$right" right_type
+    cds_type_combine "$op" "$left_type" "$right_type" result_type
+
+    cds_new_temp out
+    cds_pemit "BIN $out $op $left $right"
+    cds_p_slot_type_set "$out" "$result_type"
+
+    if $op == "/" {
+        cds_type_is_integral "$result_type" integral
+        if $integral == "1" {
+            cds_new_temp truncated
+            cds_pemit "CAST $truncated $result_type $out"
+            cds_p_slot_type_set "$truncated" "$result_type"
+            $out = "$truncated"
+        }
+    }
+
+    $(CDS_P_LV_KIND) = ""
+    $($result_var) = "$out"
+}
+
+# --- Unary and postfix ----------------------------------------------------
+
+function cds_parse_unary (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $not_op = ""
+    $operand = ""
+    $out = ""
+    $neg_op = ""
+    $operand_type = ""
+    $inc_op = ""
+    $__fwd1 = ""
+    $dec_op = ""
+    $__fwd2 = ""
+    $__fwd3 = ""
+    cds_p_accept "OP" "!" not_op
+    if $not_op == "1" {
+        cds_parse_unary operand
+        cds_new_temp out
+        cds_pemit "UN $out ! $operand"
+        cds_p_slot_type_set "$out" "bool"
+        $($result_var) = "$out"
+        return
+    }
+    cds_p_accept "OP" "-" neg_op
+    if $neg_op == "1" {
+        cds_parse_unary operand
+        cds_new_temp out
+        cds_pemit "UN $out - $operand"
+        cds_p_slot_type "$operand" operand_type
+        cds_p_slot_type_set "$out" "$operand_type"
+        $($result_var) = "$out"
+        return
+    }
+    cds_p_accept "OP" "++" inc_op
+    if $inc_op == "1" {
+        cds_parse_unary operand
+        $__fwd1 = ""
+        cds_p_step_in_place "$operand" "+" __fwd1
+        $($result_var) = "$__fwd1"
+        return
+    }
+    cds_p_accept "OP" "--" dec_op
+    if $dec_op == "1" {
+        cds_parse_unary operand
+        $__fwd2 = ""
+        cds_p_step_in_place "$operand" "-" __fwd2
+        $($result_var) = "$__fwd2"
+        return
+    }
+    $__fwd3 = ""
+    cds_parse_postfix __fwd3
+    $($result_var) = "$__fwd3"
+}
+
+# ++x and x++ differ only in which slot the expression yields; both write back
+# through the recorded assignment target.
+function cds_p_step_in_place (slot op result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $one_slot = ""
+    $out = ""
+    $slot_type = ""
+    $lv_kind = "$CDS_P_LV_KIND"
+    $lv_obj = "$CDS_P_LV_OBJ"
+    $lv_name = "$CDS_P_LV_NAME"
+
+    cds_p_const "1" one_slot
+    cds_new_temp out
+    cds_pemit "BIN $out $op $slot $one_slot"
+    cds_p_slot_type "$slot" slot_type
+    cds_p_slot_type_set "$out" "$slot_type"
+    cds_p_store "$lv_kind" "$lv_obj" "$lv_name" "$out"
+    $($result_var) = "$out"
+}
+
+function cds_parse_postfix (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $current = ""
+    $is_dot = ""
+    $is_index = ""
+    $index_slot = ""
+    $out = ""
+    $post_inc = ""
+    $stepped = ""
+    $post_dec = ""
+    cds_parse_primary current
+    $scanning = "1"
+    while $scanning == "1" {
+        cds_p_accept "PUNCT" "." is_dot
+        if $is_dot == "1" {
+            cds_parse_member_access "$current" current
+        }
+        cds_p_accept "PUNCT" "[" is_index
+        if $is_index == "1" {
+            cds_parse_expression index_slot
+            cds_p_expect "PUNCT" "]"
+            cds_new_temp out
+            cds_pemit "VCALL $out $current Get 1 $index_slot"
+            $(CDS_P_LV_KIND) = "index"
+            $(CDS_P_LV_OBJ) = "$current"
+            $(CDS_P_LV_NAME) = "$index_slot"
+            $current = "$out"
+        }
+        cds_p_accept "OP" "++" post_inc
+        if $post_inc == "1" {
+            cds_p_step_in_place "$current" "+" stepped
+        }
+        cds_p_accept "OP" "--" post_dec
+        if $post_dec == "1" {
+            cds_p_step_in_place "$current" "-" stepped
+        }
+
+        $scanning = "0"
+        if $is_dot == "1" { $scanning = "1" }
+        if $is_index == "1" { $scanning = "1" }
+    }
+    $($result_var) = "$current"
+}
+
+# obj.Name          -> FGET     (instance field)
+# obj.Name(args)    -> VCALL    (virtual dispatch on the runtime class)
+# Class.Name        -> LOADV    (static field, a plain shell variable)
+# Class.Name(args)  -> CALL     (static, resolved at compile time)
+function cds_parse_member_access (target result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $member_name = ""
+    $is_static_target = ""
+    $is_call = ""
+    $arg_list = ""
+    $arg_count = ""
+    $out = ""
+    $class_name = ""
+    $ret_type = ""
+    $target_type = ""
+    $field_type = ""
+    cds_p_value "0" member_name
+    cds_p_advance
+
+    cds_str_starts_with "$target" "#class:" is_static_target
+    cds_p_at "PUNCT" "(" is_call
+
+    if $is_call == "1" {
+        cds_p_advance
+        cds_parse_arguments arg_list arg_count
+        cds_p_expect "PUNCT" ")"
+        cds_new_temp out
+        if $is_static_target == "1" {
+            cds_str_rest "$target" "7" class_name
+            cds_pemit "CALL $out $class_name $member_name $arg_count$arg_list"
+            cds_method_return_type "$class_name" "$member_name" ret_type
+            cds_p_slot_type_set "$out" "$ret_type"
+        } else {
+            cds_pemit "VCALL $out $target $member_name $arg_count$arg_list"
+            cds_p_slot_type "$target" target_type
+            cds_method_return_type "$target_type" "$member_name" ret_type
+            cds_p_slot_type_set "$out" "$ret_type"
+        }
+        $(CDS_P_LV_KIND) = ""
+        $($result_var) = "$out"
+        return
+    }
+
+    cds_new_temp out
+    if $is_static_target == "1" {
+        cds_str_rest "$target" "7" class_name
+        cds_pemit "LOADV $out CDS_SF_${class_name}_${member_name}"
+        $(CDS_P_LV_KIND) = "static"
+        $(CDS_P_LV_NAME) = "CDS_SF_${class_name}_${member_name}"
+    } else {
+        cds_pemit "FGET $out $target $member_name"
+        cds_p_slot_type "$target" target_type
+        cds_class_field_type "$target_type" "$member_name" field_type
+        cds_p_slot_type_set "$out" "$field_type"
+        $(CDS_P_LV_KIND) = "field"
+        $(CDS_P_LV_OBJ) = "$target"
+        $(CDS_P_LV_NAME) = "$member_name"
+    }
+    $($result_var) = "$out"
+}
+
+# Arguments are returned as the tail of an op string (" t3 t4"), which is how
+# CALL/VCALL/NEW/HOST encode them: count first, then one slot name per argument.
+function cds_parse_arguments (list_var count_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $at_end = ""
+    $arg_slot = ""
+    $ignored = ""
+    $failed = ""
+    $list = ""
+    $count = "0"
+    cds_p_at "PUNCT" ")" at_end
+    while $at_end != "1" {
+        cds_parse_expression arg_slot
+        $list = "$list $arg_slot"
+        $count = $count + 1
+        cds_p_accept "PUNCT" "," ignored
+        cds_p_at "PUNCT" ")" at_end
+        cds_p_failed failed
+        if $failed == "1" {
+            $at_end = "1"
+        }
+    }
+    $($list_var) = "$list"
+    $($count_var) = "$count"
+}
+
+function cds_parse_primary (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $kind = ""
+    $value = ""
+    $slot = ""
+    $number_type = ""
+    $handled = ""
+    $__fwd4 = ""
+    $is_paren = ""
+    $cast_type = ""
+    $after_type = ""
+    $known_type = ""
+    $known_class = ""
+    $cast_operand = ""
+    $cast_out = ""
+    $inner = ""
+    cds_p_kind "0" kind
+    cds_p_value "0" value
+
+    if $kind == "NUM" {
+        cds_p_advance
+        cds_p_const "$value" slot
+        get_type "$value" number_type
+        if $number_type == "INTEGER" {
+            cds_p_slot_type_set "$slot" "int"
+        } else {
+            cds_p_slot_type_set "$slot" "double"
+        }
+        $(CDS_P_LV_KIND) = ""
+        $($result_var) = "$slot"
+        return
+    }
+    if $kind == "STR" {
+        cds_p_advance
+        cds_p_const_ref "$value" slot
+        cds_p_slot_type_set "$slot" "string"
+        $(CDS_P_LV_KIND) = ""
+        $($result_var) = "$slot"
+        return
+    }
+    if $kind == "CHR" {
+        cds_p_advance
+        cds_p_const_ref "$value" slot
+        cds_p_slot_type_set "$slot" "char"
+        $(CDS_P_LV_KIND) = ""
+        $($result_var) = "$slot"
+        return
+    }
+
+    cds_parse_primary_keyword "$kind" "$value" handled slot
+    if $handled == "1" {
+        $($result_var) = "$slot"
+        return
+    }
+
+    if $kind == "ID" {
+        cds_p_advance
+        $__fwd4 = ""
+        cds_parse_identifier "$value" __fwd4
+        $($result_var) = "$__fwd4"
+        return
+    }
+
+    cds_p_at "PUNCT" "(" is_paren
+    if $is_paren == "1" {
+        # "(T) expr" is a cast when T names a type and ')' follows immediately;
+        # anything else in parentheses is a grouped expression.
+        cds_p_value "1" cast_type
+        cds_p_value "2" after_type
+        $is_cast = "0"
+        if $after_type == ")" {
+            cds_type_exists "$cast_type" known_type
+            if $known_type == "1" {
+                $is_cast = "1"
+            }
+            cds_class_exists "$cast_type" known_class
+            if $known_class == "1" {
+                $is_cast = "1"
+            }
+        }
+
+        cds_p_advance
+        if $is_cast == "1" {
+            cds_p_advance
+            cds_p_expect "PUNCT" ")"
+            cds_parse_unary cast_operand
+            cds_new_temp cast_out
+            cds_pemit "CAST $cast_out $cast_type $cast_operand"
+            cds_p_slot_type_set "$cast_out" "$cast_type"
+            $(CDS_P_LV_KIND) = ""
+            $($result_var) = "$cast_out"
+            return
+        }
+        cds_parse_expression inner
+        cds_p_expect "PUNCT" ")"
+        $($result_var) = "$inner"
+        return
+    }
+
+    $(CDS_P_ERROR) = "unexpected token '$value' in expression"
+    $($result_var) = "tvoid"
+}
+
+function cds_parse_primary_keyword (kind value handled_var result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $slot = ""
+    $__fwd5 = ""
+    $($handled_var) = "0"
+    if $kind != "KW" {
+        return
+    }
+
+    if $value == "true" {
+        cds_p_advance
+        cds_p_const "true" slot
+        cds_p_slot_type_set "$slot" "bool"
+        $($handled_var) = "1"
+        $($result_var) = "$slot"
+        return
+    }
+    if $value == "false" {
+        cds_p_advance
+        cds_p_const "false" slot
+        cds_p_slot_type_set "$slot" "bool"
+        $($handled_var) = "1"
+        $($result_var) = "$slot"
+        return
+    }
+    if $value == "null" {
+        cds_p_advance
+        cds_p_const "null" slot
+        cds_p_slot_type_set "$slot" "object"
+        $($handled_var) = "1"
+        $($result_var) = "$slot"
+        return
+    }
+    if $value == "this" {
+        cds_p_advance
+        cds_p_slot_type_set "this" "$CDS_P_CLASS"
+        $(CDS_P_LV_KIND) = "local"
+        $(CDS_P_LV_NAME) = "this"
+        $($handled_var) = "1"
+        $($result_var) = "this"
+        return
+    }
+    if $value == "new" {
+        cds_p_advance
+        $__fwd5 = ""
+        cds_parse_new __fwd5
+        $($result_var) = "$__fwd5"
+        $($handled_var) = "1"
+        return
+    }
+}
+
+function cds_parse_new (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $class_name = ""
+    $arg_list = ""
+    $arg_count = ""
+    $out = ""
+    cds_parse_type class_name
+    cds_p_expect "PUNCT" "("
+    cds_parse_arguments arg_list arg_count
+    cds_p_expect "PUNCT" ")"
+
+    cds_new_temp out
+    cds_pemit "NEW $out $class_name $arg_count$arg_list"
+    cds_p_slot_type_set "$out" "$class_name"
+    $(CDS_P_LV_KIND) = ""
+    $($result_var) = "$out"
+}
+
+# A bare identifier is, in order: a local/parameter, an extern binding, a class
+# name (which becomes a static target rather than a value), or an error.
+function cds_parse_identifier (name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $local_type = ""
+    $is_call = ""
+    $__fwd6 = ""
+    $__fwd7 = ""
+    $static_owner = ""
+    $static_out = ""
+    $static_type = ""
+    $instance_type = ""
+    $this_type = ""
+    $field_out = ""
+    $is_class = ""
+    cds_p_local_type "$name" local_type
+    if $local_type != "" {
+        cds_p_at "PUNCT" "(" is_call
+        if $is_call == "1" {
+            $__fwd6 = ""
+            cds_parse_extern_or_local_call "$name" __fwd6
+            $($result_var) = "$__fwd6"
+            return
+        }
+        $(CDS_P_LV_KIND) = "local"
+        $(CDS_P_LV_NAME) = "$name"
+        cds_p_slot_type_set "$name" "$local_type"
+        $($result_var) = "$name"
+        return
+    }
+
+    cds_p_at "PUNCT" "(" is_call
+    if $is_call == "1" {
+        $__fwd7 = ""
+        cds_parse_extern_or_local_call "$name" __fwd7
+        $($result_var) = "$__fwd7"
+        return
+    }
+
+    # An unqualified name inside a class may be one of its own fields, exactly
+    # as in C#: a static one becomes a shell variable, an instance one an access
+    # through 'this'.
+    cds_class_static_field_exists "$CDS_P_CLASS" "$name" static_owner
+    if $static_owner != "0" {
+        cds_new_temp static_out
+        cds_pemit "LOADV $static_out CDS_SF_${static_owner}_${name}"
+        cds_class_field_type "$CDS_P_CLASS" "$name" static_type
+        cds_p_slot_type_set "$static_out" "$static_type"
+        $(CDS_P_LV_KIND) = "static"
+        $(CDS_P_LV_NAME) = "CDS_SF_${static_owner}_${name}"
+        $($result_var) = "$static_out"
+        return
+    }
+
+    cds_class_field_type "$CDS_P_CLASS" "$name" instance_type
+    if $instance_type != "" {
+        cds_p_local_type "this" this_type
+        if $this_type != "" {
+            cds_new_temp field_out
+            cds_pemit "FGET $field_out this $name"
+            cds_p_slot_type_set "$field_out" "$instance_type"
+            $(CDS_P_LV_KIND) = "field"
+            $(CDS_P_LV_OBJ) = "this"
+            $(CDS_P_LV_NAME) = "$name"
+            $($result_var) = "$field_out"
+            return
+        }
+    }
+
+    cds_class_exists "$name" is_class
+    if $is_class == "1" {
+        $(CDS_P_LV_KIND) = ""
+        $($result_var) = "#class:$name"
+        return
+    }
+
+    # Forward reference to a class compiled later in the same unit: treat it as
+    # a static target and let the runtime report an unknown class if it never
+    # appears. Locals cannot be forward referenced, so this is unambiguous.
+    $(CDS_P_LV_KIND) = ""
+    $($result_var) = "#class:$name"
+}
+
+# name(args) where 'name' is not a member: either an extern (HOST) or a method
+# of the enclosing class (CALL / VCALL on 'this').
+function cds_parse_extern_or_local_call (name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $arg_list = ""
+    $arg_count = ""
+    $out = ""
+    $is_extern = ""
+    $target_lang = ""
+    $symbol = ""
+    $ret_type = ""
+    $is_static = ""
+    cds_p_expect "PUNCT" "("
+    cds_parse_arguments arg_list arg_count
+    cds_p_expect "PUNCT" ")"
+    cds_new_temp out
+
+    cds_extern_exists "$name" is_extern
+    if $is_extern == "1" {
+        cds_extern_lang "$name" target_lang
+        cds_extern_symbol "$name" symbol
+        cds_pemit "HOST $out $target_lang $symbol $arg_count$arg_list"
+        cds_extern_return_type "$name" ret_type
+        cds_p_slot_type_set "$out" "$ret_type"
+        $(CDS_P_LV_KIND) = ""
+        $($result_var) = "$out"
+        return
+    }
+
+    $method_mod = "CDS_M_${CDS_P_CLASS}_${name}_MOD"
+    cds_str_index_of "$($method_mod)" "s" is_static
+    if $is_static == "-1" {
+        cds_pemit "VCALL $out this $name $arg_count$arg_list"
+    } else {
+        cds_pemit "CALL $out $CDS_P_CLASS $name $arg_count$arg_list"
+    }
+    cds_method_return_type "$CDS_P_CLASS" "$name" ret_type
+    cds_p_slot_type_set "$out" "$ret_type"
+    $(CDS_P_LV_KIND) = ""
+    $($result_var) = "$out"
+}
+
+echo "cDiesis expressions loaded."

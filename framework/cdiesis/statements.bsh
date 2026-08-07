@@ -1,0 +1,425 @@
+# cdiesis/statements.bsh - Statement productions.
+#
+# STATUS: experimental implementation (see framework/cdiesis.bsh header).
+#
+# Control flow is lowered to labels and conditional branches, never to shell
+# control flow. That is a deliberate constraint: 'if' and 'while' in a compiled
+# cDiesis method must mean LABEL/JMP/JMPF and nothing else, because those three
+# opcodes are the ones with a mechanical WebAssembly translation
+# (block / loop / br_if). The BSH 'if' and 'while' you see in this file drive
+# the *parser*, not the compiled program.
+
+echo "Loading cDiesis statements (cdiesis/statements.bsh)..."
+
+function cds_parse_block () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $at_end = ""
+    $at_eof = ""
+    $failed = ""
+    cds_p_expect "PUNCT" "{"
+    cds_p_at "PUNCT" "}" at_end
+    while $at_end != "1" {
+        cds_p_at "EOF" "" at_eof
+        if $at_eof == "1" {
+            $(CDS_P_ERROR) = "unexpected end of unit inside block"
+            return
+        }
+        cds_parse_statement
+        cds_p_failed failed
+        if $failed == "1" {
+            return
+        }
+        cds_p_at "PUNCT" "}" at_end
+    }
+    cds_p_expect "PUNCT" "}"
+}
+
+function cds_parse_statement () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_block = ""
+    $is_if = ""
+    $is_while = ""
+    $is_for = ""
+    $is_foreach = ""
+    $is_return = ""
+    $is_break = ""
+    $is_continue = ""
+    $empty = ""
+    $k0 = ""
+    $v0 = ""
+    $k1 = ""
+    $is_type = ""
+    $v1 = ""
+    $is_decl = ""
+    $discarded = ""
+    $declared_type = ""
+    $name = ""
+    $has_init = ""
+    $value_slot = ""
+    $inferred = ""
+    $default_value = ""
+    $default_slot = ""
+    $cond_slot = ""
+    $else_label = ""
+    $end_label = ""
+    $has_else = ""
+    $top_label = ""
+    $no_init = ""
+    $body_label = ""
+    $step_label = ""
+    $step_slot = ""
+    $item_type = ""
+    $item_name = ""
+    $coll_slot = ""
+    $index_slot = ""
+    $count_slot = ""
+    $cmp_slot = ""
+    $one_slot = ""
+    $ref = ""
+    $is_void = ""
+    $void_slot = ""
+    cds_p_at "PUNCT" "{" is_block
+    if $is_block == "1" {
+        cds_parse_block
+        return
+    }
+    cds_p_at "KW" "if" is_if
+    if $is_if == "1" {
+        cds_parse_if
+        return
+    }
+    cds_p_at "KW" "while" is_while
+    if $is_while == "1" {
+        cds_parse_while
+        return
+    }
+    cds_p_at "KW" "for" is_for
+    if $is_for == "1" {
+        cds_parse_for
+        return
+    }
+    cds_p_at "KW" "foreach" is_foreach
+    if $is_foreach == "1" {
+        cds_parse_foreach
+        return
+    }
+    cds_p_at "KW" "return" is_return
+    if $is_return == "1" {
+        cds_parse_return
+        return
+    }
+    cds_p_accept "KW" "break" is_break
+    if $is_break == "1" {
+        if $CDS_P_BREAK == "" {
+            $(CDS_P_ERROR) = "'break' outside a loop"
+            return
+        }
+        cds_pemit "JMP $CDS_P_BREAK"
+        cds_p_expect "PUNCT" ";"
+        return
+    }
+    cds_p_accept "KW" "continue" is_continue
+    if $is_continue == "1" {
+        if $CDS_P_CONT == "" {
+            $(CDS_P_ERROR) = "'continue' outside a loop"
+            return
+        }
+        cds_pemit "JMP $CDS_P_CONT"
+        cds_p_expect "PUNCT" ";"
+        return
+    }
+    cds_p_accept "PUNCT" ";" empty
+    if $empty == "1" {
+        return
+    }
+
+    cds_parse_local_or_expression
+}
+
+# A declaration is recognised without backtracking: either the statement starts
+# with a type keyword, or it is ID ID, which no expression can be.
+function cds_p_looks_like_declaration (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $k0 = ""
+    $v0 = ""
+    $k1 = ""
+    $is_type = ""
+    $v1 = ""
+    cds_p_kind "0" k0
+    cds_p_value "0" v0
+    cds_p_kind "1" k1
+
+    $($result_var) = "0"
+    if $k0 == "KW" {
+        cds_type_exists "$v0" is_type
+        if $is_type == "1" {
+            $($result_var) = "1"
+        }
+        return
+    }
+    if $k0 == "ID" {
+        if $k1 == "ID" {
+            $($result_var) = "1"
+            return
+        }
+        # ID '<' ID '>' ID  ->  a generic declaration such as List<int> items
+        cds_p_value "1" v1
+        if $v1 == "<" {
+            $($result_var) = "1"
+        }
+    }
+}
+
+function cds_parse_local_or_expression () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_decl = ""
+    $discarded = ""
+    cds_p_looks_like_declaration is_decl
+    if $is_decl == "1" {
+        cds_parse_local_declaration
+        return
+    }
+    cds_parse_expression discarded
+    cds_p_expect "PUNCT" ";"
+}
+
+function cds_parse_local_declaration () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $declared_type = ""
+    $name = ""
+    $has_init = ""
+    $value_slot = ""
+    $inferred = ""
+    $default_value = ""
+    $default_slot = ""
+    cds_parse_type declared_type
+    cds_p_value "0" name
+    cds_p_advance
+
+    cds_p_accept "OP" "=" has_init
+    if $has_init == "1" {
+        cds_parse_expression value_slot
+        if $declared_type == "var" {
+            # 'var' is inference, not dynamic typing: the slot takes the static
+            # type the initialiser produced, decided here at compile time.
+            cds_p_slot_type "$value_slot" inferred
+            $declared_type = "$inferred"
+        }
+        cds_pemit "MOVE $name $value_slot"
+    } else {
+        cds_type_default "$declared_type" default_value
+        cds_p_const "$default_value" default_slot
+        cds_pemit "MOVE $name $default_slot"
+    }
+
+    cds_p_local_declare "$name" "$declared_type"
+    cds_p_expect "PUNCT" ";"
+}
+
+function cds_parse_if () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $cond_slot = ""
+    $else_label = ""
+    $end_label = ""
+    $has_else = ""
+    cds_p_expect "KW" "if"
+    cds_p_expect "PUNCT" "("
+    cds_parse_expression cond_slot
+    cds_p_expect "PUNCT" ")"
+
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" else_label
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" end_label
+
+    cds_pemit "JMPF $else_label $cond_slot"
+    cds_parse_statement
+    cds_pemit "JMP $end_label"
+    cds_pemit "LABEL $else_label"
+
+    cds_p_accept "KW" "else" has_else
+    if $has_else == "1" {
+        cds_parse_statement
+    }
+    cds_pemit "LABEL $end_label"
+}
+
+function cds_parse_while () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $top_label = ""
+    $end_label = ""
+    $cond_slot = ""
+    cds_p_expect "KW" "while"
+
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" top_label
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" end_label
+    $saved_break = "$CDS_P_BREAK"
+    $saved_cont = "$CDS_P_CONT"
+    $(CDS_P_BREAK) = "$end_label"
+    $(CDS_P_CONT) = "$top_label"
+
+    cds_pemit "LABEL $top_label"
+    cds_p_expect "PUNCT" "("
+    cds_parse_expression cond_slot
+    cds_p_expect "PUNCT" ")"
+    cds_pemit "JMPF $end_label $cond_slot"
+    cds_parse_statement
+    cds_pemit "JMP $top_label"
+    cds_pemit "LABEL $end_label"
+
+    $(CDS_P_BREAK) = "$saved_break"
+    $(CDS_P_CONT) = "$saved_cont"
+}
+
+# for (init; cond; step) body
+#
+# The step is parsed before the body but must run after it. Rather than buffer
+# ops, the parser jumps around the step block - the classic single-pass
+# lowering, and the same shape a WASM emitter would produce.
+function cds_parse_for () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $no_init = ""
+    $top_label = ""
+    $body_label = ""
+    $step_label = ""
+    $end_label = ""
+    $cond_slot = ""
+    $step_slot = ""
+    cds_p_expect "KW" "for"
+    cds_p_expect "PUNCT" "("
+
+    cds_p_at "PUNCT" ";" no_init
+    if $no_init == "1" {
+        cds_p_advance
+    } else {
+        cds_parse_local_or_expression
+    }
+
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" top_label
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" body_label
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" step_label
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" end_label
+    $saved_break = "$CDS_P_BREAK"
+    $saved_cont = "$CDS_P_CONT"
+    $(CDS_P_BREAK) = "$end_label"
+    $(CDS_P_CONT) = "$step_label"
+
+    cds_pemit "LABEL $top_label"
+    cds_parse_expression cond_slot
+    cds_p_expect "PUNCT" ";"
+    cds_pemit "JMPF $end_label $cond_slot"
+    cds_pemit "JMP $body_label"
+
+    cds_pemit "LABEL $step_label"
+    cds_parse_expression step_slot
+    cds_pemit "JMP $top_label"
+    cds_p_expect "PUNCT" ")"
+
+    cds_pemit "LABEL $body_label"
+    cds_parse_statement
+    cds_pemit "JMP $step_label"
+    cds_pemit "LABEL $end_label"
+
+    $(CDS_P_BREAK) = "$saved_break"
+    $(CDS_P_CONT) = "$saved_cont"
+}
+
+# foreach (T item in collection)
+#
+# Lowered to an index loop over the collection's Count/Get pair. cDiesis has no
+# iterator protocol: adding one would mean adding an opcode, and the point of
+# the exercise is that the seventeen existing ones suffice.
+function cds_parse_foreach () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $item_type = ""
+    $item_name = ""
+    $coll_slot = ""
+    $index_slot = ""
+    $count_slot = ""
+    $cmp_slot = ""
+    $value_slot = ""
+    $one_slot = ""
+    $top_label = ""
+    $step_label = ""
+    $end_label = ""
+    cds_p_expect "KW" "foreach"
+    cds_p_expect "PUNCT" "("
+    cds_parse_type item_type
+    cds_p_value "0" item_name
+    cds_p_advance
+    cds_p_expect "KW" "in"
+    cds_parse_expression coll_slot
+    cds_p_expect "PUNCT" ")"
+
+    cds_p_local_declare "$item_name" "$item_type"
+
+    cds_p_const "0" index_slot
+    cds_new_temp count_slot
+    cds_new_temp cmp_slot
+    cds_new_temp value_slot
+    cds_new_temp one_slot
+
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" top_label
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" step_label
+    cds_new_label "$CDS_P_CLASS" "$CDS_P_METHOD" end_label
+    $saved_break = "$CDS_P_BREAK"
+    $saved_cont = "$CDS_P_CONT"
+    $(CDS_P_BREAK) = "$end_label"
+    $(CDS_P_CONT) = "$step_label"
+
+    cds_pemit "LABEL $top_label"
+    cds_pemit "VCALL $count_slot $coll_slot Count 0"
+    cds_pemit "BIN $cmp_slot < $index_slot $count_slot"
+    cds_pemit "JMPF $end_label $cmp_slot"
+    cds_pemit "VCALL $value_slot $coll_slot Get 1 $index_slot"
+    cds_pemit "MOVE $item_name $value_slot"
+
+    cds_parse_statement
+
+    cds_pemit "LABEL $step_label"
+    cds_p_const_value "1" "$one_slot"
+    cds_pemit "BIN $index_slot + $index_slot $one_slot"
+    cds_pemit "JMP $top_label"
+    cds_pemit "LABEL $end_label"
+
+    $(CDS_P_BREAK) = "$saved_break"
+    $(CDS_P_CONT) = "$saved_cont"
+}
+
+# Emits a CONST into an already-allocated slot, used where a temporary has to be
+# reserved before the loop body but filled inside it.
+function cds_p_const_value (value slot) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $ref = ""
+    cds_pool_add "$CDS_P_UNIT" "$value" ref
+    cds_pemit "CONST $slot $ref"
+}
+
+function cds_parse_return () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_void = ""
+    $void_slot = ""
+    $value_slot = ""
+    cds_p_expect "KW" "return"
+    cds_p_at "PUNCT" ";" is_void
+    if $is_void == "1" {
+        cds_p_const "" void_slot
+        cds_pemit "RET $void_slot"
+        cds_p_expect "PUNCT" ";"
+        return
+    }
+    cds_parse_expression value_slot
+    cds_pemit "RET $value_slot"
+    cds_p_expect "PUNCT" ";"
+}
+
+echo "cDiesis statements loaded."

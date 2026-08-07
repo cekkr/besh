@@ -1,0 +1,209 @@
+# cdiesis/interop.bsh - The cross-language boundary of cDiesis.
+#
+# STATUS: experimental implementation (see framework/cdiesis.bsh header).
+#
+# Two directions, one mechanism:
+#
+#   cDiesis -> elsewhere   an 'extern "lang"' declaration compiles calls to the
+#                          HOST opcode, which goes through lang_call. cDiesis
+#                          never learns anything about the callee's language.
+#
+#   elsewhere -> cDiesis   every compiled class is exported to lang.bsh as
+#                          "Class.Method", so a BSH script - or a script written
+#                          in a completely different loadable language - calls
+#                          it with lang_arg_push / lang_call.
+#
+# The values that cross are strings, because strings are the only thing B[e]SH
+# has and the only thing every language framework already agrees on. Object
+# references cross as their "obj#<id>" handle, which is meaningless outside the
+# cDiesis heap on purpose: a foreign language can hold it and hand it back, but
+# it cannot dereference it.
+#
+# STORAGE
+#   CDS_E_<name>_DEF / _LANG / _SYM / _RET    extern bindings
+#   CDS_E_LIST_N / CDS_E_LIST_<i>             for teardown
+#   LANG_X_cdiesis_<symbol>                   exports, owned by lang.bsh
+
+echo "Loading cDiesis interop (cdiesis/interop.bsh)..."
+
+function cds_interop_init () {
+    $(CDS_E_LIST_N) = "0"
+    cds_register_host_functions
+}
+
+function cds_interop_drop () {
+    $idx = "0"
+    while $idx < $CDS_E_LIST_N {
+        $entry = "CDS_E_LIST_${idx}"
+        $name = $($entry)
+        $def = "CDS_E_${name}_DEF"
+        $($def) = ""
+        $lang_slot = "CDS_E_${name}_LANG"
+        $($lang_slot) = ""
+        $sym_slot = "CDS_E_${name}_SYM"
+        $($sym_slot) = ""
+        $ret_slot = "CDS_E_${name}_RET"
+        $($ret_slot) = ""
+        $($entry) = ""
+        $idx = $idx + 1
+    }
+    $(CDS_E_LIST_N) = "0"
+}
+
+# --- Extern declarations --------------------------------------------------
+
+function cds_extern_declare (name target_lang symbol return_type) {
+    $def = "CDS_E_${name}_DEF"
+    $($def) = "1"
+    $lang_slot = "CDS_E_${name}_LANG"
+    $($lang_slot) = "$target_lang"
+    $sym_slot = "CDS_E_${name}_SYM"
+    $($sym_slot) = "$symbol"
+    $ret_slot = "CDS_E_${name}_RET"
+    $($ret_slot) = "$return_type"
+
+    $idx = $CDS_E_LIST_N
+    $entry = "CDS_E_LIST_${idx}"
+    $($entry) = "$name"
+    $(CDS_E_LIST_N) = $idx + 1
+}
+
+function cds_extern_exists (name result_var) {
+    $def = "CDS_E_${name}_DEF"
+    if $($def) == "1" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+function cds_extern_lang (name result_var) {
+    $slot = "CDS_E_${name}_LANG"
+    $($result_var) = $($slot)
+}
+
+function cds_extern_symbol (name result_var) {
+    $slot = "CDS_E_${name}_SYM"
+    $($result_var) = $($slot)
+}
+
+function cds_extern_return_type (name result_var) {
+    $slot = "CDS_E_${name}_RET"
+    $value = $($slot)
+    if $value == "" {
+        $($result_var) = "string"
+        return
+    }
+    $($result_var) = "$value"
+}
+
+# --- Exports --------------------------------------------------------------
+#
+# Publishing a method costs one registry entry; the actual dispatch is cds_call,
+# which lang.bsh already knows how to reach. Callers therefore never need a
+# cDiesis-specific entry point.
+
+function cds_export_method (class_name method_name) {
+    lang_export "cdiesis" "${class_name}.${method_name}" "cds_call"
+}
+
+function cds_export_unit (unit) {
+    $count_slot = "CDS_U_${unit}_CLASS_N"
+    $count = $($count_slot)
+    $idx = "0"
+    while $idx < $count {
+        $entry = "CDS_U_${unit}_CLASS_${idx}"
+        $class_name = $($entry)
+        cds_export_class "$class_name"
+        $idx = $idx + 1
+    }
+}
+
+function cds_export_class (class_name) {
+    $count_slot = "CDS_C_${class_name}_MN"
+    $count = $($count_slot)
+    $idx = "0"
+    while $idx < $count {
+        $entry = "CDS_C_${class_name}_M${idx}"
+        $method_name = $($entry)
+        cds_export_method "$class_name" "$method_name"
+        $idx = $idx + 1
+    }
+}
+
+# --- Host functions offered to cDiesis code -------------------------------
+#
+# These are BSH functions, registered as exports of the built-in "bsh" language
+# so that cDiesis reaches them through exactly the same path it would use for
+# any other framework. Each one answers through LANG_RETURN, which is the return
+# convention bsh_lang_call implements.
+
+function cds_register_host_functions () {
+    lang_export "bsh" "print" "cds_host_print"
+    lang_export "bsh" "strlen" "cds_host_strlen"
+    lang_export "bsh" "substr" "cds_host_substr"
+    lang_export "bsh" "charat" "cds_host_charat"
+    lang_export "bsh" "indexof" "cds_host_indexof"
+    lang_export "bsh" "getvar" "cds_host_getvar"
+    lang_export "bsh" "setvar" "cds_host_setvar"
+    lang_export "bsh" "run" "cds_host_run"
+}
+
+function cds_host_print (text) {
+    echo "$text"
+    $(LANG_RETURN) = ""
+}
+
+function cds_host_strlen (text) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $length = ""
+    cds_str_len "$text" length
+    $(LANG_RETURN) = "$length"
+}
+
+function cds_host_substr (text start length) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $part = ""
+    $end = $start + $length
+    cds_str_substring "$text" "$start" "$end" part
+    $(LANG_RETURN) = "$part"
+}
+
+function cds_host_charat (text index) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $ch = ""
+    cds_str_char_at "$text" "$index" ch
+    $(LANG_RETURN) = "$ch"
+}
+
+function cds_host_indexof (text needle) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $at = ""
+    cds_str_index_of "$text" "$needle" at
+    $(LANG_RETURN) = "$at"
+}
+
+# Shell variables are reachable, but only by name and only as strings. This is
+# the narrow seam that ROADMAP Phase 2 replaces with besh.v1.var_get/var_set.
+function cds_host_getvar (name) {
+    $(LANG_RETURN) = $($name)
+}
+
+function cds_host_setvar (name value) {
+    $($name) = "$value"
+    $(LANG_RETURN) = "$value"
+}
+
+# Runs an external command through the shell's own process boundary. Kept
+# explicit and separate: a language framework must not be able to reach the
+# operating system by accident, only by declaring an extern for it.
+function cds_host_run (command_line) {
+    eval $command_line
+    $(LANG_RETURN) = "$LAST_COMMAND_STATUS"
+}
+
+echo "cDiesis interop loaded (extern -> HOST, exports -> lang_call)."

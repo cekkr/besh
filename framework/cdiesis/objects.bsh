@@ -1,0 +1,531 @@
+# cdiesis/objects.bsh - Classes, instances and virtual dispatch for cDiesis.
+#
+# STATUS: experimental implementation (see framework/cdiesis.bsh header).
+#
+# The object model is built from the two primitives B[e]SH already has: flat
+# string variables and underscore name mangling. An instance is not a record; it
+# is a set of variables sharing a numeric prefix, and an object reference is the
+# string "obj#<id>". Passing an object around therefore passes a small opaque
+# token, never an address - the same discipline ROADMAP Phase 2 demands of the
+# planned host ABI ("never a cast pointer").
+#
+# STORAGE
+#   CDS_C_<Class>_DEF / _BASE / _UNIT / _ABSTRACT
+#   CDS_C_<Class>_FN / _F<i>_NAME / _F<i>_TYPE / _F<i>_MOD
+#   CDS_C_<Class>_MN / _M<i>
+#   CDS_M_<Class>_<Method>_DEF / _RET / _MOD / _UNIT
+#   CDS_M_<Class>_<Method>_PN / _P<i>_NAME / _P<i>_TYPE
+#   CDS_SF_<Class>_<Field>            static field storage
+#   CDS_H_NEXT                        next object id
+#   CDS_H_<id>_CLASS                  runtime class of an instance
+#   CDS_H_<id>_F_<field>              instance field storage
+#   CDS_C_LIST_N / CDS_C_LIST_<i>     declared classes, for teardown
+
+echo "Loading cDiesis object model (cdiesis/objects.bsh)..."
+
+# --- Class table ----------------------------------------------------------
+
+function cds_classes_init () {
+    $(CDS_C_LIST_N) = "0"
+}
+
+function cds_classes_drop () {
+    $idx = "0"
+    while $idx < $CDS_C_LIST_N {
+        $entry = "CDS_C_LIST_${idx}"
+        $class_name = $($entry)
+        cds_class_drop "$class_name"
+        $($entry) = ""
+        $idx = $idx + 1
+    }
+    $(CDS_C_LIST_N) = "0"
+}
+
+function cds_class_declare (class_name base_name unit) {
+    $def = "CDS_C_${class_name}_DEF"
+    if $($def) == "1" {
+        # Redeclaration replaces the previous shape, mirroring how 'defunc'
+        # replaces a BSH function. Old instances keep pointing at the class
+        # name, so a reload must invalidate them; see guides/cdiesis.md.
+        cds_class_drop "$class_name"
+    }
+    $($def) = "1"
+
+    $base_slot = "CDS_C_${class_name}_BASE"
+    $($base_slot) = "$base_name"
+    $unit_slot = "CDS_C_${class_name}_UNIT"
+    $($unit_slot) = "$unit"
+    $field_count = "CDS_C_${class_name}_FN"
+    $($field_count) = "0"
+    $method_count = "CDS_C_${class_name}_MN"
+    $($method_count) = "0"
+
+    $idx = $CDS_C_LIST_N
+    $entry = "CDS_C_LIST_${idx}"
+    $($entry) = "$class_name"
+    $(CDS_C_LIST_N) = $idx + 1
+}
+
+function cds_class_drop (class_name) {
+    $method_count_slot = "CDS_C_${class_name}_MN"
+    $method_count = $($method_count_slot)
+    $idx = "0"
+    while $idx < $method_count {
+        $method_slot = "CDS_C_${class_name}_M${idx}"
+        $method_name = $($method_slot)
+        cds_method_drop "$class_name" "$method_name"
+        $($method_slot) = ""
+        $idx = $idx + 1
+    }
+    $($method_count_slot) = "0"
+
+    $field_count_slot = "CDS_C_${class_name}_FN"
+    $field_count = $($field_count_slot)
+    $idx = "0"
+    while $idx < $field_count {
+        $name_slot = "CDS_C_${class_name}_F${idx}_NAME"
+        $field_name = $($name_slot)
+        $static_slot = "CDS_SF_${class_name}_${field_name}"
+        $($static_slot) = ""
+        $($name_slot) = ""
+        $type_slot = "CDS_C_${class_name}_F${idx}_TYPE"
+        $($type_slot) = ""
+        $mod_slot = "CDS_C_${class_name}_F${idx}_MOD"
+        $($mod_slot) = ""
+        $idx = $idx + 1
+    }
+    $($field_count_slot) = "0"
+
+    $def = "CDS_C_${class_name}_DEF"
+    $($def) = ""
+    $base_slot = "CDS_C_${class_name}_BASE"
+    $($base_slot) = ""
+}
+
+function cds_class_exists (class_name result_var) {
+    $def = "CDS_C_${class_name}_DEF"
+    if $($def) == "1" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+function cds_class_base (class_name result_var) {
+    $base_slot = "CDS_C_${class_name}_BASE"
+    $($result_var) = $($base_slot)
+}
+
+function cds_class_is_subclass_of (class_name ancestor result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $parent = ""
+    if $class_name == "$ancestor" {
+        $($result_var) = "1"
+        return
+    }
+    if $ancestor == "object" {
+        $($result_var) = "1"
+        return
+    }
+
+    $current = "$class_name"
+    $guard = "0"
+    while $guard < "32" {
+        cds_class_base "$current" parent
+        if $parent == "" {
+            $($result_var) = "0"
+            return
+        }
+        if $parent == "$ancestor" {
+            $($result_var) = "1"
+            return
+        }
+        $current = "$parent"
+        $guard = $guard + 1
+    }
+    $($result_var) = "0"
+}
+
+# --- Fields ---------------------------------------------------------------
+
+function cds_class_add_field (class_name field_name field_type modifiers) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_static = ""
+    $default_value = ""
+    $count_slot = "CDS_C_${class_name}_FN"
+    $idx = $($count_slot)
+    $name_slot = "CDS_C_${class_name}_F${idx}_NAME"
+    $($name_slot) = "$field_name"
+    $type_slot = "CDS_C_${class_name}_F${idx}_TYPE"
+    $($type_slot) = "$field_type"
+    $mod_slot = "CDS_C_${class_name}_F${idx}_MOD"
+    $($mod_slot) = "$modifiers"
+    $next = $idx + 1
+    $($count_slot) = "$next"
+
+    cds_str_index_of "$modifiers" "s" is_static
+    if $is_static != "-1" {
+        cds_type_default "$field_type" default_value
+        $static_slot = "CDS_SF_${class_name}_${field_name}"
+        $($static_slot) = "$default_value"
+    }
+}
+
+# Does 'class_name' (or a base) declare a STATIC field with this name?
+function cds_class_static_field_exists (class_name field_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_static = ""
+    $parent = ""
+    $current = "$class_name"
+    $guard = "0"
+    while $guard < "32" {
+        $count_slot = "CDS_C_${current}_FN"
+        $count = $($count_slot)
+        $idx = "0"
+        while $idx < $count {
+            $name_slot = "CDS_C_${current}_F${idx}_NAME"
+            if $($name_slot) == "$field_name" {
+                $mod_slot = "CDS_C_${current}_F${idx}_MOD"
+                cds_str_index_of "$($mod_slot)" "s" is_static
+                if $is_static == "-1" {
+                    $($result_var) = "0"
+                } else {
+                    $($result_var) = "$current"
+                }
+                return
+            }
+            $idx = $idx + 1
+        }
+        cds_class_base "$current" parent
+        if $parent == "" {
+            $($result_var) = "0"
+            return
+        }
+        $current = "$parent"
+        $guard = $guard + 1
+    }
+    $($result_var) = "0"
+}
+
+function cds_class_field_type (class_name field_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $parent = ""
+    $current = "$class_name"
+    $guard = "0"
+    while $guard < "32" {
+        $count_slot = "CDS_C_${current}_FN"
+        $count = $($count_slot)
+        $idx = "0"
+        while $idx < $count {
+            $name_slot = "CDS_C_${current}_F${idx}_NAME"
+            if $($name_slot) == "$field_name" {
+                $type_slot = "CDS_C_${current}_F${idx}_TYPE"
+                $($result_var) = $($type_slot)
+                return
+            }
+            $idx = $idx + 1
+        }
+        cds_class_base "$current" parent
+        if $parent == "" {
+            $($result_var) = ""
+            return
+        }
+        $current = "$parent"
+        $guard = $guard + 1
+    }
+    $($result_var) = ""
+}
+
+# --- Methods --------------------------------------------------------------
+
+function cds_method_declare (class_name method_name return_type modifiers unit) {
+    $def = "CDS_M_${class_name}_${method_name}_DEF"
+    $($def) = "1"
+    $ret_slot = "CDS_M_${class_name}_${method_name}_RET"
+    $($ret_slot) = "$return_type"
+    $mod_slot = "CDS_M_${class_name}_${method_name}_MOD"
+    $($mod_slot) = "$modifiers"
+    $unit_slot = "CDS_M_${class_name}_${method_name}_UNIT"
+    $($unit_slot) = "$unit"
+    $param_count = "CDS_M_${class_name}_${method_name}_PN"
+    $($param_count) = "0"
+
+    cds_emit_reset "$class_name" "$method_name"
+
+    $count_slot = "CDS_C_${class_name}_MN"
+    $idx = $($count_slot)
+    $entry = "CDS_C_${class_name}_M${idx}"
+    $($entry) = "$method_name"
+    $next = $idx + 1
+    $($count_slot) = "$next"
+}
+
+function cds_method_drop (class_name method_name) {
+    $count_slot = "CDS_M_${class_name}_${method_name}_CN"
+    $count = $($count_slot)
+    $idx = "0"
+    while $idx < $count {
+        $code_slot = "CDS_M_${class_name}_${method_name}_C${idx}"
+        $($code_slot) = ""
+        $idx = $idx + 1
+    }
+    $($count_slot) = "0"
+
+    $param_count_slot = "CDS_M_${class_name}_${method_name}_PN"
+    $param_count = $($param_count_slot)
+    $idx = "0"
+    while $idx < $param_count {
+        $name_slot = "CDS_M_${class_name}_${method_name}_P${idx}_NAME"
+        $($name_slot) = ""
+        $type_slot = "CDS_M_${class_name}_${method_name}_P${idx}_TYPE"
+        $($type_slot) = ""
+        $idx = $idx + 1
+    }
+    $($param_count_slot) = "0"
+
+    $def = "CDS_M_${class_name}_${method_name}_DEF"
+    $($def) = ""
+}
+
+function cds_method_add_param (class_name method_name param_name param_type) {
+    $count_slot = "CDS_M_${class_name}_${method_name}_PN"
+    $idx = $($count_slot)
+    $name_slot = "CDS_M_${class_name}_${method_name}_P${idx}_NAME"
+    $($name_slot) = "$param_name"
+    $type_slot = "CDS_M_${class_name}_${method_name}_P${idx}_TYPE"
+    $($type_slot) = "$param_type"
+    $next = $idx + 1
+    $($count_slot) = "$next"
+}
+
+function cds_method_exists (class_name method_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $owner = ""
+    cds_method_owner "$class_name" "$method_name" owner
+    if $owner == "" {
+        $($result_var) = "0"
+    } else {
+        $($result_var) = "1"
+    }
+}
+
+# Walks the inheritance chain and answers WHICH class actually holds the body.
+# This single function is all the "vtable" cDiesis needs: an override wins
+# because the walk starts at the runtime class, exactly as C# specifies.
+function cds_method_owner (class_name method_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $parent = ""
+    $current = "$class_name"
+    $guard = "0"
+    while $guard < "32" {
+        $def = "CDS_M_${current}_${method_name}_DEF"
+        if $($def) == "1" {
+            $($result_var) = "$current"
+            return
+        }
+        cds_class_base "$current" parent
+        if $parent == "" {
+            $($result_var) = ""
+            return
+        }
+        $current = "$parent"
+        $guard = $guard + 1
+    }
+    $($result_var) = ""
+}
+
+function cds_method_return_type (class_name method_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $owner = ""
+    cds_method_owner "$class_name" "$method_name" owner
+    if $owner == "" {
+        $($result_var) = "object"
+        return
+    }
+    $ret_slot = "CDS_M_${owner}_${method_name}_RET"
+    $($result_var) = $($ret_slot)
+}
+
+# --- Heap -----------------------------------------------------------------
+
+function cds_heap_init () {
+    $(CDS_H_NEXT) = "1"
+    $(CDS_H_LIVE) = "0"
+}
+
+function cds_heap_drop () {
+    $id = "1"
+    while $id < $CDS_H_NEXT {
+        cds_obj_free "obj#${id}"
+        $id = $id + 1
+    }
+    $(CDS_H_NEXT) = "1"
+    $(CDS_H_LIVE) = "0"
+}
+
+# Allocation is three steps and no magic: take an id, default every field the
+# class and its bases declare, then run the constructor if one exists. The
+# in-language argument vector holds the constructor arguments on entry.
+function cds_obj_new (class_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $known = ""
+    $has_ctor = ""
+    $ctor_result = ""
+    $runtime_class = ""
+    # Generic instantiations share the erased class body. The full name stays
+    # in compile-time type metadata; heap objects and dispatch use the base.
+    cds_generic_base "$class_name" runtime_class
+    cds_class_exists "$runtime_class" known
+    if $known != "1" {
+        $(CDS_TRAP) = "cannot instantiate unknown class '$class_name'"
+        $($result_var) = "null"
+        return
+    }
+
+    $id = $CDS_H_NEXT
+    $next = $id + 1
+    $(CDS_H_NEXT) = "$next"
+    $(CDS_H_LIVE) = $CDS_H_LIVE + 1
+
+    $objref = "obj#${id}"
+    $class_slot = "CDS_H_${id}_CLASS"
+    $($class_slot) = "$runtime_class"
+
+    cds_init_fields "$objref" "$runtime_class"
+
+    # The constructor arguments are already in the in-language vector;
+    # cds_invoke_virtual is what prepends 'this'.
+    cds_method_exists "$runtime_class" "ctor" has_ctor
+    if $has_ctor == "1" {
+        cds_invoke_virtual "$objref" "ctor" ctor_result
+    }
+
+    $($result_var) = "$objref"
+}
+
+function cds_init_fields (objref class_name) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_static = ""
+    $default_value = ""
+    $parent = ""
+    $current = "$class_name"
+    $guard = "0"
+    while $guard < "32" {
+        $count_slot = "CDS_C_${current}_FN"
+        $count = $($count_slot)
+        $idx = "0"
+        while $idx < $count {
+            $name_slot = "CDS_C_${current}_F${idx}_NAME"
+            $type_slot = "CDS_C_${current}_F${idx}_TYPE"
+            $mod_slot = "CDS_C_${current}_F${idx}_MOD"
+            $field_name = $($name_slot)
+            $field_type = $($type_slot)
+            cds_str_index_of "$($mod_slot)" "s" is_static
+            if $is_static == "-1" {
+                cds_type_default "$field_type" default_value
+                cds_obj_set "$objref" "$field_name" "$default_value"
+            }
+            $idx = $idx + 1
+        }
+        cds_class_base "$current" parent
+        if $parent == "" {
+            return
+        }
+        $current = "$parent"
+        $guard = $guard + 1
+    }
+}
+
+function cds_obj_id (objref result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_object = ""
+    $__fwd1 = ""
+    cds_str_starts_with "$objref" "obj#" is_object
+    if $is_object != "1" {
+        $($result_var) = ""
+        return
+    }
+    $__fwd1 = ""
+    cds_str_rest "$objref" "4" __fwd1
+    $($result_var) = "$__fwd1"
+}
+
+function cds_obj_class (objref result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $id = ""
+    cds_obj_id "$objref" id
+    if $id == "" {
+        $($result_var) = ""
+        return
+    }
+    $class_slot = "CDS_H_${id}_CLASS"
+    $($result_var) = $($class_slot)
+}
+
+function cds_obj_set (objref field_name value) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $id = ""
+    cds_obj_id "$objref" id
+    if $id == "" {
+        $(CDS_TRAP) = "field write on non-object '$objref'"
+        return
+    }
+    $slot = "CDS_H_${id}_F_${field_name}"
+    $($slot) = "$value"
+    $registry = "CDS_H_${id}_FIELDS"
+    $known = $($registry)
+    $($registry) = "$known $field_name"
+}
+
+function cds_obj_get (objref field_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $id = ""
+    cds_obj_id "$objref" id
+    if $id == "" {
+        $(CDS_TRAP) = "field read on non-object '$objref'"
+        $($result_var) = ""
+        return
+    }
+    $slot = "CDS_H_${id}_F_${field_name}"
+    $($result_var) = $($slot)
+}
+
+function cds_obj_free (objref) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $id = ""
+    $count = ""
+    $field_name = ""
+    cds_obj_id "$objref" id
+    if $id == "" {
+        return
+    }
+    $registry = "CDS_H_${id}_FIELDS"
+    $fields = $($registry)
+    cds_str_field_count "$fields" count
+    $idx = "0"
+    while $idx < $count {
+        cds_str_field "$fields" "$idx" field_name
+        $slot = "CDS_H_${id}_F_${field_name}"
+        $($slot) = ""
+        $idx = $idx + 1
+    }
+    $($registry) = ""
+    $class_slot = "CDS_H_${id}_CLASS"
+    $($class_slot) = ""
+}
+
+echo "cDiesis object model loaded (classes, single inheritance, virtual dispatch)."

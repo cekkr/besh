@@ -1,0 +1,190 @@
+# cdiesis/strutil.bsh - Character and field primitives used by the cDiesis
+# lexer, parser and op decoder.
+#
+# STATUS: experimental implementation (see framework/cdiesis.bsh header).
+#
+# Everything here is built on exactly two shell-visible string primitives,
+# string_len and string_char_at_index from framework/string.bsh. That is
+# deliberate: a language framework should need no privileged access, and a
+# character cursor plus a length is the whole primitive surface a lexer needs.
+# Both of those helpers currently route through a 'bshstringlib' C library that
+# the repository never creates (AGENTS.md, "Known Gaps").
+
+echo "Loading cDiesis string utilities (cdiesis/strutil.bsh)..."
+
+# These go straight to the built-in primitives rather than through
+# framework/string.bsh: a lexer calls them once per character, and each extra
+# BSH function call on that path costs a scope, a parameter binding and a
+# return.
+function cds_str_len (s result_var) {
+    prim len "$s" __cds_len
+    $($result_var) = "$__cds_len"
+}
+
+function cds_str_char_at (s index result_var) {
+    prim charat "$s" "$index" __cds_char
+    $($result_var) = "$__cds_char"
+}
+
+# Half-open [start, end).
+function cds_str_substring (s start end result_var) {
+    prim sub "$end" "$start" __cds_sub_len
+    prim substr "$s" "$start" "$__cds_sub_len" __cds_sub
+    $($result_var) = "$__cds_sub"
+}
+
+function cds_str_rest (s start result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $total = ""
+    $__fwd1 = ""
+    cds_str_len "$s" total
+    $__fwd1 = ""
+    cds_str_substring "$s" "$start" "$total" __fwd1
+    $($result_var) = "$__fwd1"
+}
+
+function cds_str_index_of (s needle result_var) {
+    prim indexof "$s" "$needle" __cds_idx
+    $($result_var) = "$__cds_idx"
+}
+
+function cds_str_last_index_of (s needle result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $total = ""
+    $ch = ""
+    cds_str_len "$s" total
+    $idx = "0"
+    $found = "-1"
+    while $idx < $total {
+        cds_str_char_at "$s" "$idx" ch
+        if $ch == "$needle" {
+            $found = "$idx"
+        }
+        $idx = $idx + 1
+    }
+    $($result_var) = "$found"
+}
+
+function cds_str_starts_with (s prefix result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $plen = ""
+    $slen = ""
+    $head = ""
+    cds_str_len "$prefix" plen
+    cds_str_len "$s" slen
+    if $slen < $plen {
+        $($result_var) = "0"
+        return
+    }
+    cds_str_substring "$s" "0" "$plen" head
+    if $head == "$prefix" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+# --- Space-separated fields ----------------------------------------------
+#
+# Primitive ops are stored as one flat string per instruction ("BIN t2 + t0 t1").
+# The decoder needs positional field access and nothing more, so the field
+# helpers below are the only "parser" the executor ever uses.
+
+function cds_str_field_count (text result_var) {
+    prim fieldcount "$text" __cds_fcount
+    $($result_var) = "$__cds_fcount"
+}
+
+function cds_str_field (text field_index result_var) {
+    prim field "$text" "$field_index" __cds_field
+    $($result_var) = "$__cds_field"
+}
+
+# --- Character classes ----------------------------------------------------
+
+function cds_char_is_digit (ch result_var) {
+    $($result_var) = "0"
+    if $ch == "0" { $($result_var) = "1" }
+    if $ch == "1" { $($result_var) = "1" }
+    if $ch == "2" { $($result_var) = "1" }
+    if $ch == "3" { $($result_var) = "1" }
+    if $ch == "4" { $($result_var) = "1" }
+    if $ch == "5" { $($result_var) = "1" }
+    if $ch == "6" { $($result_var) = "1" }
+    if $ch == "7" { $($result_var) = "1" }
+    if $ch == "8" { $($result_var) = "1" }
+    if $ch == "9" { $($result_var) = "1" }
+}
+
+# Identifier characters are recognised by exclusion: anything that is not
+# whitespace, not a digit and not one of the language's punctuators can start or
+# continue an identifier. That keeps this check independent of any locale or
+# character-table support in the core.
+function cds_char_is_punct (ch result_var) {
+    $($result_var) = "0"
+    if $ch == "(" { $($result_var) = "1" }
+    if $ch == ")" { $($result_var) = "1" }
+    if $ch == "{" { $($result_var) = "1" }
+    if $ch == "}" { $($result_var) = "1" }
+    if $ch == "[" { $($result_var) = "1" }
+    if $ch == "]" { $($result_var) = "1" }
+    if $ch == ";" { $($result_var) = "1" }
+    if $ch == "," { $($result_var) = "1" }
+    if $ch == "." { $($result_var) = "1" }
+    if $ch == "<" { $($result_var) = "1" }
+    if $ch == ">" { $($result_var) = "1" }
+    if $ch == "+" { $($result_var) = "1" }
+    if $ch == "-" { $($result_var) = "1" }
+    if $ch == "*" { $($result_var) = "1" }
+    if $ch == "/" { $($result_var) = "1" }
+    if $ch == "%" { $($result_var) = "1" }
+    if $ch == "=" { $($result_var) = "1" }
+    if $ch == "!" { $($result_var) = "1" }
+    if $ch == "&" { $($result_var) = "1" }
+    if $ch == "|" { $($result_var) = "1" }
+    if $ch == ":" { $($result_var) = "1" }
+    if $ch == "?" { $($result_var) = "1" }
+}
+
+function cds_char_is_space (ch result_var) {
+    $($result_var) = "0"
+    if $ch == " " { $($result_var) = "1" }
+    if $ch == "	" { $($result_var) = "1" }
+    if $ch == "" { $($result_var) = "1" }
+}
+
+function cds_char_is_ident_start (ch result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_space = ""
+    $is_digit = ""
+    $is_punct = ""
+    cds_char_is_space "$ch" is_space
+    cds_char_is_digit "$ch" is_digit
+    cds_char_is_punct "$ch" is_punct
+    if $is_space == "1" { $($result_var) = "0"; return }
+    if $is_digit == "1" { $($result_var) = "0"; return }
+    if $is_punct == "1" { $($result_var) = "0"; return }
+    if $ch == "\"" { $($result_var) = "0"; return }
+    if $ch == "" { $($result_var) = "0"; return }
+    $($result_var) = "1"
+}
+
+function cds_char_is_ident_part (ch result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_digit = ""
+    $is_start = ""
+    cds_char_is_digit "$ch" is_digit
+    if $is_digit == "1" {
+        $($result_var) = "1"
+        return
+    }
+    cds_char_is_ident_start "$ch" is_start
+    $($result_var) = "$is_start"
+}
+
+echo "cDiesis string utilities loaded."

@@ -1,0 +1,47 @@
+# tests/cdiesis_lifecycle.bsh - Language registration and teardown contract.
+
+import tests.lib.assert
+assert_start "cDiesis: lifecycle"
+
+import cdiesis
+$(CDS_STDLIB_ENABLED) = "0"
+
+lang_is_registered "cdiesis" registered
+assert_eq "$registered" "1" "import registers the cDiesis framework"
+
+lang_state "cdiesis" initial_state
+assert_eq "$initial_state" "registered" "framework starts registered but inactive"
+
+lang_load "cdiesis" loaded
+assert_eq "$loaded" "1" "framework loads"
+assert_eq "$CDS_ACTIVE" "1" "load hook activates cDiesis"
+
+cds_type_exists "int" int_type
+assert_eq "$int_type" "1" "load hook initializes built-in types"
+
+$LIFECYCLE_SRC = "class Ephemeral { public static int Main() { return 7; } }"
+cds_compile "lifecycle" LIFECYCLE_SRC compiled
+assert_eq "$compiled" "1" "an active framework compiles a unit"
+cds_class_exists "Ephemeral" class_before_unload
+assert_eq "$class_before_unload" "1" "compiled class enters the class table"
+
+lang_unload "cdiesis" unloaded
+assert_eq "$unloaded" "1" "framework unloads"
+lang_state "cdiesis" unloaded_state
+assert_eq "$unloaded_state" "unloaded" "registry records the unloaded state"
+assert_eq "$CDS_ACTIVE" "0" "unload hook deactivates cDiesis"
+cds_class_exists "Ephemeral" class_after_unload
+assert_eq "$class_after_unload" "0" "unload drops compiled classes"
+
+lang_eval "cdiesis" LIFECYCLE_SRC after_unload
+assert_empty "$after_unload" "evaluation refuses an unloaded framework"
+assert_contains "$LANG_LAST_ERROR" "not loaded" "unloaded call reports a boundary error"
+
+lang_load "cdiesis" reloaded
+assert_eq "$reloaded" "1" "framework reloads"
+cds_class_exists "Ephemeral" class_after_reload
+assert_eq "$class_after_reload" "0" "reload starts with an empty class table"
+cds_type_exists "int" int_type_after_reload
+assert_eq "$int_type_after_reload" "1" "reload rebuilds built-in types"
+
+assert_summary

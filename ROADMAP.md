@@ -12,7 +12,7 @@ Current status:
 
 - Fayasm is pinned as a Git submodule at [`thirds/fayasm/`](thirds/fayasm/).
 - B[e]SH does not yet link Fayasm, emit WebAssembly, or execute compiled BSH functions.
-- The current C build is blocked by known errors recorded in [`AGENTS.md`](AGENTS.md); establish a working, testable baseline before beginning integration.
+- The C interpreter builds and the isolated suite in [`test.sh`](test.sh) verifies the core baseline and experimental language frameworks; Fayasm integration has not begun.
 
 ## Architectural Boundary
 
@@ -36,9 +36,43 @@ Responsibilities remain separated:
 - Do not change BSH-visible value, scoping, truthiness, error, or operator semantics merely because WebAssembly has different primitive types.
 - Do not involve the archived Rust experiment under [`gold/bsh-rs/`](gold/bsh-rs/).
 
+## Language Frameworks as a Lowering Study
+
+**Status: experimental implementation, verified; not a Fayasm phase.**
+
+The plan above assumes that B[e]SH's runtime-enlarged language bottoms out in a
+small primitive set. [`framework/cdiesis.bsh`](framework/cdiesis.bsh) with
+[`framework/cdiesis/`](framework/cdiesis/) is a study of that assumption from the
+opposite direction: a C#-shaped language — static types, classes, single
+inheritance, virtual dispatch, generics, `foreach`, a standard library — written
+entirely as a loadable BSH framework, compiling to a fixed set of seventeen
+primitive operations over shell strings, with one host boundary.
+[`framework/lang.bsh`](framework/lang.bsh) owns the load/unload lifecycle and the
+cross-language call boundary; [`framework/rpn.bsh`](framework/rpn.bsh) is a second,
+structurally unlike language used as the control. The design, the opcode table
+and its planned WebAssembly mapping are in [`guides/cdiesis.md`](guides/cdiesis.md).
+
+What this contributes to the phases below:
+
+- **Phase 1 sizing evidence.** The opcode set is a concrete proposal for how
+  small a stable IR can be while still expressing a large surface language.
+- **Phase 2 ABI rehearsal.** Opaque `obj#<id>` handles, a per-unit constant
+  pool, an argument vector instead of positional parameters, and a single
+  `HOST` operation are the same shapes `besh.v1` proposes — testable at BSH
+  level before any C is written.
+- **Phase 3 differential fixtures.** A cDiesis unit can be executed by the BSH
+  executor and, later, by an emitted module, then compared instruction by
+  instruction.
+
+What it does not do: it implements no Fayasm phase, links no Fayasm, and emits
+no WebAssembly. Its core prerequisites and the one intentionally cooperative
+unload limitation are tracked as `CDS-REQ-0` … `CDS-REQ-8` in
+[`guides/cdiesis.md`](guides/cdiesis.md). Do not treat the language framework as
+progress against a Fayasm exit gate.
+
 ## Phase 0 — Restore and Measure the Interpreter Baseline
 
-**Status: Next**
+**Status: In progress — build and semantic suite established; benchmarks and independent Fayasm validation remain.**
 
 1. Fix the blocking C compilation errors and the argument-buffer warnings documented in [`AGENTS.md`](AGENTS.md).
 2. Add a non-interactive test harness that can run BSH fixtures with an isolated `HOME` and explicit `BSH_MODULE_PATH`.

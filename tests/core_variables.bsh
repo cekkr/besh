@@ -1,0 +1,54 @@
+# Variables, expansion, indirection and arrays.
+import tests.lib.assert
+
+assert_start "core: variables and expansion"
+
+$name = "world"
+assert_eq "$name" "world" "plain assignment"
+
+$greeting = "hello $name"
+assert_eq "$greeting" "hello world" "interpolation inside a string"
+
+$braced = "${name}ly"
+assert_eq "$braced" "worldly" "\${name} keeps the boundary explicit"
+
+$empty = ""
+assert_empty "$empty" "empty assignment"
+
+$missing_value = "$no_such_variable_anywhere"
+assert_empty "$missing_value" "unset variable expands to nothing"
+
+# --- Indirection ---------------------------------------------------------
+#
+# $(expr) names the variable to read or write: the inner text is expanded
+# first, and the result is used as the name.
+
+$target = "slot_a"
+$($target) = "written indirectly"
+assert_eq "$slot_a" "written indirectly" "indirect write reaches the named variable"
+
+$read_back = "$($target)"
+assert_eq "$read_back" "written indirectly" "indirect read resolves the name"
+
+$prefix = "slot"
+$computed = "${prefix}_b"
+$($computed) = "42"
+assert_eq "$slot_b" "42" "indirect write with a computed name"
+
+# --- Arrays --------------------------------------------------------------
+#
+# Arrays are name mangling, not a distinct storage kind.
+
+$items[0] = "first"
+$items[1] = "second"
+assert_eq "$items[0]" "first" "array element write and read"
+assert_eq "$items[1]" "second" "second array element"
+
+$idx = 1
+assert_eq "$items[$idx]" "second" "array index from a variable"
+assert_eq "$items_ARRAYIDX_0" "first" "array elements are mangled variables"
+
+$items["key"] = "keyed"
+assert_eq "$items[\"key\"]" "keyed" "string index"
+
+assert_summary

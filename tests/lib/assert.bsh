@@ -1,0 +1,88 @@
+# tests/lib/assert.bsh - Minimal assertion helpers for BSH test scripts.
+#
+# Every test file imports this, makes assertions, and ends with
+# 'assert_summary'. The runner (test.sh) decides pass/fail from the summary
+# line, so a test that dies half way through is reported as a failure rather
+# than silently counting as a pass.
+#
+# Usage:
+#   import tests.lib.assert          # or: import "tests/lib/assert"
+#   assert_start "core: variables"
+#   assert_eq "$actual" "expected" "what this checks"
+#   assert_summary
+
+$ASSERT_PASS = "0"
+$ASSERT_FAIL = "0"
+$ASSERT_SUITE = "unnamed"
+
+function assert_start (suite_name) {
+    $(ASSERT_SUITE) = "$suite_name"
+    $(ASSERT_PASS) = "0"
+    $(ASSERT_FAIL) = "0"
+    echo "== $suite_name"
+}
+
+function assert_pass (label) {
+    prim add "$ASSERT_PASS" "1" __assert_next
+    $(ASSERT_PASS) = "$__assert_next"
+    echo "  ok   $label"
+}
+
+function assert_fail (label detail) {
+    prim add "$ASSERT_FAIL" "1" __assert_next
+    $(ASSERT_FAIL) = "$__assert_next"
+    echo "  FAIL $label"
+    echo "       $detail"
+}
+
+function assert_eq (actual expected label) {
+    if $actual == $expected {
+        assert_pass "$label"
+    } else {
+        assert_fail "$label" "expected [$expected], got [$actual]"
+    }
+}
+
+function assert_ne (actual unexpected label) {
+    if $actual != $unexpected {
+        assert_pass "$label"
+    } else {
+        assert_fail "$label" "expected anything but [$unexpected]"
+    }
+}
+
+function assert_empty (actual label) {
+    if $actual == "" {
+        assert_pass "$label"
+    } else {
+        assert_fail "$label" "expected empty, got [$actual]"
+    }
+}
+
+function assert_not_empty (actual label) {
+    if $actual != "" {
+        assert_pass "$label"
+    } else {
+        assert_fail "$label" "expected a value, got empty"
+    }
+}
+
+function assert_contains (haystack needle label) {
+    $__assert_at = ""
+    prim indexof "$haystack" "$needle" __assert_at
+    if $__assert_at == "-1" {
+        assert_fail "$label" "[$haystack] does not contain [$needle]"
+    } else {
+        assert_pass "$label"
+    }
+}
+
+# The runner looks for exactly these two lines.
+function assert_summary () {
+    echo "-- $ASSERT_SUITE: $ASSERT_PASS passed, $ASSERT_FAIL failed"
+    if $ASSERT_FAIL == "0" {
+        echo "SUITE-RESULT: PASS"
+    } else {
+        echo "SUITE-RESULT: FAIL"
+    }
+}

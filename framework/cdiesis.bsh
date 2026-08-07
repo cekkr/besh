@@ -1,0 +1,377 @@
+# cdiesis.bsh - Entry module of the cDiesis language framework
+#
+# cDiesis ("C sharp", read the Italian way: do diesis = C#) is a C#-shaped
+# language implemented entirely as a B[e]SH framework. Nothing about it lives in
+# bsh.c: classes, static types, methods, generics-by-erasure and its standard
+# library are all lowered onto the shell's primitives - string variables,
+# name mangling, function calls, if/while - by BSH code in framework/cdiesis/.
+#
+# STATUS: experimental implementation. The lifecycle, compiler/runtime,
+# standard library, examples and cross-language boundary are covered by the
+# cDiesis suites under tests/. Remaining language limits are documented in
+# guides/cdiesis.md.
+#
+# WHY IT EXISTS
+#   ROADMAP.md plans a pseudo-compiled path where BSH functions and frameworks
+#   are lowered to WebAssembly and executed by fayasm. That plan needs evidence
+#   that a large, typed, object-oriented surface really does reduce to a small
+#   set of primitive operations. cDiesis is that evidence: every construct it
+#   accepts compiles to the 17-instruction primitive op set in
+#   framework/cdiesis/ops.bsh, and each of those instructions has a documented
+#   WebAssembly lowering.
+#
+# LIFECYCLE
+#   import cdiesis            # registers the framework with lang.bsh
+#   lang_load "cdiesis" ok    # activates it
+#   lang_eval "cdiesis" SRC r # compiles and runs a source unit
+#   lang_unload "cdiesis" ok  # drops every cDiesis table; shell is BSH again
+
+echo "Loading cDiesis Language Framework (cdiesis.bsh)..."
+
+$CDIESIS_VERSION = "0.1"
+# Where this framework lives, captured at import time: the standard library
+# sources ship next to it.
+$(CDS_HOME) = "$BSH_SCRIPT_DIR"
+
+import lang
+import cdiesis.strutil
+import cdiesis.types
+import cdiesis.ops
+import cdiesis.objects
+import cdiesis.lexer
+import cdiesis.parser
+import cdiesis.interop
+
+# --- Framework state ------------------------------------------------------
+#
+# CDS_ACTIVE gates every public entry point. An unloaded cDiesis must not
+# execute anything, even though its BSH functions are still defined: the C core
+# cannot undefine a function, so refusing on a flag is the honest equivalent.
+
+$(CDS_ACTIVE) = "0"
+$(CDS_UNIT_N) = "0"
+$(CDS_STDLIB_ENABLED) = "1"
+$(CDS_LAST_ERROR) = ""
+
+function cds_require_active (result_var) {
+    if $CDS_ACTIVE == "1" {
+        $($result_var) = "1"
+        return
+    }
+    $(CDS_LAST_ERROR) = "cDiesis is not loaded"
+    echo "cDiesis error: framework is not loaded (call lang_load \"cdiesis\")"
+    $($result_var) = "0"
+}
+
+# --- Load / unload hooks --------------------------------------------------
+
+function cdiesis_on_load () {
+    $(CDS_ACTIVE) = "1"
+    $(CDS_LAST_ERROR) = ""
+    $(CDS_UNIT_N) = "0"
+
+    cds_types_init
+    cds_heap_init
+    cds_classes_init
+    cds_interop_init
+
+    # The standard library is written in cDiesis itself and compiled on load,
+    # which is also the first end-to-end exercise of the compiler.
+    cds_load_stdlib
+
+    echo "cDiesis $CDIESIS_VERSION active: types, heap, stdlib ready."
+}
+
+function cdiesis_on_unload () {
+    # Tear down in reverse dependency order. Each _drop function is responsible
+    # for clearing the mangled variables it owns; after this the framework must
+    # leave no reachable cDiesis state behind, so a later load starts clean.
+    cds_interop_drop
+    cds_classes_drop
+    cds_heap_drop
+    cds_types_drop
+    cds_units_drop
+
+    $(CDS_ACTIVE) = "0"
+    $(CDS_LAST_ERROR) = ""
+    echo "cDiesis unloaded: class table, heap, type table and units dropped."
+}
+
+function cds_units_drop () {
+    $idx = "0"
+    while $idx < $CDS_UNIT_N {
+        $name_slot = "CDS_UNIT_${idx}_NAME"
+        $unit = $($name_slot)
+        cds_unit_drop "$unit"
+        $($name_slot) = ""
+        $idx = $idx + 1
+    }
+    $(CDS_UNIT_N) = "0"
+}
+
+function cds_unit_drop (unit) {
+    $src_slot = "CDS_U_${unit}_SRC"
+    $($src_slot) = ""
+    $state_slot = "CDS_U_${unit}_STATE"
+    $($state_slot) = ""
+    $ns_slot = "CDS_U_${unit}_NS"
+    $($ns_slot) = ""
+    cds_tokens_drop "$unit"
+    cds_pool_drop "$unit"
+}
+
+# --- Public API -----------------------------------------------------------
+
+# cds_compile: source text (held in the variable NAMED by source_var) becomes
+# a compiled unit: token stream -> declarations in the class table -> primitive
+# ops in each method's code array. Nothing runs yet.
+function cds_compile (unit source_var result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $active = ""
+    $lex_ok = ""
+    $parse_ok = ""
+    cds_require_active active
+    if $active != "1" {
+        $($result_var) = "0"
+        return
+    }
+
+    $unit_src = "CDS_U_${unit}_SRC"
+    $($unit_src) = $($source_var)
+
+    $unit_state = "CDS_U_${unit}_STATE"
+    $($unit_state) = "lexing"
+
+    cds_lex "$unit" lex_ok
+    if $lex_ok != "1" {
+        $($unit_state) = "error"
+        $($result_var) = "0"
+        return
+    }
+
+    $($unit_state) = "parsing"
+    cds_parse_unit "$unit" parse_ok
+    if $parse_ok != "1" {
+        $($unit_state) = "error"
+        $($result_var) = "0"
+        return
+    }
+
+    $($unit_state) = "compiled"
+
+    # Publish every class of the unit so other language frameworks can reach it
+    # as "Class.Method" through lang_call.
+    cds_export_unit "$unit"
+
+    $idx = $CDS_UNIT_N
+    $name_slot = "CDS_UNIT_${idx}_NAME"
+    $($name_slot) = "$unit"
+    $(CDS_UNIT_N) = $idx + 1
+
+    $($result_var) = "1"
+}
+
+# cds_run: compile an anonymous unit and invoke its entry point, C#-style
+# (a static Main on any class, or the first declared static method).
+function cds_run (source_var result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $active = ""
+    $compile_ok = ""
+    $entry_class = ""
+    $entry_method = ""
+    $__fwd1 = ""
+    cds_require_active active
+    if $active != "1" {
+        $($result_var) = ""
+        return
+    }
+
+    $unit = "unit${CDS_UNIT_N}"
+    cds_compile "$unit" "$source_var" compile_ok
+    if $compile_ok != "1" {
+        $($result_var) = ""
+        return
+    }
+
+    cds_find_entry_point "$unit" entry_class entry_method
+    if $entry_class == "" {
+        $(CDS_LAST_ERROR) = "unit '$unit' declares no entry point"
+        $($result_var) = ""
+        return
+    }
+
+    cds_arg_reset
+    $__fwd1 = ""
+    cds_invoke_static "$entry_class" "$entry_method" __fwd1
+    $($result_var) = "$__fwd1"
+}
+
+# cds_call: the framework's cross-language call entry, registered with lang.bsh.
+# 'symbol' is "Class.Method"; arguments arrive in the lang.bsh argument vector.
+function cds_call (symbol result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $active = ""
+    $sym_class = ""
+    $sym_method = ""
+    $argc = ""
+    $value = ""
+    $__fwd2 = ""
+    cds_require_active active
+    if $active != "1" {
+        $($result_var) = ""
+        return
+    }
+
+    cds_split_symbol "$symbol" sym_class sym_method
+    if $sym_class == "" {
+        $(CDS_LAST_ERROR) = "cds_call: malformed symbol '$symbol'"
+        $($result_var) = ""
+        return
+    }
+
+    # Move the boundary arguments into the in-language vector. For an instance
+    # method the caller passes the object handle first, which lands in parameter
+    # zero - the slot cDiesis calls 'this'.
+    cds_arg_reset
+    lang_arg_count argc
+    $idx = "0"
+    while $idx < $argc {
+        lang_arg_get "$idx" value
+        cds_arg_push "$value"
+        $idx = $idx + 1
+    }
+
+    $__fwd2 = ""
+    cds_invoke_static "$sym_class" "$sym_method" __fwd2
+    $($result_var) = "$__fwd2"
+}
+
+function cds_split_symbol (symbol class_var method_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $dot_at = ""
+    $__fwd3 = ""
+    $__fwd4 = ""
+    # "Demo.Point.Origin" -> class "Demo.Point", method "Origin".
+    # Split on the LAST dot so namespaced class names survive.
+    cds_str_last_index_of "$symbol" "." dot_at
+    if $dot_at == "-1" {
+        $($class_var) = ""
+        $($method_var) = ""
+        return
+    }
+    $__fwd3 = ""
+    cds_str_substring "$symbol" "0" "$dot_at" __fwd3
+    $($class_var) = "$__fwd3"
+    $after = $dot_at + 1
+    $__fwd4 = ""
+    cds_str_rest "$symbol" "$after" __fwd4
+    $($method_var) = "$__fwd4"
+}
+
+function cds_find_entry_point (unit class_var method_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $has_main = ""
+    $($class_var) = ""
+    $($method_var) = ""
+
+    $count_slot = "CDS_U_${unit}_CLASS_N"
+    $count = $($count_slot)
+    $idx = "0"
+    while $idx < $count {
+        $cls_slot = "CDS_U_${unit}_CLASS_${idx}"
+        $cls = $($cls_slot)
+        cds_method_exists "$cls" "Main" has_main
+        if $has_main == "1" {
+            $($class_var) = "$cls"
+            $($method_var) = "Main"
+            return
+        }
+        $idx = $idx + 1
+    }
+}
+
+# cds_dump_ops prints the primitive lowering of one method. This is the
+# framework's whole point made visible: whatever C#-shaped syntax went in, what
+# comes out is a flat list of ops from the fixed primitive set.
+function cds_dump_ops (class_name method_name) {
+    $n_slot = "CDS_M_${class_name}_${method_name}_CN"
+    $count = $($n_slot)
+    echo "--- primitive ops for ${class_name}.${method_name} ($count instructions) ---"
+    $idx = "0"
+    while $idx < $count {
+        $op_slot = "CDS_M_${class_name}_${method_name}_C${idx}"
+        echo "  $idx: $($op_slot)"
+        $idx = $idx + 1
+    }
+    echo "--- end ---"
+}
+
+# --- Standard library -----------------------------------------------------
+#
+# The stdlib is cDiesis source, not BSH source. It is compiled by the same
+# pipeline as user code, so anything it can express, user code can express too.
+
+# The standard library is compiled from source on every load. A script that
+# does not need it (a compiler test, say) can skip that work by setting
+# $CDS_STDLIB_ENABLED to "0" before lang_load.
+function cds_load_stdlib () {
+    if $CDS_STDLIB_ENABLED == "0" {
+        echo "cDiesis: standard library skipped (CDS_STDLIB_ENABLED=0)."
+        return
+    }
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $sys_ok = ""
+    $text_ok = ""
+    $coll_ok = ""
+    cds_read_source "cdiesis/lib/system.cds" CDS_STDLIB_SYSTEM
+    cds_compile "stdlib_system" CDS_STDLIB_SYSTEM sys_ok
+
+    cds_read_source "cdiesis/lib/text.cds" CDS_STDLIB_TEXT
+    cds_compile "stdlib_text" CDS_STDLIB_TEXT text_ok
+
+    cds_read_source "cdiesis/lib/collections.cds" CDS_STDLIB_COLLECTIONS
+    cds_compile "stdlib_collections" CDS_STDLIB_COLLECTIONS coll_ok
+
+    if $sys_ok != "1" {
+        echo "cDiesis warning: System library failed to compile"
+    }
+    if $text_ok != "1" {
+        echo "cDiesis warning: Text library failed to compile"
+    }
+    if $coll_ok != "1" {
+        echo "cDiesis warning: Collections library failed to compile"
+    }
+}
+
+# Reads a .cds file relative to this framework's own directory. A caller may
+# pre-load the source into the target variable, in which case the file is not
+# read at all - that is how a unit can be supplied from memory.
+function cds_read_source (path result_var) {
+    $existing = $($result_var)
+    if $existing != "" {
+        return
+    }
+    $full_path = "${CDS_HOME}/${path}"
+    # Built-ins write into the CURRENT scope, so the text is read into a local
+    # and then forwarded to the caller's variable.
+    $__cds_file_text = ""
+    readfile "$full_path" __cds_file_text
+    if $LAST_FILE_STATUS != "0" {
+        echo "cDiesis: could not read '$full_path'"
+        $($result_var) = ""
+        return
+    }
+    $($result_var) = "$__cds_file_text"
+}
+
+# --- Registration ---------------------------------------------------------
+
+lang_register "cdiesis" "$CDIESIS_VERSION" "cdiesis" "cdiesis_on_load" "cdiesis_on_unload" "cds_run" "cds_call"
+
+echo "cDiesis framework registered. Use: lang_load \"cdiesis\" ok"

@@ -7,7 +7,7 @@ This is the fast-access operational reference for the Basic [extensible] Shell (
 Use this source-of-truth order when facts conflict:
 
 1. [`LICENSE`](LICENSE) — legal terms for all repository content.
-2. Executable behavior and interfaces in [`bsh.c`](bsh.c), [`.bshrc`](.bshrc), and [`framework/`](framework/), plus a successful build or focused execution check. There is currently no automated test suite.
+2. Executable behavior and interfaces in [`bsh.c`](bsh.c), [`.bshrc`](.bshrc), and [`framework/`](framework/), plus a successful [`test.sh`](test.sh) run or focused execution check.
 3. [`compile.sh`](compile.sh) and other root build/tool configuration — exact declared workflows for the project implementation.
 4. [`README.md`](README.md) — project intent, vocabulary, and research goals; implementation claims in it must be checked against current source.
 5. [`ROADMAP.md`](ROADMAP.md) — planned B[e]SH work and the Fayasm integration sequence; roadmap entries do not prove implementation.
@@ -48,7 +48,7 @@ When these disagree, inspect the affected control path and run the narrowest saf
 
 ### Research code must be described honestly
 
-- This checkout is experimental and currently does not build. Conceptual framework code and example expectations MUST remain labeled as such until a verified end-to-end path exists.
+- This checkout is experimental. The isolated suite establishes a working core and cDiesis baseline, but untested features and example expectations MUST remain labeled honestly.
 - Behavior in archived material under `gold/` does not establish current project behavior.
 
 ## Critical Implementation Contracts
@@ -91,17 +91,17 @@ Owns the primary shell executable: data structures, tokenizer, runtime operator 
 
 - **Key functions and subparts:** `main` and `initialize_shell` bootstrap scopes, paths, variables, and startup scripts; `advanced_tokenize_line` emits tokens using registered operators; `process_line` dispatches all line forms; `parse_operand`, `parse_expression_recursive`, and `evaluate_expression_from_tokens` evaluate expressions; `handle_*` functions implement built-ins and control flow; `enter_scope`/`leave_scope` and scoped variable helpers own lifetime; `execute_script`, `execute_external_command`, and `execute_user_function` cross execution contexts; object parse/stringify helpers own the flattened representation.
 - **Called by / depends on:** built by [`compile.sh`](compile.sh); loads [`.bshrc`](.bshrc) and modules in [`framework/`](framework/); uses POSIX process APIs and `dlfcn`.
-- **Tests:** no automated tests. Compile with `./compile.sh` and, after it succeeds, exercise a focused script with `./bsh <script>`.
-- **Common mistakes:** Do not add an operator only to C or only to a framework file; do not bypass scoped setters; do not assume capture keeps stderr separate; do not treat comments describing intended behavior as implemented. At this revision line 714 redeclares `fixed_punct_type`, so the build fails before runtime checks.
+- **Tests:** [`test.sh`](test.sh) builds with warnings enabled and runs the isolated suites under [`tests/`](tests/).
+- **Common mistakes:** Do not add an operator only to C or only to a framework file; do not bypass scoped setters; do not assume capture keeps stderr separate; do not treat comments describing intended behavior as implemented.
 
 ### [`.bshrc`](.bshrc)
 
-Repository fallback startup script. It sets `PS1`, aliases `function` to `defunc`, imports the core frameworks, embeds a proposed `bshmath` C library, and defines convenience functions.
+Repository fallback startup script. It sets `PS1`, aliases `function` to `defunc`, imports the core frameworks, selects built-in primitives unless native aliases are already loaded, and defines convenience functions.
 
-- **Key functions and subparts:** imports `c_compiler`, `type`, `core_operators`, conditionally `number`, then `string`; `is_empty`, `scope_test`, `for_loop`, `json_get`, and script-level `return`; embedded `BSH_MATH_C_LIB_SOURCE` declares the expected native ABI.
+- **Key functions and subparts:** imports `c_compiler`, `number`, `type`, `string`, then `core_operators`; selects the optional `bshmath` alias; defines `is_empty`, `scope_test`, and `for_loop`.
 - **Called by / depends on:** selected by `main` only when `$HOME/.bshrc` does not exist; module resolution comes from `BSH_MODULE_PATH`.
-- **Tests:** no focused test. Run from the repository with an isolated `HOME` only after the C build succeeds.
-- **Common mistakes:** `def_c_lib` calls `is_empty` before this file defines it, the compiler framework only simulates writing/compiling, and the file contains a second incomplete math-library definition. Do not describe startup compilation as functional.
+- **Tests:** every suite uses an isolated `HOME` and the repository fallback startup script.
+- **Common mistakes:** startup deliberately does not compile native libraries; numeric and string framework behavior falls back to `prim`.
 
 ### [`framework/core_operators.bsh`](framework/core_operators.bsh)
 
@@ -109,17 +109,17 @@ Registers arithmetic, comparison, increment/decrement, ternary, and dot operator
 
 - **Key functions and subparts:** `defoperator` registrations carry precedence/associativity; `bsh_op_add_or_concat` selects string or number behavior; arithmetic/comparison handlers delegate to `number.bsh`; increment handlers expect a variable name; ternary and dot handlers contain provisional semantics.
 - **Depends on:** [`framework/type.bsh`](framework/type.bsh), [`framework/number.bsh`](framework/number.bsh), and [`framework/string.bsh`](framework/string.bsh).
-- **Tests:** demonstrated incompletely by numeric examples; no automated coverage.
+- **Tests:** arithmetic and comparisons are exercised throughout the core and cDiesis suites; prefix/postfix collision still lacks a focused assertion.
 - **Common mistakes:** Handler arity must match the C dispatcher. Prefix and postfix registration of the same symbol currently collide in C. The `[cite: 124]` text is stray prose, not syntax or evidence.
 
 ### [`framework/c_compiler.bsh`](framework/c_compiler.bsh)
 
-Scaffolds runtime compilation of C source into a shared library.
+Compiles C source held in a BSH variable into a shared library and loads it.
 
-- **Key functions:** `find_compiler` assumes `gcc`; `def_c_lib` derives `/tmp/bsh_compile_cache/<alias>.c` and `.so`, compiler/linker flags, status variables, then calls `loadlib`.
-- **Depends on:** `is_empty` from [`.bshrc`](.bshrc), external compiler intent, writable `/tmp`, and the native ABI in [`bsh.c`](bsh.c).
+- **Key function:** `def_c_lib` derives `/tmp/bsh_compile_cache/<alias>.c` and `.so`, writes source with `writefile`, invokes `cc`, records status variables, then calls `loadlib`.
+- **Depends on:** an external C compiler, writable `/tmp`, and the native ABI in [`bsh.c`](bsh.c).
 - **Tests:** none.
-- **Common mistakes:** Source writing and command execution are comments, while `compile_status` is hard-coded to success. This file does not actually create a library; do not rely on or report its success variables as proof.
+- **Common mistakes:** native compilation is opt-in and executes a trusted external compiler; a status variable is not a substitute for a focused `calllib` check.
 
 ### [`framework/number.bsh`](framework/number.bsh)
 
@@ -175,6 +175,42 @@ Optional simulation of bracket-style object property access over underscore-mang
 - **Tests:** commented examples only.
 - **Common mistakes:** This is object-property sugar, not the core array `_ARRAYIDX_` representation.
 
+### [`framework/lang.bsh`](framework/lang.bsh)
+
+Language-framework manager: registration, load/unload/reload lifecycle, the shared cross-language argument vector, exported-symbol resolution, and the built-in `bsh` pseudo-language. Not imported by [`.bshrc`](.bshrc); loaded on demand by a language framework or a driver script.
+
+- **Key functions:** `lang_register`, `lang_load`, `lang_unload`, `lang_reload`, `lang_is_loaded`/`lang_state`, `lang_arg_reset`/`lang_arg_push`/`lang_arg_get`, `lang_export`/`lang_resolve`, `lang_call`, `lang_eval`, the active-language stack helpers, and `bsh_lang_call`/`bsh_lang_eval`.
+- **Contracts:** cross-language arguments travel in `LANG_ARG_N`/`LANG_ARG_<i>`, never as positional BSH parameters; BSH bridge targets answer through `LANG_RETURN`; a call into an unloaded framework sets `LANG_LAST_ERROR` and fails rather than falling back. `bsh_lang_call` bridges at most four arguments.
+- **Tests:** lifecycle and symmetric cDiesis/RPN calls are covered by [`tests/cdiesis_lifecycle.bsh`](tests/cdiesis_lifecycle.bsh) and [`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh).
+- **Common mistakes:** `lang_unload` cannot remove C-registered keywords or operators; unload is cooperative and depends on each framework's hook actually dropping its tables. Do not describe it as enforced isolation.
+
+### [`framework/cdiesis.bsh`](framework/cdiesis.bsh) and [`framework/cdiesis/`](framework/cdiesis/)
+
+The cDiesis language framework: a C#-shaped, statically typed, class-based language implemented entirely in BSH, whose every construct compiles to a fixed 17-opcode primitive set over shell strings. Design, opcode table, WebAssembly mapping and dependency list live in [`guides/cdiesis.md`](guides/cdiesis.md).
+
+- **Entry module:** [`framework/cdiesis.bsh`](framework/cdiesis.bsh) registers with `lang.bsh` and owns `cdiesis_on_load`/`cdiesis_on_unload`, `cds_compile`, `cds_run`, `cds_call`, `cds_dump_ops`, and stdlib loading.
+- **Submodules:** [`strutil.bsh`](framework/cdiesis/strutil.bsh) (character/field helpers over `string.bsh`), [`types.bsh`](framework/cdiesis/types.bsh) (type table, defaults, assignability, casts, generic name mangling), [`ops.bsh`](framework/cdiesis/ops.bsh) (opcodes, emitter, constant pool, frames, executor, `cds_host_call`), [`objects.bsh`](framework/cdiesis/objects.bsh) (class table, fields, methods, heap, `cds_method_owner` dispatch), [`lexer.bsh`](framework/cdiesis/lexer.bsh), [`parser.bsh`](framework/cdiesis/parser.bsh), [`statements.bsh`](framework/cdiesis/statements.bsh), [`expressions.bsh`](framework/cdiesis/expressions.bsh), [`interop.bsh`](framework/cdiesis/interop.bsh) (`extern` registry, exports, BSH host functions).
+- **Standard library:** [`lib/system.cds`](framework/cdiesis/lib/system.cds), [`lib/text.cds`](framework/cdiesis/lib/text.cds), [`lib/collections.cds`](framework/cdiesis/lib/collections.cds) are cDiesis source compiled by the same pipeline as user code, not BSH.
+- **Contracts:** object references are the string handle `obj#<id>`; instance state is `CDS_H_<id>_F_<field>`; compiled ops are `CDS_M_<Class>_<Method>_C<i>`; literals are interned per unit in `CDS_K_<unit>_<i>`; `CDS_ACTIVE` gates every public entry point after unload. Arithmetic and comparison are delegated to the handlers in [`framework/core_operators.bsh`](framework/core_operators.bsh) so the two languages cannot diverge numerically.
+- **Tests:** [`tests/cdiesis_runtime.bsh`](tests/cdiesis_runtime.bsh) covers compilation, objects, virtual dispatch, control flow, and boundary arguments; [`tests/cdiesis_stdlib.bsh`](tests/cdiesis_stdlib.bsh) runs the stdlib plus `hello.cds`, `shapes.cds`, and `inventory.cds`.
+- **Common mistakes:** Do not add an eighteenth opcode to make a construct work; the fixed set is the point. Do not register cDiesis syntax with `defkeyword`/`defoperator` — doing so would make the framework unremovable. Do not treat the `.cds` files as BSH scripts.
+
+### [`framework/rpn.bsh`](framework/rpn.bsh)
+
+A second, deliberately different loadable language (stack-based, untyped, no compiler) used as the control experiment for the framework mechanism and as the other end of cross-language calls.
+
+- **Key functions:** `rpn_on_load`/`rpn_on_unload`, `rpn_eval`, `rpn_call`, `rpn_define`, `rpn_exec_token`, `rpn_foreign_call`, stack helpers.
+- **Depends on:** [`framework/lang.bsh`](framework/lang.bsh) and [`framework/cdiesis/strutil.bsh`](framework/cdiesis/strutil.bsh) for field splitting and `cds_binary`.
+- **Tests:** [`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh) covers direct calls, callbacks, stack isolation, and independent unload.
+- **Common mistakes:** Its `@lang:symbol/N` form pops arguments in reverse order; do not assume left-to-right pushes.
+
+### [`examples/cdiesis/`](examples/cdiesis/)
+
+Demonstration units and drivers for the language-framework work: [`hello.cds`](examples/cdiesis/hello.cds), [`shapes.cds`](examples/cdiesis/shapes.cds) (inheritance and virtual dispatch), [`inventory.cds`](examples/cdiesis/inventory.cds) (generics, dictionaries, `foreach`), [`interop.cds`](examples/cdiesis/interop.cds), plus the BSH drivers [`run_cdiesis.bsh`](examples/cdiesis/run_cdiesis.bsh) (compile, dump ops, run, unload, reload) and [`mixed_languages.bsh`](examples/cdiesis/mixed_languages.bsh) (BSH ↔ cDiesis ↔ RPN, with a mid-run unload).
+
+- **Status:** demonstrations; `hello.cds`, `shapes.cds`, and `inventory.cds` are also executed by [`tests/cdiesis_stdlib.bsh`](tests/cdiesis_stdlib.bsh).
+- **Common mistakes:** the older drivers assemble source inline, while current tests load `.cds` files through `readfile`.
+
 ### [`examples/basicExample.bsh`](examples/basicExample.bsh)
 
 Demonstrates script-defined loops, mutation helpers, a conceptual C-style loop, and direct `while`.
@@ -203,16 +239,23 @@ Small demonstration of constructing command text and passing it to `eval`, inclu
 Large expectation-oriented demonstration of numeric and string framework APIs.
 
 - **Key subparts:** arithmetic/comparisons, logical negation, type probes, string operations, direct indexing, split loops, and while-loop behavior.
-- **Depends on:** several conceptual or absent native string/math functions and `!`, which is not registered in `core_operators.bsh`.
+- **Depends on:** number/string primitives or optional native aliases and `!`, which is not registered in `core_operators.bsh`.
 - **Status:** conceptual in several sections; comments saying “Expected” do not establish support.
 
 ### [`compile.sh`](compile.sh)
 
-Canonical primary build wrapper: `gcc bsh.c -o bsh -g`.
+Canonical primary build wrapper: `gcc -fno-common bsh.c -o bsh -g`.
 
 - **Produces:** ignored root executable `bsh` with debug symbols.
 - **Tests:** compilation only.
-- **Common mistakes:** The script has no strict shell flags and currently fails at the duplicate declaration in `bsh.c`; a successful command is required before run/debug claims.
+- **Common mistakes:** The script has no strict shell flags and does not run the suite; use [`test.sh`](test.sh) for the acceptance gate.
+
+### [`test.sh`](test.sh) and [`tests/`](tests/)
+
+Build and acceptance harness. It performs a warnings-enabled build, creates an isolated `.test-home`, sets an explicit module path, bounds every `.bsh` suite with an alarm, and accepts only a zero exit with an explicit pass and no failure result; an empty filter match fails.
+
+- **Suites:** core variables/expansion, functions/scopes/recursion, control flow, cDiesis lifecycle, compiler/runtime, standard library and shipped examples, and cDiesis/RPN interop.
+- **Common mistakes:** output before a timeout is buffered per suite; inspect the reported `/tmp/bsh_test_<name>.out` when a suite exits without a result line. Do not weaken silence or timeout into success.
 
 ### [`groupFramework.py`](groupFramework.py)
 
@@ -243,7 +286,7 @@ Pinned external experimental C99 WebAssembly runtime intended for the planned co
 Defines public project identity, philosophy, terminology, intended syntax, and research questions.
 
 - **Authority:** intent and user-facing explanation only; verify feature and command claims in code.
-- **Common mistakes:** It discusses conceptual dynamic-library support and `example.bsh`, while the tracked examples have different names and the current build is broken.
+- **Common mistakes:** It discusses research intent and conceptual surfaces; verify implementation claims against source and tests.
 
 ### [`ROADMAP.md`](ROADMAP.md)
 
@@ -295,6 +338,13 @@ Defines a generic GDB launch configuration that asks for the program name.
 - **Depends on:** a successful debug build and a VS Code GDB extension/environment.
 - **Common mistakes:** This is editor convenience, not proof that GDB is installed or supported on every platform.
 
+### [`guides/cdiesis.md`](guides/cdiesis.md)
+
+Design document for the language-framework layer: cDiesis's architecture, the 17-opcode primitive set with its planned WebAssembly lowering, the type system, the object representation, load/unload semantics, the cross-language boundary, and the enumerated core capabilities (`CDS-REQ-0` … `CDS-REQ-8`) that `bsh.c` must provide before any of it can run.
+
+- **Authority:** design and dependency analysis plus the verified cDiesis contract; production-readiness claims still require evidence beyond this research suite.
+- **Maintenance:** keep the `CDS-REQ` table synchronized with **Known Gaps** here; when a requirement is implemented and verified, update both.
+
 ### [`guides/addToVSCode.md`](guides/addToVSCode.md)
 
 Documents a `settings.json` association mapping `*.bsh` to shell script highlighting.
@@ -318,21 +368,21 @@ MIT license for the repository. Preserve its notice in substantial copies.
 - **Behavior:** accepts a script path or interactive input and dispatches assignments, built-ins, user functions, expressions, and external commands.
 - **Flow and owners:** `main` → `execute_script`/interactive loop → `process_line` in [`bsh.c`](bsh.c).
 - **Constraints:** POSIX process and dynamic-loader APIs; fixed buffer/depth limits; file seeking for loops.
-- **Tests and gaps:** no automated coverage; current source does not compile.
+- **Tests and gaps:** core dispatch, variables, functions, scopes, and control flow are covered; several peripheral built-ins remain untested.
 
 ### Runtime-defined operators — Experimental/scaffold
 
 - **Behavior:** framework scripts register symbols, precedence, associativity, grammatical form, and named BSH handlers.
 - **Flow and owners:** [`.bshrc`](.bshrc) → [`framework/core_operators.bsh`](framework/core_operators.bsh) → `handle_defoperator_statement` → expression parser → `invoke_bsh_operator_handler`.
 - **Constraints:** exact handler arity and result-holder mutation; dependencies on number/string modules.
-- **Tests and gaps:** same-symbol prefix/postfix definitions collide; end-to-end startup is broken.
+- **Tests and gaps:** same-symbol prefix/postfix definitions still collide; startup and the operators used by the suite work end to end.
 
 ### Script functions and lexical scopes — Experimental/scaffold
 
 - **Behavior:** `defunc` stores bodies and parameters; `function` is registered as an alias; invocation creates a local scope.
 - **Flow and owners:** `handle_defunc_statement_advanced` → `UserFunction` list → `execute_user_function` → scope stack.
 - **Constraints:** body lines are replayed with no backing input file; return/block state is global and must be restored.
-- **Tests and gaps:** examples exercise intended behavior but have no assertions.
+- **Tests and gaps:** functions, scopes, returns, recursion, and stored-body loops are asserted in [`tests/core_functions.bsh`](tests/core_functions.bsh).
 
 ### Module imports — Experimental/scaffold
 
@@ -354,6 +404,13 @@ MIT license for the repository. Preserve its notice in substantial copies.
 - **Flow and owners:** `handle_assignment_advanced` → object/array helpers → scoped variables → `expand_variables_in_string_advanced`/`handle_echo_advanced`.
 - **Constraints:** string-only leaves, fixed buffers, underscore collisions, current-scope metadata.
 - **Tests and gaps:** parser is not full JSON; no round-trip tests; bracket object extensions and core arrays use different conventions.
+
+### Loadable language frameworks — Experimental/scaffold
+
+- **Behavior:** [`framework/lang.bsh`](framework/lang.bsh) registers named language frameworks, activates and deactivates them at runtime, and routes calls between them; [`framework/cdiesis.bsh`](framework/cdiesis.bsh) and [`framework/rpn.bsh`](framework/rpn.bsh) are two languages implemented on that lifecycle.
+- **Flow and owners:** `import <framework>` → `lang_register` → `lang_load` → framework `on_load` hook → compile/execute → `lang_call`/`lang_eval` across frameworks → `lang_unload` → framework `on_unload` hook drops its tables.
+- **Constraints:** unload is cooperative because the C core cannot undefine keywords, operators or functions; cross-language values are strings; object handles are opaque outside their owning framework.
+- **Tests and gaps:** lifecycle, compiler/runtime, stdlib/examples, and cross-language calls are covered by the four `tests/cdiesis_*.bsh` suites; unload remains cooperative (`CDS-REQ-7`).
 
 ### Pitfall: trusting startup success messages
 
@@ -390,6 +447,8 @@ MIT license for the repository. Preserve its notice in substantial copies.
 - Standard operator surface → registrations in [`framework/core_operators.bsh`](framework/core_operators.bsh); C parser owns grammar and dispatch, named BSH functions own semantics.
 - Module names → `handle_import_statement` / `find_module_in_path`; default modules live in [`framework/`](framework/).
 - Native extension surface → `loadlib` and `calllib`; ABI defined under **Critical Implementation Contracts**.
+- Language-framework lifecycle and cross-language calls → `lang_register`, `lang_load`, `lang_unload`, `lang_call`, `lang_eval`, `lang_export` in [`framework/lang.bsh`](framework/lang.bsh).
+- cDiesis compile/run/introspect surface → `cds_compile`, `cds_run`, `cds_call`, `cds_dump_ops` in [`framework/cdiesis.bsh`](framework/cdiesis.bsh); the 17 opcodes and their executor are owned by [`framework/cdiesis/ops.bsh`](framework/cdiesis/ops.bsh).
 
 ## Build, Run, Test, Debug, and Release
 
@@ -398,6 +457,7 @@ Primary prerequisites: a POSIX-like environment with a C compiler, standard C/PO
 ```sh
 git submodule update --init --recursive
 ./compile.sh
+./test.sh
 ./bsh
 ./bsh examples/evalExample.bsh
 python3 groupFramework.py
@@ -405,24 +465,24 @@ git diff --check
 ```
 
 - `git submodule update --init --recursive` materializes the pinned Fayasm dependency. It contacts the configured Git remote when objects are absent and does not integrate or build Fayasm into B[e]SH.
-- `./compile.sh` is the canonical debug build and currently fails because `bsh.c` redeclares `fixed_punct_type` in `advanced_tokenize_line`. It also reports unsequenced index warnings and incorrect pointer types in `handle_calllib_statement`.
-- `./bsh` starts interactively; `./bsh <path>` runs a script. These commands are unavailable until compilation succeeds. Startup executes a user `$HOME/.bshrc` preferentially, so use an isolated environment when testing repository startup behavior.
+- `./compile.sh` is the canonical debug build. `./test.sh` performs the stricter warnings-enabled build, creates an isolated `HOME`, sets `BSH_MODULE_PATH`, bounds every suite, and requires an explicit result line.
+- `./bsh` starts interactively; `./bsh <path>` runs a script. Startup executes a user `$HOME/.bshrc` preferentially, so use an isolated environment when testing repository startup behavior.
 - `python3 groupFramework.py` mutates ignored `allFramework.txt`; it is a debug inspection aid, not a build step.
-- Focused and full automated tests, linting, formatting, static analysis, benchmarks, packaging, release, and deployment workflows are not defined.
-- A useful stricter diagnostic build after fixing the blocking error is `gcc -Wall -Wextra -g bsh.c -o bsh`; it is not currently the canonical script command.
+- Linting, formatting, static analysis, benchmarks, packaging, release, and deployment workflows are not defined. The current warnings-enabled suite build is clean on the verified macOS toolchain.
 
 Debugging: [`.vscode/launch.json`](.vscode/launch.json) provides a generic GDB launcher. There is no verified release process or versioning policy; do not infer one from source header comments.
 
 ## Test Ownership Map
 
-- C compilation and warnings → [`compile.sh`](compile.sh), plus optional stricter `gcc -Wall -Wextra -g bsh.c -o bsh`.
-- Startup/module/operator registration → no automated test; [`.bshrc`](.bshrc) and [`framework/core_operators.bsh`](framework/core_operators.bsh) require an isolated startup smoke test.
+- C compilation and warnings → [`compile.sh`](compile.sh) and the stricter build in [`test.sh`](test.sh).
+- Startup/module/operator registration → every suite starts through the isolated repository [`.bshrc`](.bshrc).
 - Evaluation and two-stage expansion → [`examples/evalExample.bsh`](examples/evalExample.bsh), demonstration only.
-- Functions, scopes, and loops → [`examples/basicExample.bsh`](examples/basicExample.bsh), demonstration only.
-- Numeric operators and native ABI → [`examples/enhancedNumbers.bsh`](examples/enhancedNumbers.bsh) and [`examples/strNumExamples.bsh`](examples/strNumExamples.bsh), currently blocked/conceptual.
-- Strings, array indexing, and splitting → the same two examples, with absent native library support.
+- Functions, scopes, and loops → [`tests/core_functions.bsh`](tests/core_functions.bsh) and [`tests/core_control.bsh`](tests/core_control.bsh).
+- Numeric operators → the core and cDiesis suites; native ABI compilation/calls still need a focused automated suite.
+- Basic strings and array indexing → [`tests/core_variables.bsh`](tests/core_variables.bsh) plus the cDiesis stdlib suite; splitting-specific behavior remains demonstration-only.
 - Object flatten/stringify round trips → no focused fixture or test.
-- Module path resolution, external command capture, dynamic loading failures, nesting limits, and cleanup → no focused tests.
+- Module path resolution is exercised by suite imports; external command capture, dynamic loading failures, extreme nesting limits, and global cleanup still lack focused tests.
+- Language-framework lifecycle, cDiesis compilation/execution, stdlib/examples, and cross-language calls → [`tests/cdiesis_lifecycle.bsh`](tests/cdiesis_lifecycle.bsh), [`tests/cdiesis_runtime.bsh`](tests/cdiesis_runtime.bsh), [`tests/cdiesis_stdlib.bsh`](tests/cdiesis_stdlib.bsh), and [`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh).
 
 When fixing behavior, add an automated test harness if practical. Until one exists, make focused scripts fail observably rather than relying only on printed “Expected” comments.
 
@@ -451,20 +511,21 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 
 - The entire primary shell is research-stage.
 - Script-defined operators, framework math/string/type support, runtime C compilation, structured objects, arrays, loop/function behavior, and optional filesystem extensions require focused validation.
+- The language-framework layer ([`framework/lang.bsh`](framework/lang.bsh), [`framework/cdiesis.bsh`](framework/cdiesis.bsh) with [`framework/cdiesis/`](framework/cdiesis/), and [`framework/rpn.bsh`](framework/rpn.bsh)) is an experimental implementation with focused lifecycle, runtime, stdlib/example, and interop coverage.
 - [`gold/bsh-rs/`](gold/bsh-rs/) is archived and excluded from current project scope.
 
 ### Known Gaps
 
-- Primary build failure: duplicate `fixed_punct_type` declaration in `advanced_tokenize_line`.
-- Primary warnings: unsequenced argument index mutation in `process_line` and incompatible pointer types in `handle_calllib_statement`.
-- Startup native compilation is simulated; it does not create `bshmath`, and `def_c_lib` calls `is_empty` before `.bshrc` defines it.
+- Compiler portability beyond the verified warnings-clean macOS toolchain remains untested.
+- Runtime native compilation is opt-in and not covered by the current suite; startup intentionally uses built-in primitives.
 - Prefix/postfix registrations for identical operator strings overwrite each other.
-- String and filesystem native libraries are absent; readiness helpers are conceptual.
-- No automated tests, CI, formatter/linter configuration, packaging, or release workflow exists.
+- Native string and filesystem libraries are absent; number/string operations have a verified `prim` fallback, while the optional filesystem framework remains untested.
+- No CI, formatter/linter configuration, packaging, or release workflow exists.
+- The language layer cannot truly remove syntax: the C core has no `undefkeyword`, `undefoperator`, or function removal, so `lang_unload` is cooperative. Full requirement list: `CDS-REQ-0` … `CDS-REQ-8` in [`guides/cdiesis.md`](guides/cdiesis.md).
 
 ### Planned
 
-- Restore a testable interpreter baseline, introduce stable BSH IR, define a narrow host ABI, and compile supported functions/frameworks to in-memory WebAssembly executed by Fayasm. Follow the phased gates in [`ROADMAP.md`](ROADMAP.md); none of this path is implemented yet.
+- Complete the remaining Phase 0 measurement and dependency-validation work, introduce stable BSH IR, define a narrow host ABI, and compile supported functions/frameworks to in-memory WebAssembly executed by Fayasm. Follow the phased gates in [`ROADMAP.md`](ROADMAP.md); none of the Fayasm path is implemented yet.
 
 ## Task Start and Handoff Checklist
 

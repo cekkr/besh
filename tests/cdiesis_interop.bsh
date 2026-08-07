@@ -1,0 +1,52 @@
+# tests/cdiesis_interop.bsh - Symmetric calls between cDiesis and RPN.
+
+import tests.lib.assert
+assert_start "cDiesis: cross-language calls"
+
+import cdiesis
+import rpn
+$(CDS_STDLIB_ENABLED) = "0"
+lang_load "cdiesis" cds_loaded
+lang_load "rpn" rpn_loaded
+assert_eq "$cds_loaded" "1" "cDiesis loads"
+assert_eq "$rpn_loaded" "1" "RPN loads"
+
+$RPN_DEFS = ": square dup * ; : tripled @cdiesis:Bridge.Triple/1 ;"
+lang_eval "rpn" RPN_DEFS rpn_defs_result
+
+$INTEROP_SRC = ""
+$INTEROP_SRC = "$INTEROP_SRC extern \"rpn\" int square(int value);"
+$INTEROP_SRC = "$INTEROP_SRC class Bridge {"
+$INTEROP_SRC = "$INTEROP_SRC   public static int Triple(int value) { return value * 3; }"
+$INTEROP_SRC = "$INTEROP_SRC }"
+$INTEROP_SRC = "$INTEROP_SRC class InteropMain {"
+$INTEROP_SRC = "$INTEROP_SRC   public static int Main() { return square(9); }"
+$INTEROP_SRC = "$INTEROP_SRC }"
+
+lang_eval "cdiesis" INTEROP_SRC cds_result
+assert_eq "$cds_result" "81" "cDiesis HOST opcode calls an RPN word"
+
+$RPN_CALLBACK = "7 tripled ."
+$callback_result = ""
+lang_eval "rpn" RPN_CALLBACK callback_result
+assert_eq "$callback_result" "21" "RPN calls an exported cDiesis method"
+
+lang_arg_reset
+lang_arg_push "8"
+lang_call "rpn" "square" direct_rpn
+assert_eq "$direct_rpn" "64" "BSH calls RPN through the shared boundary"
+
+lang_unload "rpn" rpn_unloaded
+assert_eq "$rpn_unloaded" "1" "RPN unloads independently"
+lang_arg_reset
+lang_arg_push "8"
+lang_call "rpn" "square" after_unload
+assert_empty "$after_unload" "calls into unloaded RPN are refused"
+assert_contains "$LANG_LAST_ERROR" "not loaded" "unloaded RPN call reports an error"
+
+lang_arg_reset
+lang_arg_push "5"
+lang_call "cdiesis" "Bridge.Triple" cds_still_working
+assert_eq "$cds_still_working" "15" "cDiesis remains active after RPN unload"
+
+assert_summary

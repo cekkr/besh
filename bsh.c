@@ -120,6 +120,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <errno.h>
 #include <limits.h>
 #include <libgen.h>
@@ -128,7 +129,10 @@
 #define MAX_LINE_LENGTH 2048
 #define MAX_ARGS 128
 #define MAX_VAR_NAME_LEN 256
-#define INPUT_BUFFER_SIZE 4096
+#define INPUT_BUFFER_SIZE 16384 // also the cap on a single variable's value
+// Scratch arrays sized [MAX_CALL_ARGS][INPUT_BUFFER_SIZE] are static; keeping
+// this well under MAX_ARGS is what keeps that memory reasonable.
+#define MAX_CALL_ARGS 32
 #define MAX_FULL_PATH_LEN 1024
 #ifndef PATH_MAX
     #ifdef _XOPEN_PATH_MAX
@@ -138,13 +142,13 @@
     #endif
 #endif
 #define TOKEN_STORAGE_SIZE (MAX_LINE_LENGTH * 2) // Should be ample for token text
-#define MAX_NESTING_DEPTH 32
-#define MAX_FUNC_LINES 100
+#define MAX_NESTING_DEPTH 128
+#define MAX_FUNC_LINES 256  // framework parsers contain deliberately large stored bodies
 #define MAX_FUNC_PARAMS 10
 #define MAX_OPERATOR_LEN 16 // Increased for potentially longer operators like "?:"
 #define DEFAULT_STARTUP_SCRIPT ".bshrc"
 #define MAX_KEYWORD_LEN 32
-#define MAX_SCOPE_DEPTH 64
+#define MAX_SCOPE_DEPTH 512  // recursive framework code (parsers) needs real depth
 #define DEFAULT_MODULE_PATH "./framework:~/.bsh_framework:/usr/local/share/bsh/framework"
 #define MAX_EXPRESSION_TOKENS MAX_ARGS // Max tokens in a single expression to be parsed
 
@@ -231,23 +235,79 @@ typedef struct PathDirNode {
 PathDirNode *path_list_head = NULL;
 PathDirNode *module_path_list_head = NULL;
 
+// Modules already imported in this process, so that 'import' is idempotent.
+#define MAX_IMPORTED_MODULES 256
+char imported_modules[MAX_IMPORTED_MODULES][MAX_FULL_PATH_LEN];
+int imported_module_count = 0;
+
 // --- Variable Scoping and Management ---
 typedef struct Variable {
     char name[MAX_VAR_NAME_LEN];
     char *value;
     bool is_array_element;
     int scope_id;
-    struct Variable *next;
+    struct Variable *next;       // next in hash bucket
+    struct Variable *scope_next; // next variable created in the same scope
 } Variable;
-Variable *variable_list_head = NULL;
 
 typedef struct ScopeFrame {
     int scope_id;
+    struct Variable *vars_head; // variables created in this scope, newest first
 } ScopeFrame;
 ScopeFrame scope_stack[MAX_SCOPE_DEPTH];
 int scope_stack_top = -1;
 int next_scope_id = 1;
 #define GLOBAL_SCOPE_ID 0
+
+// Variables live in a hash table keyed by name. A single linked list made
+// every read and write O(number of variables); framework code that builds
+// tables out of mangled names (thousands of entries) turned that into
+// quadratic behaviour. Chaining keeps lookup flat.
+#define VARIABLE_BUCKET_COUNT 4096
+Variable *variable_buckets[VARIABLE_BUCKET_COUNT];
+
+static unsigned long variable_hash(const char* name) {
+    unsigned long hash = 5381UL;
+    for (const unsigned char* p = (const unsigned char*)name; *p; ++p) {
+        hash = ((hash << 5) + hash) + (unsigned long)(*p);
+    }
+    return hash % VARIABLE_BUCKET_COUNT;
+}
+
+// Finds a variable in one specific scope.
+static Variable* variable_find_in_scope(const char* clean_name, int scope_id) {
+    Variable* node = variable_buckets[variable_hash(clean_name)];
+    while (node) {
+        if (node->scope_id == scope_id && strcmp(node->name, clean_name) == 0) return node;
+        node = node->next;
+    }
+    return NULL;
+}
+
+static Variable* variable_create(const char* clean_name, const char* value, bool is_array_elem, int scope_id) {
+    Variable* new_var = (Variable*)malloc(sizeof(Variable));
+    if (!new_var) { perror("malloc for new variable failed"); return NULL; }
+    strncpy(new_var->name, clean_name, MAX_VAR_NAME_LEN - 1); new_var->name[MAX_VAR_NAME_LEN - 1] = '\0';
+    new_var->value = strdup(value);
+    if (!new_var->value) { perror("strdup failed for variable value"); free(new_var); return NULL; }
+    new_var->is_array_element = is_array_elem;
+    new_var->scope_id = scope_id;
+    unsigned long bucket = variable_hash(clean_name);
+    new_var->next = variable_buckets[bucket];
+    variable_buckets[bucket] = new_var;
+
+    // Link into its scope so cleanup is proportional to what the scope created.
+    new_var->scope_next = NULL;
+    for (int i = scope_stack_top; i >= 0; i--) {
+        if (scope_stack[i].scope_id == scope_id) {
+            new_var->scope_next = scope_stack[i].vars_head;
+            scope_stack[i].vars_head = new_var;
+            break;
+        }
+    }
+    return new_var;
+}
+
 
 // --- User-Defined Functions ---
 typedef struct UserFunction {
@@ -261,6 +321,13 @@ typedef struct UserFunction {
 UserFunction *function_list = NULL;
 bool is_defining_function = false;
 UserFunction *current_function_definition = NULL;
+// Depth of blocks opened *inside* the function body currently being captured.
+// Only a '}' seen at depth 0 closes the definition itself.
+int func_def_brace_depth = 0;
+// Guard against an operator handler that (directly or indirectly) uses the
+// operator it implements.
+#define MAX_OPERATOR_HANDLER_DEPTH 48
+int bsh_operator_handler_depth = 0;
 
 
 // --- Execution State and Block Management ---
@@ -271,8 +338,19 @@ typedef enum {
 } ExecutionState;
 ExecutionState current_exec_state = STATE_NORMAL;
 // For 'return' or 'exit' with value
-char bsh_last_return_value[INPUT_BUFFER_SIZE]; 
+char bsh_last_return_value[INPUT_BUFFER_SIZE];
 bool bsh_return_value_is_set = false;
+// 'exit' must terminate the shell/script; 'return' must only unwind the
+// current function body. Both raise STATE_RETURN_REQUESTED, so this flag is
+// what tells them apart.
+bool bsh_exit_requested = false;
+// Set by a '}' that closes a 'while' whose body came from a stored function
+// body rather than a seekable file: the body executor jumps back to this
+// 0-based body line instead of seeking.
+int bsh_pending_body_jump = -1;
+// Offset of the line currently being executed from a script file. A 'while'
+// must resume at its own header - ftell() after fgets() already points past it.
+long bsh_current_line_start_fpos = -1L;
 
 
 typedef enum {
@@ -378,6 +456,12 @@ void handle_update_cwd_statement(Token *tokens, int num_tokens);
 // void handle_unary_op_statement(Token* var_token, Token* op_token, bool is_prefix); // Replaced by generic expression eval
 void handle_exit_statement(Token *tokens, int num_tokens);
 void handle_eval_statement(Token *tokens, int num_tokens);
+void handle_return_statement(Token *tokens, int num_tokens);
+void handle_prim_statement(Token *tokens, int num_tokens);
+void handle_libloaded_statement(Token *tokens, int num_tokens);
+void handle_writefile_statement(Token *tokens, int num_tokens);
+void handle_readfile_statement(Token *tokens, int num_tokens);
+void set_variable_indirect(const char *name_raw, const char *value_to_set, bool is_array_elem);
 
 
 // Block Management
@@ -502,7 +586,7 @@ int match_operator_text(const char *input, const char **op_text) {
     while (current) {
         size_t op_len = strlen(current->op_str);
         if (strncmp(input, current->op_str, op_len) == 0) {
-            if (op_len > longest_match_len) {
+            if ((int)op_len > longest_match_len) {
                 longest_match_len = op_len;
                 best_match_str = current->op_str; // Point to the string in the definition
             }
@@ -667,8 +751,30 @@ int advanced_tokenize_line(const char *line_text, int line_num, Token *tokens, i
                 p++; current_col++;
                 while (*p && *p != '}') { p++; current_col++; }
                 if (*p == '}') { p++; current_col++; }
+            } else if (*p == '(') {
+                // Indirect reference: $(expr) names the variable to read or
+                // write. The inner text is kept verbatim in the token and
+                // resolved later, so it may itself contain expansions.
+                int paren_depth = 0;
+                while (*p) {
+                    if (*p == '(') paren_depth++;
+                    else if (*p == ')') paren_depth--;
+                    p++; current_col++;
+                    if (paren_depth == 0) break;
+                }
             } else {
                 while (isalnum((unsigned char)*p) || *p == '_') { p++; current_col++; }
+                // Array element: keep "$name[index]" in one token so that
+                // assignment and expansion see the same shape.
+                if (*p == '[') {
+                    int bracket_depth = 0;
+                    while (*p) {
+                        if (*p == '[') bracket_depth++;
+                        else if (*p == ']') bracket_depth--;
+                        p++; current_col++;
+                        if (bracket_depth == 0) break;
+                    }
+                }
             }
             add_token_refactored(TOKEN_VARIABLE, var_start, p - var_start, line_num, initial_col_for_token, tokens, max_tokens, &storage_ptr, &remaining_storage, &token_count);
             continue;
@@ -708,8 +814,6 @@ int advanced_tokenize_line(const char *line_text, int line_num, Token *tokens, i
             continue;
         }
         
-        // 5. Punctuation/Structural tokens
-        TokenType fixed_punct_type = TOKEN_EMPTY;
         // 5. Punctuation/Structural tokens
         TokenType fixed_punct_type = TOKEN_EMPTY;
         switch (*p) {
@@ -942,6 +1046,16 @@ bool invoke_bsh_operator_handler(const char* bsh_handler_name_param,
         return false;
     }
 
+    // Operator handlers are ordinary BSH functions, so a handler that uses the
+    // operator it implements would recurse without bound. Fail with a readable
+    // diagnostic instead of exhausting the stack.
+    if (bsh_operator_handler_depth >= MAX_OPERATOR_HANDLER_DEPTH) {
+        fprintf(stderr, "Error: operator handler recursion limit (%d) reached at '%s' for '%s'.\n",
+                MAX_OPERATOR_HANDLER_DEPTH, bsh_handler_name, op_symbol);
+        snprintf(c_result_buffer, c_result_buffer_size, "BSH_HANDLER_RECURSION<%s>", bsh_handler_name);
+        return false;
+    }
+
     // The BSH handler function's parameters should match what C passes.
     // Typically: (op_symbol_str, operand1_str, operand2_str, ..., result_holder_name_str)
     // Total args passed to BSH = actual operands + op_symbol + result_holder_name
@@ -953,8 +1067,8 @@ bool invoke_bsh_operator_handler(const char* bsh_handler_name_param,
         return false;
     }
 
-    Token call_tokens_to_bsh[MAX_ARGS]; // Max args for a user function
-    if (expected_bsh_params > MAX_ARGS) {
+    Token call_tokens_to_bsh[MAX_CALL_ARGS]; // Max args for a user function
+    if (expected_bsh_params > MAX_CALL_ARGS) {
          fprintf(stderr, "Error: Too many arguments for BSH handler call internal limit.\n");
          snprintf(c_result_buffer, c_result_buffer_size, "BSH_HANDLER_ARG_LIMIT_EXCEEDED");
          return false;
@@ -963,7 +1077,9 @@ bool invoke_bsh_operator_handler(const char* bsh_handler_name_param,
     // We need storage for the token text for these dynamic arguments.
     // Let's create a temporary buffer. This is a simplification.
     // A more robust solution would manage this memory more carefully or use a list of allocated strings.
-    char arg_storage_for_bsh_call[MAX_ARGS][INPUT_BUFFER_SIZE]; // Max length for each arg string
+    // Static, not stack: this shell is single-threaded and the buffer is fully
+    // consumed by parameter binding before the called body can re-enter here.
+    static char arg_storage_for_bsh_call[MAX_CALL_ARGS][INPUT_BUFFER_SIZE];
 
     int current_bsh_token_idx = 0;
 
@@ -991,7 +1107,9 @@ bool invoke_bsh_operator_handler(const char* bsh_handler_name_param,
     current_bsh_token_idx++;
 
 
+    bsh_operator_handler_depth++;
     execute_user_function(func, call_tokens_to_bsh, current_bsh_token_idx, NULL); // NULL for file context
+    bsh_operator_handler_depth--;
 
     char* result_from_bsh = get_variable_scoped(result_holder_bsh_var_name);
     if (result_from_bsh) {
@@ -1744,6 +1862,124 @@ bool is_comparison_or_assignment_operator(const char* op_str) {
     return false;
 }
 
+// --- Inline block / statement-separator expansion -------------------------
+//
+// The dispatcher is line-oriented: one statement per line, and a block brace
+// alone on its line. Real scripts want "if $x == \"1\" { $a = \"2\" }" and
+// "call one; call two" too, so a line is first rewritten into the simple form
+// the dispatcher understands:
+//
+//   if $x == "1" { $a = "1"; $b = "2" } else { $c = "3" }
+//     ->  if $x == "1" {  /  $a = "1"  /  $b = "2"  /  } else {  /  $c = "3"  /  }
+//
+// '}' keeps a following 'else' on its own line, because the 'else' handler owns
+// the still-open 'if' frame and must see it unclosed.
+#define MAX_INLINE_STATEMENTS 64
+
+static void inline_split_flush(const char* start, size_t len, char** out, int* count, int max_out) {
+    while (len > 0 && isspace((unsigned char)start[0])) { start++; len--; }
+    while (len > 0 && isspace((unsigned char)start[len - 1])) len--;
+    if (len == 0 || *count >= max_out) return;
+    char* piece = (char*)malloc(len + 1);
+    if (!piece) return;
+    memcpy(piece, start, len);
+    piece[len] = '\0';
+    out[(*count)++] = piece;
+}
+
+static int split_line_into_statements(const char* line, char** out, int max_out) {
+    int count = 0;
+    const char* segment_start = line;
+    const char* p = line;
+    bool in_string = false;
+
+    while (*p) {
+        if (in_string) {
+            if (*p == '\\' && *(p + 1)) { p += 2; continue; }
+            if (*p == '"') in_string = false;
+            p++;
+            continue;
+        }
+        if (*p == '"') { in_string = true; p++; continue; }
+        if (*p == '#') break; // rest of the line is a comment
+
+        if (*p == '{') {
+            p++;
+            inline_split_flush(segment_start, (size_t)(p - segment_start), out, &count, max_out);
+            segment_start = p;
+            continue;
+        }
+        if (*p == ';') {
+            inline_split_flush(segment_start, (size_t)(p - segment_start), out, &count, max_out);
+            p++;
+            segment_start = p;
+            continue;
+        }
+        if (*p == '}') {
+            inline_split_flush(segment_start, (size_t)(p - segment_start), out, &count, max_out);
+            const char* brace_start = p;
+            p++;
+            const char* look = p;
+            while (*look && isspace((unsigned char)*look)) look++;
+            if (strncmp(look, "else", 4) == 0 && (look[4] == '\0' || isspace((unsigned char)look[4]) || look[4] == '{')) {
+                // Keep "} else" together; the '{' rule below closes this piece.
+                segment_start = brace_start;
+                continue;
+            }
+            inline_split_flush(brace_start, (size_t)(p - brace_start), out, &count, max_out);
+            segment_start = p;
+            continue;
+        }
+        p++;
+    }
+    inline_split_flush(segment_start, strlen(segment_start), out, &count, max_out);
+    return count;
+}
+
+// Cheap pre-check: only lines with structure worth splitting pay for the split.
+static bool line_needs_statement_split(const char* line) {
+    bool in_string = false;
+    bool seen_structure = false;
+    for (const char* p = line; *p; ++p) {
+        if (in_string) {
+            if (*p == '\\' && *(p + 1)) { p++; continue; }
+            if (*p == '"') in_string = false;
+            continue;
+        }
+        if (*p == '"') { in_string = true; continue; }
+        if (*p == '#') break;
+        if (*p == ';') return true;
+        if (*p == '{' || *p == '}') {
+            seen_structure = true;
+            // Structure is only interesting when something follows it.
+            const char* look = p + 1;
+            while (*look && isspace((unsigned char)*look)) look++;
+            if (*look != '\0' && *look != '#') return true;
+        }
+    }
+    (void)seen_structure;
+    return false;
+}
+
+// Net '{' minus '}' on a line, ignoring braces inside double-quoted strings and
+// after an unquoted '#'. Used to know which '}' closes a function definition.
+static int count_unquoted_brace_delta(const char* line) {
+    int delta = 0;
+    bool in_string = false;
+    for (const char* p = line; *p; ++p) {
+        if (in_string) {
+            if (*p == '\\' && *(p + 1)) { p++; continue; }
+            if (*p == '"') in_string = false;
+            continue;
+        }
+        if (*p == '"') { in_string = true; continue; }
+        if (*p == '#') break; // comment to end of line
+        if (*p == '{') delta++;
+        else if (*p == '}') delta--;
+    }
+    return delta;
+}
+
 // --- process_line updated to use new expression evaluation ---
 void process_line(char *line_raw, FILE *input_source, int current_line_no, ExecutionState exec_mode_param) {
     char line[MAX_LINE_LENGTH];
@@ -1753,34 +1989,90 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
 
     if (line[0] == '\0') return;
 
-    // ... (function definition body capture remains similar) ...
+    // --- Function definition body capture ---
+    //
+    // Only the '}' that matches the function's own '{' ends the definition.
+    // Braces opened by nested if/else/while blocks are counted so that a body
+    // line starting with '}' is captured as part of the body instead of
+    // truncating the definition there.
     if (is_defining_function && current_function_definition &&
         (current_exec_state == STATE_DEFINE_FUNC_BODY || current_exec_state == STATE_IMPORT_PARSING || exec_mode_param == STATE_IMPORT_PARSING) &&
-        block_stack_top_bf >=0 && peek_block_bf() && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF && 
-        strncmp(line, "}", 1) != 0 && strncmp(line, "}", strlen(line)) != 0 ) { 
+        block_stack_top_bf >=0 && peek_block_bf() && peek_block_bf()->type == BLOCK_TYPE_FUNCTION_DEF) {
 
-        if (current_function_definition->line_count < MAX_FUNC_LINES) {
-            current_function_definition->body[current_function_definition->line_count] = strdup(line);
-            if (!current_function_definition->body[current_function_definition->line_count]) {
-                perror("strdup for function body line failed");
+        bool closes_definition = (line[0] == '}' && func_def_brace_depth == 0);
+        if (!closes_definition) {
+            if (current_function_definition->line_count < MAX_FUNC_LINES) {
+                current_function_definition->body[current_function_definition->line_count] = strdup(line);
+                if (!current_function_definition->body[current_function_definition->line_count]) {
+                    perror("strdup for function body line failed");
+                } else {
+                    current_function_definition->line_count++;
+                }
             } else {
-                current_function_definition->line_count++;
+                fprintf(stderr, "Error: function '%s' exceeds %d body lines; line %d dropped.\n",
+                        current_function_definition->name, MAX_FUNC_LINES, current_line_no);
             }
-        } else { /* ... error handling for too many lines ... */ }
-        return; 
+            func_def_brace_depth += count_unquoted_brace_delta(line);
+            return;
+        }
     }
 
+
+    // Rewrite inline blocks and ';'-separated statements into the one-statement
+    // -per-line form the dispatcher below expects. Done after body capture, so
+    // stored function bodies keep their original text.
+    if (line_needs_statement_split(line)) {
+        char* parts[MAX_INLINE_STATEMENTS];
+        int part_count = split_line_into_statements(line, parts, MAX_INLINE_STATEMENTS);
+        if (part_count > 1) {
+            for (int i = 0; i < part_count; ++i) {
+                process_line(parts[i], input_source, current_line_no, exec_mode_param);
+                // A loop jump or a return abandons the rest of this line.
+                if (bsh_pending_body_jump >= 0 || current_exec_state == STATE_RETURN_REQUESTED) {
+                    for (int j = i; j < part_count; ++j) free(parts[j]);
+                    return;
+                }
+            }
+            for (int i = 0; i < part_count; ++i) free(parts[i]);
+            return;
+        }
+        for (int i = 0; i < part_count; ++i) free(parts[i]);
+    }
 
     Token tokens[MAX_EXPRESSION_TOKENS]; // Max tokens for one line/expression
     char token_storage[TOKEN_STORAGE_SIZE];
     int num_tokens = advanced_tokenize_line(line, current_line_no, tokens, MAX_EXPRESSION_TOKENS, token_storage, TOKEN_STORAGE_SIZE);
 
     if (num_tokens == 0 || tokens[0].type == TOKEN_EMPTY || tokens[0].type == TOKEN_EOF) return;
+
+    // The tokenizer appends a TOKEN_EOF sentinel. It stays in the array (so any
+    // lookahead past the last real token still reads a terminator) but it must
+    // not be counted as an argument: every built-in that checks an exact token
+    // count, and every handler that iterates arguments, would otherwise be off
+    // by one.
+    if (tokens[num_tokens - 1].type == TOKEN_EOF) {
+        num_tokens--;
+        if (num_tokens == 0) return;
+    }
     if (tokens[0].type == TOKEN_COMMENT) return; // Already handled if tokenizer skips comments entirely
+
+    // A pending 'return'/'exit' consumes the rest of the current body: no more
+    // statements run, and the remaining block-closing braces are left for the
+    // body executor to unwind.
+    if (current_exec_state == STATE_RETURN_REQUESTED) return;
 
     // ... ( '{' and '}' handling for blocks remains similar, but ensure exec_state is checked ) ...
     if (tokens[0].type == TOKEN_LBRACE && num_tokens == 1) { handle_opening_brace_token(tokens[0]); return; }
     if (tokens[0].type == TOKEN_RBRACE && num_tokens == 1) { handle_closing_brace_token(tokens[0], input_source); return; }
+
+    // "} else {" and "} else if ... {" on one line. The 'else' handler owns the
+    // open 'if' frame - it inspects it and pops it itself - so the closing
+    // brace must NOT be processed separately here.
+    if (tokens[0].type == TOKEN_RBRACE && num_tokens > 1 &&
+        tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "else") == 0) {
+        handle_else_statement_advanced(&tokens[1], num_tokens - 1, input_source, current_line_no);
+        return;
+    }
 
 
     // ... (current_exec_state == STATE_BLOCK_SKIP logic remains similar) ...
@@ -1826,7 +2118,6 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
         if (tokens[1].type == TOKEN_ASSIGN) { // If '=' is still special TOKEN_ASSIGN
             is_assignment = true;
         } else if (tokens[1].type == TOKEN_OPERATOR) {
-            OperatorDefinition* op_eq = get_operator_definition(tokens[1].text);
             // We need a way to distinguish assignment '=' from comparison '==' if both are TOKEN_OPERATOR.
             // This could be done by a specific op_type_prop for assignment, or by convention in BSH handler.
             // For now, let's assume a BSH script defines "=" with a handler that performs assignment.
@@ -1861,13 +2152,21 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
         else if (strcmp(command_name, "update_cwd") == 0) { handle_update_cwd_statement(tokens, num_tokens); }
         else if (strcmp(command_name, "eval") == 0) { handle_eval_statement(tokens, num_tokens); }
         else if (strcmp(command_name, "exit") == 0) { handle_exit_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "return") == 0) { handle_return_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "prim") == 0) { handle_prim_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "libloaded") == 0) { handle_libloaded_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "writefile") == 0) { handle_writefile_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "readfile") == 0) { handle_readfile_statement(tokens, num_tokens); }
         // Add other built-ins here
         else {
-            UserFunction* func_to_run = function_list; /* ... find func ... */ // Search for the user function (existing code)
-            // while(func_to_run) {
-            // if (strcmp(func_to_run->name, command_name) == 0) break;
-            // func_to_run = func_to_run->next;
-            // }
+            // Resolve the command against the user-function registry. Without
+            // this search every unknown command would run whichever function
+            // happens to sit at the head of the list.
+            UserFunction* func_to_run = function_list;
+            while (func_to_run) {
+                if (strcmp(func_to_run->name, command_name) == 0) break;
+                func_to_run = func_to_run->next;
+            }
 
             if (func_to_run) {
                 // If it's a user function           
@@ -1880,12 +2179,14 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                 if (find_command_in_path_dynamic(tokens[0].text, command_path_ext)) {
                     // Prepare arguments for external command ---
                     char* args[MAX_ARGS + 1];
-                    char arg_buffer[MAX_ARGS][MAX_LINE_LENGTH]; // Buffer to store combined or copied arguments
+                    // Static: process_line recurses, and a per-frame copy of this
+                    // buffer would exhaust the stack within a few nested calls.
+                    static char arg_buffer[MAX_CALL_ARGS][MAX_LINE_LENGTH];
                     int arg_current = 0;
                     args[arg_current++] = command_path_ext; // The command itself
 
                     int i = 1; // Index to iterate through argument tokens
-                    while (i < num_tokens && arg_current < MAX_ARGS) {
+                    while (i < num_tokens && arg_current < MAX_CALL_ARGS) {
                         if (tokens[i].type == TOKEN_COMMENT) break; // Ignore comments
 
                         if (tokens[i].type == TOKEN_OPERATOR && strcmp(tokens[i].text, "-") == 0 &&
@@ -1894,7 +2195,8 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                         ) {
                             // Combine "-" and the next word (e.g., "-option")
                             snprintf(arg_buffer[arg_current -1], MAX_LINE_LENGTH, "-%s", tokens[i + 1].text);
-                            args[arg_current++] = arg_buffer[arg_current-1];
+                            args[arg_current] = arg_buffer[arg_current-1];
+                            arg_current++;
                             i += 2; // Skip the "-" operator and the combined word
                         } else {
                             // Normal argument, expand variables and unescape strings
@@ -1909,7 +2211,8 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                             // Copy the expanded argument into the dedicated buffer
                             strncpy(arg_buffer[arg_current-1], expanded_arg_temp, MAX_LINE_LENGTH -1);
                             arg_buffer[arg_current-1][MAX_LINE_LENGTH-1] = '\0';
-                            args[arg_current++] = arg_buffer[arg_current-1];
+                            args[arg_current] = arg_buffer[arg_current-1];
+                            arg_current++;
                             i++;
                         }
                     }
@@ -2076,13 +2379,13 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                                 char command_path[MAX_FULL_PATH_LEN];
                                 if (find_command_in_path_dynamic(command_name, command_path)) {
                                     char *args[MAX_ARGS + 1];
-                                    char expanded_args_storage[MAX_ARGS][INPUT_BUFFER_SIZE];
+                                    static char expanded_args_storage[MAX_CALL_ARGS][INPUT_BUFFER_SIZE];
                                     args[0] = command_path; 
                                     int arg_count = 1;
 
                                     for (int i = 1; i < num_tokens; ++i) {
                                         if (tokens[i].type == TOKEN_COMMENT) break; 
-                                        if (arg_count < MAX_ARGS) {
+                                        if (arg_count < MAX_CALL_ARGS) {
                                             if (tokens[i].type == TOKEN_STRING) {
                                                 char unescaped_val[INPUT_BUFFER_SIZE];
                                                 unescape_string(tokens[i].text, unescaped_val, sizeof(unescaped_val));
@@ -2090,7 +2393,8 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                                             } else {
                                                 expand_variables_in_string_advanced(tokens[i].text, expanded_args_storage[arg_count-1], INPUT_BUFFER_SIZE);
                                             }
-                                            args[arg_count++] = expanded_args_storage[arg_count-1];
+                                            args[arg_count] = expanded_args_storage[arg_count-1];
+                                            arg_count++;
                                         } else {
                                             fprintf(stderr, "Warning: Too many arguments for command '%s'. Max %d allowed.\n", command_name, MAX_ARGS);
                                             break;
@@ -2142,6 +2446,27 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
     var_token_text_copy[sizeof(var_token_text_copy)-1] = '\0';
 
     char base_var_name[MAX_VAR_NAME_LEN]; char index_str_raw[MAX_VAR_NAME_LEN] = ""; bool is_array_assignment = false;
+
+    // Indirect target: "$(expr) = value" assigns to the variable NAMED by the
+    // expansion of expr. See set_variable_indirect for the scope rule.
+    bool is_indirect_assignment = false;
+    if (var_token_text_copy[0] == '(') {
+        size_t copy_len = strlen(var_token_text_copy);
+        if (copy_len >= 2 && var_token_text_copy[copy_len - 1] == ')') {
+            var_token_text_copy[copy_len - 1] = '\0';
+        }
+        char indirect_target[MAX_VAR_NAME_LEN];
+        expand_variables_in_string_advanced(var_token_text_copy + 1, indirect_target, sizeof(indirect_target));
+        trim_whitespace(indirect_target);
+        if (strlen(indirect_target) == 0) {
+            fprintf(stderr, "Error: indirect assignment target expanded to an empty name.\n");
+            return;
+        }
+        strncpy(var_token_text_copy, indirect_target, sizeof(var_token_text_copy) - 1);
+        var_token_text_copy[sizeof(var_token_text_copy) - 1] = '\0';
+        is_indirect_assignment = true;
+    }
+
     // ... (logic to parse base_var_name and index_str_raw from var_token_text_copy for arrays - similar to original)
     char* bracket_ptr = strchr(var_token_text_copy, '[');
     if (bracket_ptr) {
@@ -2174,15 +2499,12 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
     // Check for "object:" or "json:" prefix on the evaluated RHS result
     bool structured_data_parsed = false;
     const char* data_to_parse = NULL;
-    const char* detected_prefix_str = NULL;
 
     if (strncmp(rhs_value_buffer, OBJECT_STDOUT_PREFIX, strlen(OBJECT_STDOUT_PREFIX)) == 0) {
         data_to_parse = rhs_value_buffer + strlen(OBJECT_STDOUT_PREFIX);
-        detected_prefix_str = OBJECT_STDOUT_PREFIX; //
         structured_data_parsed = true;
     } else if (strncmp(rhs_value_buffer, JSON_STDOUT_PREFIX, strlen(JSON_STDOUT_PREFIX)) == 0) {
         data_to_parse = rhs_value_buffer + strlen(JSON_STDOUT_PREFIX);
-        detected_prefix_str = JSON_STDOUT_PREFIX; //
         structured_data_parsed = true;
     }
 
@@ -2198,6 +2520,8 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
     // Perform the assignment
     if (is_array_assignment) {
         set_array_element_scoped(base_var_name, index_str_raw, rhs_value_buffer);
+    } else if (is_indirect_assignment) {
+        set_variable_indirect(base_var_name, rhs_value_buffer, false);
     } else {
         set_variable_scoped(base_var_name, rhs_value_buffer, false);
     }
@@ -2205,6 +2529,7 @@ void handle_assignment_advanced(Token *tokens, int num_tokens) {
 
 // Conditions for if/while will use evaluate_expression_from_tokens
 void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
+    (void)input_source;
     if (num_tokens < 2) { /* ... syntax error ... */ push_block_bf(BLOCK_TYPE_IF, false, 0, current_line_no); current_exec_state = STATE_BLOCK_SKIP; return; }
 
     bool condition_is_true = false;
@@ -2217,6 +2542,22 @@ void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_sou
 
 
         if (condition_end_idx >= 1) {
+            // Fast path, and the reason the language can bootstrap at all: a
+            // plain "A <comparison> B" condition is decided in C. The BSH
+            // handlers that implement those operators are themselves written
+            // with 'if', so routing every condition through them would recurse
+            // forever. Anything more complex still goes to the full evaluator
+            // and therefore to the script-defined handlers.
+            if (condition_end_idx == 3 && tokens[2].type == TOKEN_OPERATOR &&
+                is_comparison_or_assignment_operator(tokens[2].text) &&
+                strcmp(tokens[2].text, "=") != 0) {
+                condition_is_true = evaluate_condition_advanced(&tokens[1], &tokens[2], &tokens[3]);
+                push_block_bf(BLOCK_TYPE_IF, condition_is_true, 0, current_line_no);
+                if (condition_is_true && current_exec_state != STATE_BLOCK_SKIP) { current_exec_state = STATE_BLOCK_EXECUTE; }
+                else { current_exec_state = STATE_BLOCK_SKIP; }
+                return;
+            }
+
             if (evaluate_expression_from_tokens(&tokens[1], (condition_end_idx - 1) + 1,
                                                 condition_result_str, sizeof(condition_result_str))) {
                 // Evaluate truthiness of condition_result_str
@@ -2326,7 +2667,46 @@ void initialize_shell() {
     }
 }
 
+// The interpreter recurses through C for every nested BSH construct
+// (process_line -> user function -> expression parser -> handler -> ...), and
+// each of those frames carries several INPUT_BUFFER_SIZE scratch buffers.
+// Framework code written as a recursive-descent parser reaches depths the
+// default 8 MB main-thread stack cannot hold, so the shell runs on a thread
+// with a much larger one.
+#define BSH_INTERPRETER_STACK_BYTES (256UL * 1024UL * 1024UL)
+
+typedef struct { int argc; char** argv; int status; } ShellMainArgs;
+static int shell_main(int argc, char *argv[]);
+
+static void* shell_main_thread(void* raw_args) {
+    ShellMainArgs* args = (ShellMainArgs*)raw_args;
+    args->status = shell_main(args->argc, args->argv);
+    return NULL;
+}
+
 int main(int argc, char *argv[]) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) return shell_main(argc, argv);
+    if (pthread_attr_setstacksize(&attr, BSH_INTERPRETER_STACK_BYTES) != 0) {
+        pthread_attr_destroy(&attr);
+        return shell_main(argc, argv);
+    }
+
+    ShellMainArgs args = { argc, argv, 0 };
+    pthread_t thread;
+    if (pthread_create(&thread, &attr, shell_main_thread, &args) != 0) {
+        pthread_attr_destroy(&attr);
+        return shell_main(argc, argv);
+    }
+    pthread_join(thread, NULL);
+    pthread_attr_destroy(&attr);
+    return args.status;
+}
+
+static int shell_main(int argc, char *argv[]) {
+
     initialize_shell(); //
 
     // Execute default startup script
@@ -2428,7 +2808,11 @@ void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_
     bool condition_result = false;
     bool negate_result = false;
     int condition_token_idx = 1;
-    long loop_fpos_at_while_line = get_file_pos(input_source); 
+    // Resume position for the loop: the start of THIS line, so that re-reading
+    // it re-evaluates the condition.
+    long loop_fpos_at_while_line = input_source_is_file(input_source)
+                                 ? bsh_current_line_start_fpos
+                                 : get_file_pos(input_source);
     
     if (current_exec_state != STATE_BLOCK_SKIP) {
         if (tokens[1].type == TOKEN_OPERATOR && strcmp(tokens[1].text, "!") == 0) {
@@ -2487,6 +2871,7 @@ void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_
 }
 
 void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no) {
+    (void)input_source;
     BlockFrame* prev_block_frame = peek_block_bf();
     if (!prev_block_frame || (prev_block_frame->type != BLOCK_TYPE_IF && prev_block_frame->type != BLOCK_TYPE_ELSE)) {
         fprintf(stderr, "Error: 'else' without a preceding 'if' or 'else if' block on line %d.\n", current_line_no);
@@ -2495,8 +2880,14 @@ void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_s
         } return;
     }
 
-    BlockFrame closed_if_or_else_if = *pop_block_bf(); 
+    BlockFrame closed_if_or_else_if = *pop_block_bf();
     bool execute_this_else_branch = false;
+
+    // On arrival the shell is skipping - that is what a false 'if' branch looks
+    // like - so the current state says nothing about whether this 'else' should
+    // run. The enclosing context does: it is the state captured when the 'if'
+    // frame was pushed.
+    bool outer_context_executes = (closed_if_or_else_if.prev_exec_state != STATE_BLOCK_SKIP);
 
     if (closed_if_or_else_if.condition_true) { 
         execute_this_else_branch = false;
@@ -2519,7 +2910,7 @@ void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_s
                     }
                 }
                 if (execute_this_else_branch == false && !(negate_result && num_tokens <4) && !(num_tokens <3) ) { 
-                    if (current_exec_state != STATE_BLOCK_SKIP) { 
+                    if (outer_context_executes) {
                         if (num_tokens >= condition_token_idx + 3 && tokens[condition_token_idx + 1].type == TOKEN_OPERATOR) {
                              execute_this_else_branch = evaluate_condition_advanced(&tokens[condition_token_idx], &tokens[condition_token_idx+1], &tokens[condition_token_idx+2]);
                         } else { 
@@ -2546,12 +2937,13 @@ void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_s
         }
     }
 
-    push_block_bf(BLOCK_TYPE_ELSE, execute_this_else_branch, 0, current_line_no);
-    if (execute_this_else_branch && current_exec_state != STATE_BLOCK_SKIP) { 
-        current_exec_state = STATE_BLOCK_EXECUTE;
-    } else {
-        current_exec_state = STATE_BLOCK_SKIP;
-    }
+    // The frame must record the EFFECTIVE decision, not the branch decision: if
+    // the enclosing context is skipping, this block does not run either, and a
+    // nested block closing inside it must not resurrect execution.
+    bool else_branch_runs = execute_this_else_branch && outer_context_executes;
+    current_exec_state = closed_if_or_else_if.prev_exec_state; // frame records the enclosing state
+    push_block_bf(BLOCK_TYPE_ELSE, else_branch_runs, 0, current_line_no);
+    current_exec_state = else_branch_runs ? STATE_BLOCK_EXECUTE : STATE_BLOCK_SKIP;
 
     int base_token_count_for_brace_check = 1; 
     if (num_tokens > 1 && tokens[1].type == TOKEN_WORD && strcmp(resolve_keyword_alias(tokens[1].text), "if") == 0) { 
@@ -2588,6 +2980,7 @@ void handle_defunc_statement_advanced(Token *tokens, int num_tokens) {
     current_function_definition = (UserFunction*)malloc(sizeof(UserFunction));
     if (!current_function_definition) { perror("malloc for function definition failed"); return; }
     memset(current_function_definition, 0, sizeof(UserFunction));
+    func_def_brace_depth = 0;
     strncpy(current_function_definition->name, tokens[1].text, MAX_VAR_NAME_LEN - 1);
 
     int token_idx = 2;
@@ -2757,7 +3150,8 @@ void handle_calllib_statement(Token *tokens, int num_tokens) {
     typedef int (*lib_func_sig_t)(int, char**, char*, int); 
     lib_func_sig_t target_func = (lib_func_sig_t)func_ptr;
     int lib_argc = num_tokens - 3;
-    char* lib_argv_expanded_storage[MAX_ARGS][INPUT_BUFFER_SIZE]; char* lib_argv[MAX_ARGS + 1];
+    static char lib_argv_expanded_storage[MAX_CALL_ARGS][INPUT_BUFFER_SIZE]; char* lib_argv[MAX_CALL_ARGS + 1];
+    if (lib_argc > MAX_CALL_ARGS) lib_argc = MAX_CALL_ARGS;
     for(int i=0; i < lib_argc; ++i) {
         if (tokens[i+3].type == TOKEN_STRING) { char unescaped[INPUT_BUFFER_SIZE]; unescape_string(tokens[i+3].text, unescaped, sizeof(unescaped)); expand_variables_in_string_advanced(unescaped, lib_argv_expanded_storage[i], INPUT_BUFFER_SIZE);
         } else { expand_variables_in_string_advanced(tokens[i+3].text, lib_argv_expanded_storage[i], INPUT_BUFFER_SIZE); }
@@ -2780,13 +3174,26 @@ void handle_import_statement(Token *tokens, int num_tokens) {
         return;
     }
 
+    // A dotted module name ("cdiesis.strutil") reaches this point as several
+    // tokens, because '.' is an operator to the tokenizer. Rejoin everything
+    // after 'import' into one spec, without inserting spaces.
     char module_spec_expanded[MAX_FULL_PATH_LEN];
-    if (tokens[1].type == TOKEN_STRING) {
-        char unescaped_module_spec[MAX_FULL_PATH_LEN];
-        unescape_string(tokens[1].text, unescaped_module_spec, sizeof(unescaped_module_spec));
-        expand_variables_in_string_advanced(unescaped_module_spec, module_spec_expanded, sizeof(module_spec_expanded));
-    } else { 
-        expand_variables_in_string_advanced(tokens[1].text, module_spec_expanded, sizeof(module_spec_expanded));
+    module_spec_expanded[0] = '\0';
+    size_t spec_len = 0;
+    for (int i = 1; i < num_tokens; ++i) {
+        if (tokens[i].type == TOKEN_COMMENT) break;
+        char part[MAX_FULL_PATH_LEN];
+        if (tokens[i].type == TOKEN_STRING) {
+            char unescaped_part[MAX_FULL_PATH_LEN];
+            unescape_string(tokens[i].text, unescaped_part, sizeof(unescaped_part));
+            expand_variables_in_string_advanced(unescaped_part, part, sizeof(part));
+        } else {
+            expand_variables_in_string_advanced(tokens[i].text, part, sizeof(part));
+        }
+        size_t part_len = strlen(part);
+        if (spec_len + part_len >= sizeof(module_spec_expanded)) break;
+        memcpy(module_spec_expanded + spec_len, part, part_len + 1);
+        spec_len += part_len;
     }
     
     if (strlen(module_spec_expanded) == 0) {
@@ -2796,6 +3203,18 @@ void handle_import_statement(Token *tokens, int num_tokens) {
 
     char full_module_path[MAX_FULL_PATH_LEN];
     if (find_module_in_path(module_spec_expanded, full_module_path)) {
+        // Import once per process. Modules mutate global registries, so
+        // re-executing one on every 'import' would re-register everything and
+        // make a module graph cost exponential time.
+        for (int i = 0; i < imported_module_count; ++i) {
+            if (strcmp(imported_modules[i], full_module_path) == 0) return;
+        }
+        if (imported_module_count < MAX_IMPORTED_MODULES) {
+            strncpy(imported_modules[imported_module_count], full_module_path, MAX_FULL_PATH_LEN - 1);
+            imported_modules[imported_module_count][MAX_FULL_PATH_LEN - 1] = '\0';
+            imported_module_count++;
+        }
+
         ExecutionState previous_exec_state = current_exec_state;
         current_exec_state = STATE_IMPORT_PARSING; 
 
@@ -2816,6 +3235,7 @@ void handle_defkeyword_statement(Token *tokens, int num_tokens) {
 }
 
 void handle_update_cwd_statement(Token *tokens, int num_tokens) {
+    (void)tokens;
     if (current_exec_state == STATE_BLOCK_SKIP) return;
 
     if (num_tokens != 1) {
@@ -2995,6 +3415,7 @@ BlockFrame* peek_block_bf() {
 }
 
 void handle_opening_brace_token(Token token) {
+    (void)token;
     BlockFrame* current_block_frame = peek_block_bf();
     if (!current_block_frame) { 
         if (is_defining_function && current_function_definition && current_exec_state != STATE_BLOCK_SKIP) {
@@ -3010,6 +3431,7 @@ void handle_opening_brace_token(Token token) {
 }
 
 void handle_closing_brace_token(Token token, FILE* input_source) {
+    (void)token;
     BlockFrame* closed_block_frame = pop_block_bf();
     if (!closed_block_frame) { fprintf(stderr, "Error: '}' found without a matching open block.\n"); current_exec_state = STATE_NORMAL; return; }
 
@@ -3019,23 +3441,23 @@ void handle_closing_brace_token(Token token, FILE* input_source) {
     if (closed_block_frame->type == BLOCK_TYPE_WHILE && closed_block_frame->condition_true && 
         (current_exec_state == STATE_BLOCK_EXECUTE || current_exec_state == STATE_NORMAL || current_exec_state == STATE_IMPORT_PARSING) ) { 
         
-        bool can_loop_via_fseek = false;
         if (input_source_is_file(input_source) && closed_block_frame->loop_start_fpos != -1) {
              // Before seeking, re-evaluate the condition. This requires re-tokenizing the while header.
              // This is a complex part. A simpler (but less flexible) model is to just seek.
              // For now, we'll stick to the seek model, assuming the condition might change due to side effects in the loop.
             if (fseek(input_source, closed_block_frame->loop_start_fpos, SEEK_SET) == 0) {
-                can_loop_via_fseek = true;
                 current_exec_state = STATE_NORMAL; // Allow re-processing of the while line by execute_script
                 return; 
             } else { 
                 perror("fseek failed for while loop"); 
             }
-        } else if (!input_source_is_file(input_source) && closed_block_frame->loop_start_line_no > 0) { 
-             // This case is for loops inside function bodies (not read from file)
-             // True looping here would require re-executing the function lines from the loop header.
-             // This is not implemented by simple fseek.
-             fprintf(stderr, "Warning: 'while' loop repetition for non-file input (e.g. function body, line %d) is not supported by fseek. Loop will terminate.\n", closed_block_frame->loop_start_line_no);
+        } else if (!input_source_is_file(input_source) && closed_block_frame->loop_start_line_no > 0) {
+             // Loops inside a stored function body have no file to seek in, so
+             // the body executor replays lines by index instead. Record the
+             // 'while' header line (stored 1-based) as the jump target.
+             bsh_pending_body_jump = closed_block_frame->loop_start_line_no - 1;
+             current_exec_state = STATE_NORMAL;
+             return;
         }
     }
 
@@ -3070,6 +3492,371 @@ void handle_closing_brace_token(Token token, FILE* input_source) {
     }
 }
 
+// 'return' leaves the innermost function (or the running script) without
+// terminating the shell. It is a built-in rather than a framework function
+// because only the C core knows where the current body ends.
+void handle_return_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+
+    if (num_tokens > 1) {
+        char return_buffer[INPUT_BUFFER_SIZE];
+        if (evaluate_expression_from_tokens(&tokens[1], num_tokens - 1, return_buffer, sizeof(return_buffer))) {
+            strncpy(bsh_last_return_value, return_buffer, sizeof(bsh_last_return_value) - 1);
+            bsh_last_return_value[sizeof(bsh_last_return_value) - 1] = '\0';
+            bsh_return_value_is_set = true;
+        }
+    } else {
+        bsh_last_return_value[0] = '\0';
+        bsh_return_value_is_set = false;
+    }
+    current_exec_state = STATE_RETURN_REQUESTED;
+}
+
+// --- Primitive operations ---------------------------------------------------
+//
+// 'prim <op> <args...> <result_var>' exposes the handful of operations that
+// cannot be written in BSH itself: numeric arithmetic and comparison over
+// string values, and character-level string access. It is mechanism, not
+// policy - which operator symbol maps to which primitive stays in
+// framework/core_operators.bsh, and the frameworks prefer a loaded native
+// library when one is available (see 'libloaded').
+//
+// The result is written into the CURRENT scope; forward it with "$(name) = ..."
+// when a caller-visible answer is wanted.
+
+static bool prim_parse_number(const char* text, double* out) {
+    if (!text || *text == '\0') return false;
+    char* end = NULL;
+    errno = 0;
+    double value = strtod(text, &end);
+    if (end == text || (end && *end != '\0')) return false;
+    *out = value;
+    return true;
+}
+
+static bool prim_text_is_integer(const char* text) {
+    if (!text || *text == '\0') return false;
+    char* end = NULL;
+    strtol(text, &end, 10);
+    return end && *end == '\0';
+}
+
+static void prim_format_number(double value, char* buffer, size_t size) {
+    if (value < 1e15 && value > -1e15 && value == (double)(long long)value) {
+        snprintf(buffer, size, "%lld", (long long)value);
+    } else {
+        snprintf(buffer, size, "%.10g", value);
+    }
+}
+
+static bool prim_truthy(const char* text) {
+    if (!text || *text == '\0') return false;
+    if (strcmp(text, "0") == 0 || strcmp(text, "false") == 0 || strcmp(text, "null") == 0) return false;
+    return true;
+}
+
+// Returns false when the operation name is unknown.
+static bool prim_dispatch(const char* op, char args[][INPUT_BUFFER_SIZE], int argc,
+                          char* out, size_t out_size) {
+    double a = 0.0, b = 0.0;
+    bool a_num = (argc > 0) && prim_parse_number(args[0], &a);
+    bool b_num = (argc > 1) && prim_parse_number(args[1], &b);
+    bool both_int = (argc > 1) && prim_text_is_integer(args[0]) && prim_text_is_integer(args[1]);
+
+    if (strcmp(op, "add") == 0 || strcmp(op, "sub") == 0 ||
+        strcmp(op, "mul") == 0 || strcmp(op, "div") == 0 || strcmp(op, "mod") == 0) {
+        if (argc < 2 || !a_num || !b_num) {
+            snprintf(out, out_size, "PRIM_ERR_NAN");
+            return true;
+        }
+        if (strcmp(op, "div") == 0 && b == 0.0) { snprintf(out, out_size, "PRIM_ERR_DIV0"); return true; }
+        if (strcmp(op, "mod") == 0) {
+            if (!both_int) { snprintf(out, out_size, "PRIM_ERR_NOT_INT"); return true; }
+            long long ib = (long long)b;
+            if (ib == 0) { snprintf(out, out_size, "PRIM_ERR_DIV0"); return true; }
+            snprintf(out, out_size, "%lld", (long long)a % ib);
+            return true;
+        }
+        double result = 0.0;
+        if (strcmp(op, "add") == 0) result = a + b;
+        else if (strcmp(op, "sub") == 0) result = a - b;
+        else if (strcmp(op, "mul") == 0) result = a * b;
+        else result = a / b;
+        prim_format_number(result, out, out_size);
+        return true;
+    }
+
+    if (strcmp(op, "eq") == 0 || strcmp(op, "ne") == 0 || strcmp(op, "lt") == 0 ||
+        strcmp(op, "gt") == 0 || strcmp(op, "le") == 0 || strcmp(op, "ge") == 0) {
+        if (argc < 2) { snprintf(out, out_size, "0"); return true; }
+        int cmp;
+        if (a_num && b_num) cmp = (a < b) ? -1 : ((a > b) ? 1 : 0);
+        else {
+            int raw = strcmp(args[0], args[1]);
+            cmp = (raw < 0) ? -1 : ((raw > 0) ? 1 : 0);
+        }
+        int truth = 0;
+        if (strcmp(op, "eq") == 0) truth = (cmp == 0);
+        else if (strcmp(op, "ne") == 0) truth = (cmp != 0);
+        else if (strcmp(op, "lt") == 0) truth = (cmp < 0);
+        else if (strcmp(op, "gt") == 0) truth = (cmp > 0);
+        else if (strcmp(op, "le") == 0) truth = (cmp <= 0);
+        else truth = (cmp >= 0);
+        snprintf(out, out_size, "%d", truth);
+        return true;
+    }
+
+    if (strcmp(op, "neg") == 0) {
+        if (!a_num) { snprintf(out, out_size, "PRIM_ERR_NAN"); return true; }
+        prim_format_number(-a, out, out_size);
+        return true;
+    }
+    if (strcmp(op, "abs") == 0) {
+        if (!a_num) { snprintf(out, out_size, "PRIM_ERR_NAN"); return true; }
+        prim_format_number(a < 0 ? -a : a, out, out_size);
+        return true;
+    }
+    if (strcmp(op, "trunc") == 0) {
+        if (!a_num) { snprintf(out, out_size, "0"); return true; }
+        snprintf(out, out_size, "%lld", (long long)a);
+        return true;
+    }
+    if (strcmp(op, "not") == 0) {
+        snprintf(out, out_size, "%d", (argc > 0 && prim_truthy(args[0])) ? 0 : 1);
+        return true;
+    }
+    if (strcmp(op, "truthy") == 0) {
+        snprintf(out, out_size, "%d", (argc > 0 && prim_truthy(args[0])) ? 1 : 0);
+        return true;
+    }
+    if (strcmp(op, "isint") == 0) {
+        snprintf(out, out_size, "%d", (argc > 0 && prim_text_is_integer(args[0])) ? 1 : 0);
+        return true;
+    }
+    if (strcmp(op, "isfloat") == 0 || strcmp(op, "isnum") == 0) {
+        snprintf(out, out_size, "%d", a_num ? 1 : 0);
+        return true;
+    }
+
+    if (strcmp(op, "len") == 0) {
+        snprintf(out, out_size, "%d", (argc > 0) ? (int)strlen(args[0]) : 0);
+        return true;
+    }
+    if (strcmp(op, "charat") == 0) {
+        long index = (argc > 1) ? strtol(args[1], NULL, 10) : -1;
+        int length = (argc > 0) ? (int)strlen(args[0]) : 0;
+        if (argc < 2 || index < 0 || index >= length) { out[0] = '\0'; return true; }
+        snprintf(out, out_size, "%c", args[0][index]);
+        return true;
+    }
+    if (strcmp(op, "substr") == 0) {
+        if (argc < 3) { out[0] = '\0'; return true; }
+        long start = strtol(args[1], NULL, 10);
+        long count = strtol(args[2], NULL, 10);
+        long length = (long)strlen(args[0]);
+        if (start < 0) start = 0;
+        if (start > length) start = length;
+        if (count < 0) count = 0;
+        if (start + count > length) count = length - start;
+        if ((size_t)count >= out_size) count = (long)out_size - 1;
+        memcpy(out, args[0] + start, (size_t)count);
+        out[count] = '\0';
+        return true;
+    }
+    if (strcmp(op, "indexof") == 0) {
+        if (argc < 2) { snprintf(out, out_size, "-1"); return true; }
+        const char* found = strstr(args[0], args[1]);
+        snprintf(out, out_size, "%ld", found ? (long)(found - args[0]) : -1L);
+        return true;
+    }
+    if (strcmp(op, "concat") == 0) {
+        snprintf(out, out_size, "%s%s", (argc > 0) ? args[0] : "", (argc > 1) ? args[1] : "");
+        return true;
+    }
+    if (strcmp(op, "fieldcount") == 0) {
+        int count = 0; bool in_field = false;
+        for (const char* p = (argc > 0) ? args[0] : ""; *p; ++p) {
+            if (isspace((unsigned char)*p)) in_field = false;
+            else if (!in_field) { in_field = true; count++; }
+        }
+        snprintf(out, out_size, "%d", count);
+        return true;
+    }
+    if (strcmp(op, "field") == 0) {
+        long want = (argc > 1) ? strtol(args[1], NULL, 10) : -1;
+        long current = -1; bool in_field = false;
+        const char* start = NULL;
+        for (const char* p = (argc > 0) ? args[0] : ""; ; ++p) {
+            bool at_space = (*p == '\0') || isspace((unsigned char)*p);
+            if (!at_space && !in_field) { in_field = true; current++; start = p; }
+            else if (at_space && in_field) {
+                in_field = false;
+                if (current == want) {
+                    size_t len = (size_t)(p - start);
+                    if (len >= out_size) len = out_size - 1;
+                    memcpy(out, start, len); out[len] = '\0';
+                    return true;
+                }
+            }
+            if (*p == '\0') break;
+        }
+        out[0] = '\0';
+        return true;
+    }
+    if (strcmp(op, "streq") == 0) {
+        snprintf(out, out_size, "%d", (argc > 1 && strcmp(args[0], args[1]) == 0) ? 1 : 0);
+        return true;
+    }
+
+    return false;
+}
+
+void handle_prim_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+    if (num_tokens < 3) {
+        fprintf(stderr, "Syntax: prim <op> [args...] <result_var_name>\n");
+        return;
+    }
+
+    static char expanded[MAX_CALL_ARGS][INPUT_BUFFER_SIZE];
+    int expanded_count = 0;
+    for (int i = 1; i < num_tokens && expanded_count < MAX_CALL_ARGS; ++i) {
+        if (tokens[i].type == TOKEN_COMMENT) break;
+        if (tokens[i].type == TOKEN_STRING) {
+            char unescaped[INPUT_BUFFER_SIZE];
+            unescape_string(tokens[i].text, unescaped, sizeof(unescaped));
+            expand_variables_in_string_advanced(unescaped, expanded[expanded_count], INPUT_BUFFER_SIZE);
+        } else {
+            expand_variables_in_string_advanced(tokens[i].text, expanded[expanded_count], INPUT_BUFFER_SIZE);
+        }
+        expanded_count++;
+    }
+    if (expanded_count < 2) {
+        fprintf(stderr, "prim: missing result variable name.\n");
+        return;
+    }
+
+    char op[MAX_VAR_NAME_LEN];
+    strncpy(op, expanded[0], sizeof(op) - 1); op[sizeof(op) - 1] = '\0';
+    char result_var[MAX_VAR_NAME_LEN];
+    strncpy(result_var, expanded[expanded_count - 1], sizeof(result_var) - 1);
+    result_var[sizeof(result_var) - 1] = '\0';
+    trim_whitespace(result_var);
+
+    char result_buffer[INPUT_BUFFER_SIZE];
+    result_buffer[0] = '\0';
+    if (!prim_dispatch(op, &expanded[1], expanded_count - 2, result_buffer, sizeof(result_buffer))) {
+        fprintf(stderr, "prim: unknown operation '%s'.\n", op);
+        snprintf(result_buffer, sizeof(result_buffer), "PRIM_ERR_UNKNOWN_OP");
+    }
+    set_variable_scoped(result_var, result_buffer, false);
+}
+
+// --- File primitives --------------------------------------------------------
+//
+// 'writefile <path> <content_var_name>' and 'readfile <path> <result_var_name>'
+// move whole variable values to and from disk. They take VARIABLE NAMES rather
+// than values because file contents routinely exceed what one expanded
+// argument should carry, and because that keeps newlines intact.
+
+void handle_writefile_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+    if (num_tokens < 3) { fprintf(stderr, "Syntax: writefile <path> <content_var_name>\n"); return; }
+
+    char path[MAX_FULL_PATH_LEN];
+    char content_var[MAX_VAR_NAME_LEN];
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped[MAX_FULL_PATH_LEN];
+        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, path, sizeof(path));
+    } else {
+        expand_variables_in_string_advanced(tokens[1].text, path, sizeof(path));
+    }
+    expand_variables_in_string_advanced(tokens[2].text, content_var, sizeof(content_var));
+    trim_whitespace(path); trim_whitespace(content_var);
+
+    char* content = get_variable_scoped(content_var);
+    FILE* out = fopen(path, "w");
+    if (!out) {
+        fprintf(stderr, "writefile: cannot open '%s': %s\n", path, strerror(errno));
+        set_variable_scoped("LAST_FILE_STATUS", "1", false);
+        return;
+    }
+    if (content) fputs(content, out);
+    fclose(out);
+    set_variable_scoped("LAST_FILE_STATUS", "0", false);
+}
+
+void handle_readfile_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+    if (num_tokens < 3) { fprintf(stderr, "Syntax: readfile <path> <result_var_name>\n"); return; }
+
+    char path[MAX_FULL_PATH_LEN];
+    char result_var[MAX_VAR_NAME_LEN];
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped[MAX_FULL_PATH_LEN];
+        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, path, sizeof(path));
+    } else {
+        expand_variables_in_string_advanced(tokens[1].text, path, sizeof(path));
+    }
+    expand_variables_in_string_advanced(tokens[2].text, result_var, sizeof(result_var));
+    trim_whitespace(path); trim_whitespace(result_var);
+
+    FILE* in = fopen(path, "r");
+    if (!in) {
+        fprintf(stderr, "readfile: cannot open '%s': %s\n", path, strerror(errno));
+        set_variable_scoped("LAST_FILE_STATUS", "1", false);
+        set_variable_scoped(result_var, "", false);
+        return;
+    }
+
+    size_t capacity = INPUT_BUFFER_SIZE * 16;
+    char* buffer = (char*)malloc(capacity);
+    if (!buffer) { fclose(in); perror("readfile: malloc"); return; }
+    size_t used = 0;
+    int ch;
+    while ((ch = fgetc(in)) != EOF) {
+        if (used + 1 >= capacity) {
+            size_t new_capacity = capacity * 2;
+            char* grown = (char*)realloc(buffer, new_capacity);
+            if (!grown) { free(buffer); fclose(in); perror("readfile: realloc"); return; }
+            buffer = grown; capacity = new_capacity;
+        }
+        buffer[used++] = (char)ch;
+    }
+    buffer[used] = '\0';
+    fclose(in);
+
+    if (used >= INPUT_BUFFER_SIZE) {
+        fprintf(stderr, "readfile: '%s' is %zu bytes; values are capped at %d and it will be truncated.\n",
+                path, used, INPUT_BUFFER_SIZE - 1);
+    }
+    set_variable_scoped(result_var, buffer, false);
+    set_variable_scoped("LAST_FILE_STATUS", "0", false);
+    free(buffer);
+}
+
+// 'libloaded <alias> <result_var>' lets a framework choose between a native
+// implementation and the built-in primitives without guessing.
+void handle_libloaded_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+    if (num_tokens < 3) { fprintf(stderr, "Syntax: libloaded <alias> <result_var_name>\n"); return; }
+
+    char alias[MAX_VAR_NAME_LEN], result_var[MAX_VAR_NAME_LEN];
+    expand_variables_in_string_advanced(tokens[1].text, alias, sizeof(alias));
+    expand_variables_in_string_advanced(tokens[2].text, result_var, sizeof(result_var));
+    trim_whitespace(alias); trim_whitespace(result_var);
+
+    DynamicLib* entry = loaded_libs;
+    const char* answer = "0";
+    while (entry) {
+        if (strcmp(entry->alias, alias) == 0) { answer = "1"; break; }
+        entry = entry->next;
+    }
+    set_variable_scoped(result_var, answer, false);
+}
+
 void handle_exit_statement(Token *tokens, int num_tokens) {
     if (current_exec_state == STATE_BLOCK_SKIP && current_exec_state != STATE_IMPORT_PARSING) {
          // If skipping, an exit within that block context might also be skipped,
@@ -3086,6 +3873,7 @@ void handle_exit_statement(Token *tokens, int num_tokens) {
     // If called from the top-level interactive loop, main() would handle it.
     bsh_last_return_value[0] = '\0'; // 'exit' itself doesn't set a printable return value here
     bsh_return_value_is_set = false; // 'exit' is about termination status, not typical 'return value' for echo
+    bsh_exit_requested = true;       // distinguishes 'exit' from 'return' while unwinding
 
     if (num_tokens > 1) { // exit <status_code>
         char expanded_status[INPUT_BUFFER_SIZE];
@@ -3266,21 +4054,52 @@ void execute_script(const char *filename, bool is_import_call, bool is_startup_s
     char line_buffer[INPUT_BUFFER_SIZE]; int line_no = 0;
     ExecutionState script_exec_mode = is_import_call ? STATE_IMPORT_PARSING : STATE_NORMAL;
 
+    // Expose where this script lives, so a module can find files shipped beside
+    // it (a framework's own library sources, for instance). Saved and restored
+    // so nested scripts and imports see their own location.
+    char* previous_script_path = get_variable_scoped("BSH_SCRIPT_PATH");
+    char* previous_script_dir = get_variable_scoped("BSH_SCRIPT_DIR");
+    char saved_script_path[MAX_FULL_PATH_LEN]; saved_script_path[0] = '\0';
+    char saved_script_dir[MAX_FULL_PATH_LEN]; saved_script_dir[0] = '\0';
+    if (previous_script_path) { strncpy(saved_script_path, previous_script_path, sizeof(saved_script_path) - 1); saved_script_path[sizeof(saved_script_path)-1] = '\0'; }
+    if (previous_script_dir) { strncpy(saved_script_dir, previous_script_dir, sizeof(saved_script_dir) - 1); saved_script_dir[sizeof(saved_script_dir)-1] = '\0'; }
+
+    char script_dir[MAX_FULL_PATH_LEN];
+    strncpy(script_dir, filename, sizeof(script_dir) - 1); script_dir[sizeof(script_dir) - 1] = '\0';
+    char* last_slash = strrchr(script_dir, '/');
+    if (last_slash) *last_slash = '\0'; else strcpy(script_dir, ".");
+    set_variable_indirect("BSH_SCRIPT_PATH", filename, false);
+    set_variable_indirect("BSH_SCRIPT_DIR", script_dir, false);
+
     ExecutionState outer_exec_state_backup = current_exec_state;
     int outer_block_stack_top_bf_backup = block_stack_top_bf;
     bool restore_context = (!is_import_call && !is_startup_script);
 
+    long outer_line_start_fpos = bsh_current_line_start_fpos;
     while (true) {
+        long this_line_start = ftell(script_file);
         if (!fgets(line_buffer, sizeof(line_buffer), script_file)) {
             if (feof(script_file)) break; 
             if (ferror(script_file)) { perror("Error reading script file"); break; }
         }
         line_no++;
+        bsh_current_line_start_fpos = this_line_start;
         process_line(line_buffer, script_file, line_no, script_exec_mode);
+
+        // A top-level 'return' ends this script; 'exit' ends the shell and is
+        // propagated by leaving the state raised.
+        if (current_exec_state == STATE_RETURN_REQUESTED) {
+            if (!bsh_exit_requested) current_exec_state = STATE_NORMAL;
+            break;
+        }
     }
     fclose(script_file);
+    bsh_current_line_start_fpos = outer_line_start_fpos;
 
-    if (is_import_call) { 
+    set_variable_indirect("BSH_SCRIPT_PATH", saved_script_path, false);
+    set_variable_indirect("BSH_SCRIPT_DIR", saved_script_dir, false);
+
+    if (is_import_call) {
         if (is_defining_function && current_function_definition) {
             fprintf(stderr, "Warning: Unterminated function definition '%s' at end of imported file '%s'.\n", current_function_definition->name, filename);
             for(int i=0; i < current_function_definition->line_count; ++i) if(current_function_definition->body[i]) free(current_function_definition->body[i]);
@@ -3477,10 +4296,12 @@ bool build_object_string_recursive(const char* current_base_name, char** p_out, 
 
     VarPair* pairs_head = NULL;
     VarPair* pairs_tail = NULL;
-    int element_count = 0;
 
-    // Step 1: Collect all direct children of current_base_name in the current scope
-    Variable* var_node = variable_list_head;
+    // Step 1: Collect all direct children of current_base_name in the current
+    // scope. Object stringification is the one operation that must scan every
+    // variable, so it walks all hash buckets.
+    for (int bucket = 0; bucket < VARIABLE_BUCKET_COUNT; ++bucket) {
+    Variable* var_node = variable_buckets[bucket];
     while (var_node) {
         if (var_node->scope_id == scope_id && strncmp(var_node->name, prefix_pattern, prefix_len) == 0) {
             const char* sub_key_full = var_node->name + prefix_len;
@@ -3523,12 +4344,12 @@ bool build_object_string_recursive(const char* current_base_name, char** p_out, 
                 
                 if (!pairs_head) pairs_head = pairs_tail = new_pair;
                 else { pairs_tail->next = new_pair; pairs_tail = new_pair; }
-                element_count++;
             }
         }
         var_node = var_node->next;
     }
-    
+    } // end bucket walk
+
     // Step 1b: For keys found via _BSH_STRUCT_TYPE, find their actual value if they are simple
     // (This logic might need refinement if a key is ONLY defined by its _BSH_STRUCT_TYPE but has no direct value, implying it's purely a container)
     for(VarPair* vp = pairs_head; vp; vp = vp->next) {
@@ -3723,6 +4544,7 @@ int enter_scope() {
     scope_stack_top++;
     scope_stack[scope_stack_top].scope_id = (scope_stack_top == 0 && next_scope_id == 1) ? GLOBAL_SCOPE_ID : next_scope_id++;
     if (scope_stack_top == 0) scope_stack[scope_stack_top].scope_id = GLOBAL_SCOPE_ID;
+    scope_stack[scope_stack_top].vars_head = NULL;
 
     return scope_stack[scope_stack_top].scope_id;
 }
@@ -3746,38 +4568,50 @@ void leave_scope(int scope_id_to_leave) {
 }
 
 void cleanup_variables_for_scope(int scope_id) {
-    if (scope_id == GLOBAL_SCOPE_ID) return; 
+    if (scope_id == GLOBAL_SCOPE_ID) return;
 
-    Variable *current = variable_list_head;
-    Variable *prev = NULL;
-    while (current != NULL) {
-        if (current->scope_id == scope_id) {
-            Variable *to_delete = current;
-            if (prev == NULL) { 
-                variable_list_head = current->next;
-            } else { 
-                prev->next = current->next;
-            }
-            current = current->next; 
-            if (to_delete->value) free(to_delete->value);
-            free(to_delete);
-        } else {
-            prev = current;
-            current = current->next;
-        }
+    // Walk only this scope's own chain, unlinking each variable from its bucket.
+    int frame_index = -1;
+    for (int i = scope_stack_top; i >= 0; i--) {
+        if (scope_stack[i].scope_id == scope_id) { frame_index = i; break; }
     }
+    if (frame_index < 0) return;
+
+    Variable *current = scope_stack[frame_index].vars_head;
+    while (current) {
+        Variable *next_in_scope = current->scope_next;
+
+        unsigned long bucket = variable_hash(current->name);
+        Variable *node = variable_buckets[bucket];
+        Variable *prev = NULL;
+        while (node) {
+            if (node == current) {
+                if (prev) prev->next = node->next;
+                else variable_buckets[bucket] = node->next;
+                break;
+            }
+            prev = node;
+            node = node->next;
+        }
+
+        if (current->value) free(current->value);
+        free(current);
+        current = next_in_scope;
+    }
+    scope_stack[frame_index].vars_head = NULL;
 }
 
 void free_all_variables() {
-    Variable *current = variable_list_head;
-    Variable *next_var;
-    while (current != NULL) {
-        next_var = current->next;
-        if (current->value) free(current->value);
-        free(current);
-        current = next_var;
+    for (int bucket = 0; bucket < VARIABLE_BUCKET_COUNT; ++bucket) {
+        Variable *current = variable_buckets[bucket];
+        while (current != NULL) {
+            Variable *next_var = current->next;
+            if (current->value) free(current->value);
+            free(current);
+            current = next_var;
+        }
+        variable_buckets[bucket] = NULL;
     }
-    variable_list_head = NULL;
 }
 
 char* get_variable_scoped(const char *name_raw) {
@@ -3787,16 +4621,50 @@ char* get_variable_scoped(const char *name_raw) {
     if (strlen(clean_name) == 0) return NULL;
 
     for (int i = scope_stack_top; i >= 0; i--) {
-        int current_search_scope_id = scope_stack[i].scope_id;
-        Variable *current_node = variable_list_head;
-        while (current_node != NULL) {
-            if (current_node->scope_id == current_search_scope_id && strcmp(current_node->name, clean_name) == 0) {
-                return current_node->value; 
-            }
-            current_node = current_node->next;
-        }
+        Variable* found = variable_find_in_scope(clean_name, scope_stack[i].scope_id);
+        if (found) return found->value;
     }
     return NULL; 
+}
+
+// Indirect assignment: "$(name) = value".
+//
+// The search deliberately starts one scope OUT from the running function, then
+// walks outwards:
+//   1. the innermost enclosing scope (caller first) that already defines the
+//      name;
+//   2. otherwise the global scope.
+//
+// Skipping the current scope is what makes the result-variable convention safe:
+// the name belongs to somebody else, so a parameter or local that happens to
+// share it must not be hit. Rule 1 then lets a caller own the name by
+// initialising it before the call ("$out = ''"), which is also what stops
+// recursive framework code from clobbering an outer frame - and it still works
+// when the name is forwarded through several functions. Rule 2 is what makes
+// computed table names ("CDS_C_Point_DEF") persist instead of dying with the
+// call that created them.
+void set_variable_indirect(const char *name_raw, const char *value_to_set, bool is_array_elem) {
+    char clean_name[MAX_VAR_NAME_LEN];
+    strncpy(clean_name, name_raw, MAX_VAR_NAME_LEN - 1); clean_name[MAX_VAR_NAME_LEN - 1] = '\0';
+    trim_whitespace(clean_name);
+    if (strlen(clean_name) == 0) {
+        fprintf(stderr, "Error: indirect assignment with an empty variable name.\n");
+        return;
+    }
+
+    int search_start = (scope_stack_top > 0) ? scope_stack_top - 1 : scope_stack_top;
+    for (int i = search_start; i >= 0; i--) {
+        Variable* found = variable_find_in_scope(clean_name, scope_stack[i].scope_id);
+        if (found) {
+            if (found->value) free(found->value);
+            found->value = strdup(value_to_set);
+            if (!found->value) { perror("strdup failed for indirect assignment"); found->value = strdup(""); }
+            found->is_array_element = is_array_elem;
+            return;
+        }
+    }
+
+    variable_create(clean_name, value_to_set, is_array_elem, GLOBAL_SCOPE_ID);
 }
 
 void set_variable_scoped(const char *name_raw, const char *value_to_set, bool is_array_elem) {
@@ -3811,27 +4679,16 @@ void set_variable_scoped(const char *name_raw, const char *value_to_set, bool is
     trim_whitespace(clean_name);
     if (strlen(clean_name) == 0) { fprintf(stderr, "Error: Cannot set variable with empty name.\n"); return; }
 
-    Variable *current_node = variable_list_head;
-    while (current_node != NULL) {
-        if (current_node->scope_id == current_scope_id && strcmp(current_node->name, clean_name) == 0) {
-            if (current_node->value) free(current_node->value); 
-            current_node->value = strdup(value_to_set);
-            if (!current_node->value) { perror("strdup failed for variable value update"); current_node->value = strdup("");  }
-            current_node->is_array_element = is_array_elem;
-            return;
-        }
-        current_node = current_node->next;
+    Variable* existing = variable_find_in_scope(clean_name, current_scope_id);
+    if (existing) {
+        if (existing->value) free(existing->value);
+        existing->value = strdup(value_to_set);
+        if (!existing->value) { perror("strdup failed for variable value update"); existing->value = strdup(""); }
+        existing->is_array_element = is_array_elem;
+        return;
     }
 
-    Variable *new_var = (Variable*)malloc(sizeof(Variable));
-    if (!new_var) { perror("malloc for new variable failed"); return; }
-    strncpy(new_var->name, clean_name, MAX_VAR_NAME_LEN - 1); new_var->name[MAX_VAR_NAME_LEN - 1] = '\0';
-    new_var->value = strdup(value_to_set);
-    if (!new_var->value) { perror("strdup failed for new variable value"); free(new_var); new_var = NULL;  return; }
-    new_var->is_array_element = is_array_elem;
-    new_var->scope_id = current_scope_id;
-    new_var->next = variable_list_head; 
-    variable_list_head = new_var;
+    variable_create(clean_name, value_to_set, is_array_elem, current_scope_id);
 }
 
 void expand_variables_in_string_advanced(const char *input_str, char *expanded_str, size_t expanded_str_size) {
@@ -3843,7 +4700,40 @@ void expand_variables_in_string_advanced(const char *input_str, char *expanded_s
     while (*p_in && remaining_size > 0) {
         if (*p_in == '$') {
             p_in++; // Consume '$'
-            
+
+            if (*p_in == '(') {
+                // Indirect access: the text inside the parentheses expands to
+                // the NAME of the variable whose value is inserted here.
+                p_in++; // Consume '('
+                char inner_raw[MAX_VAR_NAME_LEN * 2];
+                size_t inner_len = 0;
+                int paren_depth = 1;
+                while (*p_in && paren_depth > 0) {
+                    if (*p_in == '(') paren_depth++;
+                    else if (*p_in == ')') {
+                        paren_depth--;
+                        if (paren_depth == 0) { p_in++; break; }
+                    }
+                    if (inner_len < sizeof(inner_raw) - 1) inner_raw[inner_len++] = *p_in;
+                    p_in++;
+                }
+                inner_raw[inner_len] = '\0';
+
+                char target_name[MAX_VAR_NAME_LEN * 2];
+                expand_variables_in_string_advanced(inner_raw, target_name, sizeof(target_name));
+                trim_whitespace(target_name);
+
+                char* indirect_value = get_variable_scoped(target_name);
+                if (indirect_value) {
+                    size_t val_len = strlen(indirect_value);
+                    if (val_len > remaining_size) val_len = remaining_size;
+                    memcpy(p_out, indirect_value, val_len);
+                    p_out += val_len;
+                    remaining_size -= val_len;
+                }
+                continue;
+            }
+
             char current_mangled_name[MAX_VAR_NAME_LEN * 4] = ""; // Buffer for var_prop1_prop2 etc. (increased size)
             char segment_buffer[MAX_VAR_NAME_LEN]; // For individual segment (base var or property name)
             char* pv = segment_buffer;
@@ -3866,6 +4756,40 @@ void expand_variables_in_string_advanced(const char *input_str, char *expanded_s
                         }
                     }
                     *pv = '\0';
+
+                    // Array element read: $name[index] resolves through the same
+                    // "<base>_ARRAYIDX_<expanded index>" mangling the setter uses.
+                    if (*p_in == '[' && strlen(segment_buffer) > 0) {
+                        p_in++; // Consume '['
+                        char index_raw[MAX_VAR_NAME_LEN];
+                        size_t index_len = 0;
+                        int bracket_depth = 1;
+                        while (*p_in && bracket_depth > 0) {
+                            if (*p_in == '[') bracket_depth++;
+                            else if (*p_in == ']') {
+                                bracket_depth--;
+                                if (bracket_depth == 0) { p_in++; break; }
+                            }
+                            if (index_len < sizeof(index_raw) - 1) index_raw[index_len++] = *p_in;
+                            p_in++;
+                        }
+                        index_raw[index_len] = '\0';
+
+                        char expanded_index[MAX_VAR_NAME_LEN];
+                        if (index_raw[0] == '"') {
+                            char unescaped_index[MAX_VAR_NAME_LEN];
+                            unescape_string(index_raw, unescaped_index, sizeof(unescaped_index));
+                            expand_variables_in_string_advanced(unescaped_index, expanded_index, sizeof(expanded_index));
+                        } else {
+                            expand_variables_in_string_advanced(index_raw, expanded_index, sizeof(expanded_index));
+                        }
+
+                        char mangled_element[MAX_VAR_NAME_LEN];
+                        snprintf(mangled_element, sizeof(mangled_element), "%s_ARRAYIDX_%s", segment_buffer, expanded_index);
+                        strncpy(segment_buffer, mangled_element, MAX_VAR_NAME_LEN - 1);
+                        segment_buffer[MAX_VAR_NAME_LEN - 1] = '\0';
+                    }
+
                     if (strlen(segment_buffer) == 0) { // Invalid: $ or ${}
                         // Output literal '$' and potentially braces if they were consumed
                         if (remaining_size > 0) { *p_out++ = '$'; remaining_size--; }
@@ -4002,11 +4926,15 @@ bool find_module_in_path(const char* module_spec, char* result_full_path) {
     strncpy(module_path_part, module_spec, sizeof(module_path_part) - 1);
     module_path_part[sizeof(module_path_part) - 1] = '\0';
 
-    char *dot = strrchr(module_path_part, '.');
-    if (dot && strchr(module_path_part, '/') == NULL) { 
-        *dot = '/'; 
-        strncat(module_path_part, ".bsh", sizeof(module_path_part) - strlen(module_path_part) - 1);
-    } else if (strchr(module_path_part, '/') == NULL && (strstr(module_path_part, ".bsh") == NULL) ) {
+    // A dotted module name is a path: "tests.lib.assert" -> "tests/lib/assert.bsh".
+    // Every dot is a separator, not just the last one.
+    if (strchr(module_path_part, '/') == NULL) {
+        size_t part_len = strlen(module_path_part);
+        bool has_extension = (part_len > 4 && strcmp(module_path_part + part_len - 4, ".bsh") == 0);
+        if (has_extension) module_path_part[part_len - 4] = '\0';
+        for (char* p = module_path_part; *p; ++p) {
+            if (*p == '.') *p = '/';
+        }
         strncat(module_path_part, ".bsh", sizeof(module_path_part) - strlen(module_path_part) - 1);
     }
 
@@ -4023,7 +4951,9 @@ bool find_module_in_path(const char* module_spec, char* result_full_path) {
     }
 
 
-    if (strchr(module_spec, '/') != NULL) { 
+    // An absolute path was already tried above; a relative one may still live
+    // under a module-path entry ("cdiesis/strutil.bsh"), so keep searching.
+    if (module_spec[0] == '/') {
         return false;
     }
 
@@ -4048,6 +4978,7 @@ bool find_module_in_path(const char* module_spec, char* result_full_path) {
 ///
 
 int execute_external_command(char *command_path, char **args, int arg_count, char *output_buffer, size_t output_buffer_size) {
+    (void)arg_count;
     pid_t pid; int status; int pipefd[2] = {-1, -1};
     if (output_buffer) { if (pipe(pipefd) == -1) { perror("pipe failed for cmd output"); return -1; } }
     pid = fork();
@@ -4078,6 +5009,7 @@ int execute_external_command(char *command_path, char **args, int arg_count, cha
 }
 
 void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context) {
+    (void)input_source_for_context;
     if (!func) return;
     int function_scope_id = enter_scope();
     if (function_scope_id == -1) { return; }
@@ -4100,18 +5032,44 @@ void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_
 
     int func_outer_block_stack_top_bf = block_stack_top_bf;
     ExecutionState func_outer_exec_state = current_exec_state;
-    current_exec_state = STATE_NORMAL; 
+    current_exec_state = STATE_NORMAL;
+
+    int outer_pending_jump = bsh_pending_body_jump;
+    bsh_pending_body_jump = -1;
 
     for (int i = 0; i < func->line_count; ++i) {
-        char line_copy[MAX_LINE_LENGTH]; 
+        char line_copy[MAX_LINE_LENGTH];
         strncpy(line_copy, func->body[i], MAX_LINE_LENGTH-1); line_copy[MAX_LINE_LENGTH-1] = '\0';
-        process_line(line_copy, NULL, i + 1, STATE_NORMAL); 
+        process_line(line_copy, NULL, i + 1, STATE_NORMAL);
+
+        if (bsh_pending_body_jump >= 0) {
+            // A 'while' asked to repeat: resume at its header line.
+            i = bsh_pending_body_jump - 1;
+            bsh_pending_body_jump = -1;
+            continue;
+        }
+        if (current_exec_state == STATE_RETURN_REQUESTED) break; // 'return' or 'exit'
     }
+
+    bsh_pending_body_jump = outer_pending_jump;
 
     while(block_stack_top_bf > func_outer_block_stack_top_bf) {
         pop_block_bf();
     }
-    current_exec_state = func_outer_exec_state;
 
-    leave_scope(function_scope_id); 
+    // 'return' stops this body only; 'exit' keeps unwinding to the shell.
+    if (current_exec_state == STATE_RETURN_REQUESTED && !bsh_exit_requested) {
+        current_exec_state = func_outer_exec_state;
+    } else if (current_exec_state != STATE_RETURN_REQUESTED) {
+        current_exec_state = func_outer_exec_state;
+    }
+
+    leave_scope(function_scope_id);
+
+    // Publish the value of a "return <expr>" to the caller's scope.
+    if (bsh_return_value_is_set && !bsh_exit_requested) {
+        set_variable_scoped("LAST_RETURN_VALUE", bsh_last_return_value, false);
+        bsh_return_value_is_set = false;
+        bsh_last_return_value[0] = '\0';
+    }
 }

@@ -1,0 +1,55 @@
+# tests/cdiesis_runtime.bsh - Compiler, object model, control flow and calls.
+
+import tests.lib.assert
+assert_start "cDiesis: compiler and runtime"
+
+import cdiesis
+$(CDS_STDLIB_ENABLED) = "0"
+lang_load "cdiesis" loaded
+assert_eq "$loaded" "1" "framework loads without the optional stdlib"
+
+$RUNTIME_SRC = ""
+$RUNTIME_SRC = "$RUNTIME_SRC class Base {"
+$RUNTIME_SRC = "$RUNTIME_SRC   public int Value;"
+$RUNTIME_SRC = "$RUNTIME_SRC   public Base(int value) { this.Value = value; }"
+$RUNTIME_SRC = "$RUNTIME_SRC   public virtual int Read() { return this.Value; }"
+$RUNTIME_SRC = "$RUNTIME_SRC }"
+$RUNTIME_SRC = "$RUNTIME_SRC class Derived : Base {"
+$RUNTIME_SRC = "$RUNTIME_SRC   public Derived(int value) { this.Value = value; }"
+$RUNTIME_SRC = "$RUNTIME_SRC   public override int Read() { return this.Value * 2; }"
+$RUNTIME_SRC = "$RUNTIME_SRC }"
+$RUNTIME_SRC = "$RUNTIME_SRC class RuntimeChecks {"
+$RUNTIME_SRC = "$RUNTIME_SRC   public static int Add(int a, int b) { return a + b; }"
+$RUNTIME_SRC = "$RUNTIME_SRC   public static int Main() {"
+$RUNTIME_SRC = "$RUNTIME_SRC     Base item = new Derived(3);"
+$RUNTIME_SRC = "$RUNTIME_SRC     int total = 0;"
+$RUNTIME_SRC = "$RUNTIME_SRC     int i = 0;"
+$RUNTIME_SRC = "$RUNTIME_SRC     while (i < 4) { total = total + item.Read(); i = i + 1; }"
+$RUNTIME_SRC = "$RUNTIME_SRC     if (total == 24) { total = total + 1; } else { total = 0; }"
+$RUNTIME_SRC = "$RUNTIME_SRC     return total;"
+$RUNTIME_SRC = "$RUNTIME_SRC   }"
+$RUNTIME_SRC = "$RUNTIME_SRC }"
+
+cds_compile "runtime" RUNTIME_SRC compiled
+assert_eq "$compiled" "1" "source compiles"
+assert_eq "$CDS_U_runtime_STATE" "compiled" "unit records the compiled state"
+
+cds_class_exists "Derived" derived_exists
+assert_eq "$derived_exists" "1" "class declaration is installed"
+cds_method_owner "Derived" "Read" read_owner
+assert_eq "$read_owner" "Derived" "override owns virtual dispatch"
+
+lang_arg_reset
+lang_call "cdiesis" "RuntimeChecks.Main" main_result
+assert_eq "$main_result" "25" "objects, virtual calls, while and if execute"
+
+lang_arg_reset
+lang_arg_push "19"
+lang_arg_push "23"
+lang_call "cdiesis" "RuntimeChecks.Add" add_result
+assert_eq "$add_result" "42" "boundary arguments bind to static method parameters"
+
+$main_ops = "$CDS_M_RuntimeChecks_Main_CN"
+assert_not_empty "$main_ops" "compiler emits primitive operations"
+
+assert_summary

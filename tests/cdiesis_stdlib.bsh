@@ -1,0 +1,54 @@
+# tests/cdiesis_stdlib.bsh - Standard library and shipped example programs.
+
+import tests.lib.assert
+assert_start "cDiesis: standard library and examples"
+
+import cdiesis
+$loaded = ""
+lang_load "cdiesis" loaded
+assert_eq "$loaded" "1" "framework loads with its standard library"
+
+cds_class_exists "Console" console_exists
+cds_class_exists "List" list_exists
+cds_class_exists "StringBuilder" builder_exists
+assert_eq "$console_exists" "1" "System library compiles on load"
+assert_eq "$list_exists" "1" "Collections library compiles on load"
+assert_eq "$builder_exists" "1" "Text library compiles on load"
+
+lang_arg_reset
+lang_arg_push "2"
+lang_arg_push "8"
+$pow_result = ""
+lang_call "cdiesis" "Math.Pow" pow_result
+assert_eq "$pow_result" "256" "System.Math executes compiled loop code"
+
+lang_arg_reset
+lang_arg_push "stressed"
+$reverse_result = ""
+lang_call "cdiesis" "TextUtil.Reverse" reverse_result
+assert_eq "$reverse_result" "desserts" "TextUtil uses host string primitives"
+
+$HELLO_SRC = ""
+readfile "examples/cdiesis/hello.cds" HELLO_SRC
+assert_eq "$LAST_FILE_STATUS" "0" "hello example source is readable"
+$hello_result = ""
+lang_eval "cdiesis" HELLO_SRC hello_result
+assert_eq "$hello_result" "45" "hello example compiles and runs"
+
+$SHAPES_SRC = ""
+readfile "examples/cdiesis/shapes.cds" SHAPES_SRC
+$shapes_compiled = ""
+cds_compile "example_shapes" SHAPES_SRC shapes_compiled
+assert_eq "$shapes_compiled" "1" "inheritance example compiles"
+lang_arg_reset
+$shapes_result = ""
+lang_call "cdiesis" "ShapeReport.Run" shapes_result
+assert_eq "$shapes_result" "49" "inheritance, foreach and virtual dispatch run"
+
+$INVENTORY_SRC = ""
+readfile "examples/cdiesis/inventory.cds" INVENTORY_SRC
+$inventory_result = ""
+lang_eval "cdiesis" INVENTORY_SRC inventory_result
+assert_eq "$inventory_result" "915" "generics, dictionaries and foreach run"
+
+assert_summary

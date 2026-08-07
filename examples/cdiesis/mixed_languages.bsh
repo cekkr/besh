@@ -1,0 +1,117 @@
+# mixed_languages.bsh - Three languages in one process: BSH, cDiesis and RPN.
+#
+# STATUS: demonstration script, not a test. Never executed; see
+# guides/cdiesis.md for the core capabilities this depends on.
+#
+# The point of this script is the claim in the framework's design: a script
+# written for one language framework can call a script written for another one,
+# in a different language, without either side knowing how the other works - and
+# a framework can be removed from the process while the others keep running.
+#
+# Call graph exercised below:
+#
+#   BSH ──lang_eval──► cDiesis unit
+#                        │  extern "rpn"        (HOST op)
+#                        ▼
+#                      RPN word ──@cdiesis:...──► cDiesis method
+#                        │
+#                        ▼
+#                      BSH host function (print / setvar)
+
+echo "=== mixed languages: bsh + cdiesis + rpn ==="
+
+import lang
+import cdiesis
+import rpn
+
+lang_load "cdiesis" cds_ready
+lang_load "rpn" rpn_ready
+echo "cdiesis ready: $cds_ready, rpn ready: $rpn_ready"
+
+# --- An RPN program -------------------------------------------------------
+#
+# 'square' is pure RPN. 'hypotSquares' calls back into cDiesis through the same
+# boundary cDiesis uses to reach RPN, which is the symmetry worth noticing.
+
+$RPN_SRC = ""
+$RPN_SRC = "$RPN_SRC : square dup * ;"
+$RPN_SRC = "$RPN_SRC : hypotSquares square swap square + ;"
+$RPN_SRC = "$RPN_SRC : tripled @cdiesis:Bridge.Triple/1 ;"
+$RPN_SRC = "$RPN_SRC 6 square ."
+
+lang_eval "rpn" RPN_SRC rpn_result
+echo "rpn program result: $rpn_result"      # expected: 36
+
+# --- A cDiesis unit that calls RPN ---------------------------------------
+
+$CDS_SRC = ""
+$CDS_SRC = "$CDS_SRC namespace Demo.Interop;"
+$CDS_SRC = "$CDS_SRC extern \"rpn\" int square(int value);"
+$CDS_SRC = "$CDS_SRC extern \"rpn\" int hypotSquares(int a, int b);"
+$CDS_SRC = "$CDS_SRC extern \"bsh\" string setvar(string name, string value);"
+$CDS_SRC = "$CDS_SRC class Bridge {"
+$CDS_SRC = "$CDS_SRC   public static int Triple(int value) { return value * 3; }"
+$CDS_SRC = "$CDS_SRC }"
+$CDS_SRC = "$CDS_SRC class InteropDemo {"
+$CDS_SRC = "$CDS_SRC   public static int Main() {"
+$CDS_SRC = "$CDS_SRC     int s = square(9);"
+$CDS_SRC = "$CDS_SRC     int h = hypotSquares(3, 4);"
+$CDS_SRC = "$CDS_SRC     setvar(\"CDS_DEMO_RESULT\", Convert.ToString(h));"
+$CDS_SRC = "$CDS_SRC     return s + h;"
+$CDS_SRC = "$CDS_SRC   }"
+$CDS_SRC = "$CDS_SRC }"
+
+lang_eval "cdiesis" CDS_SRC cds_result
+echo "cDiesis InteropDemo.Main returned: $cds_result"    # expected: 106
+echo "variable written by cDiesis into BSH: $CDS_DEMO_RESULT"   # expected: 25
+
+# --- RPN calling cDiesis --------------------------------------------------
+
+$RPN_CALLBACK = "7 tripled ."
+lang_eval "rpn" RPN_CALLBACK callback_result
+echo "rpn -> cdiesis callback result: $callback_result"  # expected: 21
+
+# --- BSH calling both directly -------------------------------------------
+
+lang_arg_reset
+lang_arg_push "5"
+lang_call "cdiesis" "Bridge.Triple" from_bsh_cds
+echo "bsh -> cdiesis Bridge.Triple(5): $from_bsh_cds"    # expected: 15
+
+lang_arg_reset
+lang_arg_push "8"
+lang_call "rpn" "square" from_bsh_rpn
+echo "bsh -> rpn square(8): $from_bsh_rpn"               # expected: 64
+
+# --- Unload one language, keep the other ---------------------------------
+#
+# This is the part a single-language shell cannot do. RPN goes away; cDiesis
+# keeps working; calls into the unloaded language fail at the boundary with a
+# reported error rather than a silent wrong answer.
+
+lang_unload "rpn" rpn_unloaded
+echo "rpn unloaded: $rpn_unloaded"
+
+lang_arg_reset
+lang_arg_push "8"
+lang_call "rpn" "square" after_unload
+echo "call into unloaded rpn returned: '$after_unload'"
+echo "boundary error: $LANG_LAST_ERROR"
+
+lang_arg_reset
+lang_arg_push "5"
+lang_call "cdiesis" "Bridge.Triple" still_working
+echo "cdiesis still works while rpn is unloaded: $still_working"   # expected: 15
+
+# --- Reload and re-run ----------------------------------------------------
+
+lang_load "rpn" rpn_back
+lang_eval "rpn" RPN_SRC rpn_again
+echo "rpn reloaded and re-evaluated: $rpn_again"          # expected: 36
+
+lang_unload "cdiesis" cds_unloaded
+lang_unload "rpn" rpn_unloaded_again
+echo "both unloaded: $cds_unloaded / $rpn_unloaded_again"
+echo "the shell is plain BSH again"
+
+echo "=== done ==="

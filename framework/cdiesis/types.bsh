@@ -1,0 +1,431 @@
+# cdiesis/types.bsh - The cDiesis type system.
+#
+# STATUS: experimental implementation (see framework/cdiesis.bsh header).
+#
+# cDiesis is statically typed on the surface and string-typed underneath. A
+# declared type never changes how a value is stored - every value is a shell
+# string - it only decides which checks run, which default a slot starts from,
+# and which conversions are legal. That separation is what lets a typed language
+# sit on B[e]SH without adding a single typed storage kind to the core
+# (AGENTS.md, "String-first values with explicit interpretation").
+#
+# Value types  : int long float double bool char        (default: 0 / false / '')
+# Reference    : string object <user classes> <generics> (default: null)
+# Inferred     : var                                     (resolved at compile time)
+#
+# STORAGE
+#   CDS_T_<type>_DEF       "1" when the type exists
+#   CDS_T_<type>_KIND      "value" | "ref"
+#   CDS_T_<type>_DEFAULT   default value for an uninitialised slot
+#   CDS_T_<type>_NUMERIC   "1" for arithmetic types
+#   CDS_T_<type>_INTEGRAL  "1" when division must truncate
+#   CDS_T_LIST_N/<i>       registered type names, for teardown
+
+echo "Loading cDiesis type system (cdiesis/types.bsh)..."
+
+function cds_types_init () {
+    $(CDS_T_LIST_N) = "0"
+
+    cds_type_register "void"   "value" ""      "0" "0"
+    cds_type_register "int"    "value" "0"     "1" "1"
+    cds_type_register "long"   "value" "0"     "1" "1"
+    cds_type_register "float"  "value" "0"     "1" "0"
+    cds_type_register "double" "value" "0"     "1" "0"
+    cds_type_register "bool"   "value" "false" "0" "0"
+    cds_type_register "char"   "value" ""      "0" "0"
+    cds_type_register "string" "ref"   "null"  "0" "0"
+    cds_type_register "object" "ref"   "null"  "0" "0"
+    cds_type_register "var"    "infer" ""      "0" "0"
+}
+
+function cds_type_register (name kind default_value numeric integral) {
+    $def = "CDS_T_${name}_DEF"
+    $($def) = "1"
+    $kind_slot = "CDS_T_${name}_KIND"
+    $($kind_slot) = "$kind"
+    $default_slot = "CDS_T_${name}_DEFAULT"
+    $($default_slot) = "$default_value"
+    $numeric_slot = "CDS_T_${name}_NUMERIC"
+    $($numeric_slot) = "$numeric"
+    $integral_slot = "CDS_T_${name}_INTEGRAL"
+    $($integral_slot) = "$integral"
+
+    $idx = $CDS_T_LIST_N
+    $entry = "CDS_T_LIST_${idx}"
+    $($entry) = "$name"
+    $(CDS_T_LIST_N) = $idx + 1
+}
+
+function cds_types_drop () {
+    $idx = "0"
+    while $idx < $CDS_T_LIST_N {
+        $entry = "CDS_T_LIST_${idx}"
+        $name = $($entry)
+        $def = "CDS_T_${name}_DEF"
+        $($def) = ""
+        $kind_slot = "CDS_T_${name}_KIND"
+        $($kind_slot) = ""
+        $default_slot = "CDS_T_${name}_DEFAULT"
+        $($default_slot) = ""
+        $numeric_slot = "CDS_T_${name}_NUMERIC"
+        $($numeric_slot) = ""
+        $integral_slot = "CDS_T_${name}_INTEGRAL"
+        $($integral_slot) = ""
+        $($entry) = ""
+        $idx = $idx + 1
+    }
+    $(CDS_T_LIST_N) = "0"
+}
+
+function cds_type_exists (name result_var) {
+    $def = "CDS_T_${name}_DEF"
+    if $($def) == "1" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+function cds_type_default (name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $known = ""
+    $default_slot = "CDS_T_${name}_DEFAULT"
+    $value = $($default_slot)
+    if $value == "" {
+        cds_type_exists "$name" known
+        if $known != "1" {
+            # Unknown types are treated as reference types: a user class that
+            # has not been compiled yet is still a legal forward reference.
+            $($result_var) = "null"
+            return
+        }
+    }
+    $($result_var) = "$value"
+}
+
+function cds_type_is_numeric (name result_var) {
+    $numeric_slot = "CDS_T_${name}_NUMERIC"
+    if $($numeric_slot) == "1" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+function cds_type_is_integral (name result_var) {
+    $integral_slot = "CDS_T_${name}_INTEGRAL"
+    if $($integral_slot) == "1" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+function cds_type_is_reference (name result_var) {
+    $kind_slot = "CDS_T_${name}_KIND"
+    $kind = $($kind_slot)
+    if $kind == "ref" {
+        $($result_var) = "1"
+        return
+    }
+    if $kind == "" {
+        # Unregistered name: a class or a generic instantiation.
+        $($result_var) = "1"
+        return
+    }
+    $($result_var) = "0"
+}
+
+# --- Runtime classification ----------------------------------------------
+#
+# The only inspection primitive available is the shape of the string itself,
+# which is exactly how BSH's own framework/type.bsh works. Object handles are
+# recognised by their "obj#" prefix, the same discriminator the planned host ABI
+# would carry as an i32 handle.
+
+function cds_type_of (value result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_object = ""
+    $class_name = ""
+    $bsh_type = ""
+    if $value == "null" {
+        $($result_var) = "object"
+        return
+    }
+    if $value == "true" {
+        $($result_var) = "bool"
+        return
+    }
+    if $value == "false" {
+        $($result_var) = "bool"
+        return
+    }
+
+    cds_str_starts_with "$value" "obj#" is_object
+    if $is_object == "1" {
+        cds_obj_class "$value" class_name
+        $($result_var) = "$class_name"
+        return
+    }
+
+    get_type "$value" bsh_type
+    if $bsh_type == "INTEGER" {
+        $($result_var) = "int"
+        return
+    }
+    if $bsh_type == "FLOAT" {
+        $($result_var) = "double"
+        return
+    }
+    $($result_var) = "string"
+}
+
+# --- Assignability --------------------------------------------------------
+#
+# Deliberately permissive in one direction only: an int flows into a double or a
+# string (C#'s implicit widening and ToString-on-concat), never the reverse
+# without an explicit cast.
+
+function cds_check_assignable (value target_type result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_ref = ""
+    $actual = ""
+    $numeric = ""
+    $derived = ""
+    if $target_type == "" {
+        $($result_var) = "1"
+        return
+    }
+    if $target_type == "var" {
+        $($result_var) = "1"
+        return
+    }
+    if $target_type == "object" {
+        $($result_var) = "1"
+        return
+    }
+    if $value == "null" {
+        cds_type_is_reference "$target_type" is_ref
+        $($result_var) = "$is_ref"
+        return
+    }
+
+    cds_type_of "$value" actual
+    if $actual == "$target_type" {
+        $($result_var) = "1"
+        return
+    }
+    if $target_type == "string" {
+        $($result_var) = "1"
+        return
+    }
+    if $target_type == "double" {
+        cds_type_is_numeric "$actual" numeric
+        $($result_var) = "$numeric"
+        return
+    }
+    if $target_type == "float" {
+        cds_type_is_numeric "$actual" numeric
+        $($result_var) = "$numeric"
+        return
+    }
+    if $target_type == "long" {
+        if $actual == "int" {
+            $($result_var) = "1"
+            return
+        }
+    }
+    if $target_type == "int" {
+        if $actual == "long" {
+            $($result_var) = "1"
+            return
+        }
+    }
+
+    cds_class_is_subclass_of "$actual" "$target_type" derived
+    $($result_var) = "$derived"
+}
+
+# --- Conversion -----------------------------------------------------------
+
+function cds_cast (value target_type result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $__fwd1 = ""
+    $is_true = ""
+    $integral = ""
+    $__fwd2 = ""
+    $numeric = ""
+    $actual = ""
+    $ok = ""
+    if $target_type == "string" {
+        $__fwd1 = ""
+        cds_to_string "$value" __fwd1
+        $($result_var) = "$__fwd1"
+        return
+    }
+    if $target_type == "bool" {
+        cds_truthy "$value" is_true
+        if $is_true == "1" {
+            $($result_var) = "true"
+        } else {
+            $($result_var) = "false"
+        }
+        return
+    }
+    cds_type_is_integral "$target_type" integral
+    if $integral == "1" {
+        $__fwd2 = ""
+        cds_trunc "$value" __fwd2
+        $($result_var) = "$__fwd2"
+        return
+    }
+    cds_type_is_numeric "$target_type" numeric
+    if $numeric == "1" {
+        $($result_var) = "$value"
+        return
+    }
+
+    # Reference cast: legal only when the runtime class allows it, so that a bad
+    # downcast traps here instead of corrupting a later field access.
+    cds_type_of "$value" actual
+    cds_class_is_subclass_of "$actual" "$target_type" ok
+    if $ok == "1" {
+        $($result_var) = "$value"
+        return
+    }
+    $(CDS_TRAP) = "invalid cast from '$actual' to '$target_type'"
+    $($result_var) = "null"
+}
+
+function cds_to_string (value result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_object = ""
+    $class_name = ""
+    $has_to_string = ""
+    $__fwd3 = ""
+    cds_str_starts_with "$value" "obj#" is_object
+    if $is_object == "1" {
+        cds_obj_class "$value" class_name
+        cds_method_exists "$class_name" "ToString" has_to_string
+        if $has_to_string == "1" {
+            cds_arg_reset
+            $__fwd3 = ""
+            cds_invoke_virtual "$value" "ToString" __fwd3
+            $($result_var) = "$__fwd3"
+            return
+        }
+        $($result_var) = "$class_name"
+        return
+    }
+    $($result_var) = "$value"
+}
+
+# Integer truncation toward zero, using the shell's own modulo so that cDiesis
+# and BSH agree on what "integer" means.
+function cds_trunc (value result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $value_type = ""
+    $dot_at = ""
+    $whole = ""
+    get_type "$value" value_type
+    if $value_type == "INTEGER" {
+        $($result_var) = "$value"
+        return
+    }
+    if $value_type != "FLOAT" {
+        $($result_var) = "0"
+        return
+    }
+    cds_str_index_of "$value" "." dot_at
+    if $dot_at == "-1" {
+        $($result_var) = "$value"
+        return
+    }
+    cds_str_substring "$value" "0" "$dot_at" whole
+    if $whole == "" {
+        $($result_var) = "0"
+        return
+    }
+    if $whole == "-" {
+        $($result_var) = "0"
+        return
+    }
+    $($result_var) = "$whole"
+}
+
+# --- Static result type of an operator ------------------------------------
+#
+# Used by the parser to type temporaries at compile time. Runtime values are not
+# consulted, so the answer is stable enough to be baked into emitted code - a
+# precondition for the typed specialisation described in ROADMAP Phase 5.
+
+function cds_type_combine (op left_type right_type result_var) {
+    if $op == "==" { $($result_var) = "bool"; return }
+    if $op == "!=" { $($result_var) = "bool"; return }
+    if $op == "<"  { $($result_var) = "bool"; return }
+    if $op == ">"  { $($result_var) = "bool"; return }
+    if $op == "<=" { $($result_var) = "bool"; return }
+    if $op == ">=" { $($result_var) = "bool"; return }
+    if $op == "&&" { $($result_var) = "bool"; return }
+    if $op == "||" { $($result_var) = "bool"; return }
+
+    if $left_type == "string" { $($result_var) = "string"; return }
+    if $right_type == "string" { $($result_var) = "string"; return }
+    if $left_type == "double" { $($result_var) = "double"; return }
+    if $right_type == "double" { $($result_var) = "double"; return }
+    if $left_type == "float" { $($result_var) = "float"; return }
+    if $right_type == "float" { $($result_var) = "float"; return }
+    if $left_type == "long" { $($result_var) = "long"; return }
+    if $right_type == "long" { $($result_var) = "long"; return }
+    $($result_var) = "int"
+}
+
+# --- Generics by erasure --------------------------------------------------
+#
+# "List<int>" is stored as the flat type name "List$int": one class, one code
+# body, plus an element-type tag that the runtime checks on insertion. Erasure
+# is the honest choice here - specialising a class per type argument would
+# multiply compiled units for no semantic gain at this stage.
+
+function cds_generic_name (base arg result_var) {
+    $($result_var) = "${base}\$${arg}"
+}
+
+function cds_generic_base (type_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $at = ""
+    $__fwd4 = ""
+    cds_str_index_of "$type_name" "\$" at
+    if $at == "-1" {
+        $($result_var) = "$type_name"
+        return
+    }
+    $__fwd4 = ""
+    cds_str_substring "$type_name" "0" "$at" __fwd4
+    $($result_var) = "$__fwd4"
+}
+
+function cds_generic_arg (type_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $at = ""
+    $__fwd5 = ""
+    cds_str_index_of "$type_name" "\$" at
+    if $at == "-1" {
+        $($result_var) = ""
+        return
+    }
+    $after = $at + 1
+    $__fwd5 = ""
+    cds_str_rest "$type_name" "$after" __fwd5
+    $($result_var) = "$__fwd5"
+}
+
+echo "cDiesis type system loaded (10 built-in types, erasure-based generics)."

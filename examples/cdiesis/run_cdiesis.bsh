@@ -1,0 +1,96 @@
+# run_cdiesis.bsh - Driver: load the cDiesis framework, compile a unit, look at
+# the primitive lowering, run it, then unload the language again.
+#
+# STATUS: demonstration script. Automated coverage lives in tests/cdiesis_*.bsh.
+#
+# Run (once the core builds):
+#   BSH_MODULE_PATH=./framework ./bsh examples/cdiesis/run_cdiesis.bsh
+
+echo "=== cDiesis driver ==="
+
+import lang
+import cdiesis
+
+lang_load "cdiesis" cdiesis_ready
+if $cdiesis_ready != "1" {
+    echo "cannot continue: cDiesis failed to load"
+    exit
+}
+
+# --- Source ---------------------------------------------------------------
+#
+# The unit is assembled inline to keep this driver self-contained; `readfile`
+# is available when a script should load one of the tracked .cds files.
+
+$SRC = ""
+$SRC = "$SRC namespace Demo;"
+$SRC = "$SRC class Counter {"
+$SRC = "$SRC   public int Value;"
+$SRC = "$SRC   public Counter(int start) { this.Value = start; }"
+$SRC = "$SRC   public int Bump(int by) { this.Value = this.Value + by; return this.Value; }"
+$SRC = "$SRC   public override string ToString() { return \"Counter(\" + this.Value + \")\"; }"
+$SRC = "$SRC }"
+$SRC = "$SRC class Program {"
+$SRC = "$SRC   public static int Add(int a, int b) { return a + b; }"
+$SRC = "$SRC   public static int Main() {"
+$SRC = "$SRC     Counter c = new Counter(10);"
+$SRC = "$SRC     int i = 0;"
+$SRC = "$SRC     while (i < 5) { c.Bump(i); i = i + 1; }"
+$SRC = "$SRC     Console.WriteLine(c.ToString());"
+$SRC = "$SRC     return c.Value;"
+$SRC = "$SRC   }"
+$SRC = "$SRC }"
+
+# --- Compile --------------------------------------------------------------
+
+cds_compile "demo" SRC compiled
+echo "compiled: $compiled"          # expected: 1
+
+# The whole claim of this framework, printed: a class with a constructor, a
+# mutating method and an override reduces to a flat list of primitive ops.
+cds_dump_ops Counter Bump
+cds_dump_ops Program Main
+
+# --- Run ------------------------------------------------------------------
+
+lang_eval "cdiesis" SRC run_result
+echo "Program.Main returned: $run_result"    # expected: 20
+
+# Calling a single static method from BSH, without going through Main.
+lang_arg_reset
+lang_arg_push "7"
+lang_arg_push "8"
+lang_call "cdiesis" "Program.Add" add_result
+echo "direct Program.Add call: $add_result"       # expected: 15
+
+# --- Unload ---------------------------------------------------------------
+#
+# After unloading, the cDiesis BSH functions still exist - the C core cannot
+# undefine a function - but the framework refuses to act, and every class,
+# object and compiled method it owned is gone.
+
+lang_unload "cdiesis" unloaded
+echo "unloaded: $unloaded"
+
+lang_eval "cdiesis" SRC after_unload
+echo "eval after unload returned: '$after_unload'"   # expected: empty + error
+echo "boundary error: $LANG_LAST_ERROR"
+
+lang_state "cdiesis" state_now
+echo "state: $state_now"            # expected: unloaded
+
+# --- Reload ---------------------------------------------------------------
+#
+# A reload starts from an empty class table: nothing from the previous life
+# survives, which is what makes unload meaningful rather than cosmetic.
+
+lang_load "cdiesis" reloaded
+echo "reloaded: $reloaded"
+
+cds_class_exists "Counter" survived
+echo "Counter survived the unload/load cycle: $survived"   # expected: 0
+
+cds_compile "demo2" SRC recompiled
+echo "recompiled after reload: $recompiled"               # expected: 1
+
+echo "=== done ==="

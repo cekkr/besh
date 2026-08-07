@@ -1,0 +1,118 @@
+# Control flow: conditionals, loops, inline blocks and statement separators.
+import tests.lib.assert
+
+assert_start "core: control flow"
+
+# --- if / else -----------------------------------------------------------
+
+$branch = "none"
+if "1" == "1" {
+    $branch = "then"
+} else {
+    $branch = "else"
+}
+assert_eq "$branch" "then" "if takes the true branch"
+
+$branch = "none"
+if "1" == "2" {
+    $branch = "then"
+} else {
+    $branch = "else"
+}
+assert_eq "$branch" "else" "else runs when the condition is false"
+
+# An else that is skipped must stay skipped even when blocks close inside it.
+$outer = "none"
+if "1" == "2" {
+    if "1" == "1" {
+        $outer = "inner-then"
+    }
+    $outer = "outer-then"
+} else {
+    $outer = "outer-else"
+}
+assert_eq "$outer" "outer-else" "nested block inside a skipped branch stays skipped"
+
+$level = "0"
+if "1" == "1" {
+    if "2" == "2" {
+        $level = "2"
+    } else {
+        $level = "1"
+    }
+}
+assert_eq "$level" "2" "nested if inside a taken branch"
+
+# --- Inline blocks and ';' ----------------------------------------------
+
+$inline = "no"
+if "a" == "a" { $inline = "yes" }
+assert_eq "$inline" "yes" "single-line if block"
+
+$one = ""
+$two = ""
+if "a" == "a" { $one = "1"; $two = "2" }
+assert_eq "$one" "1" "first statement of an inline block"
+assert_eq "$two" "2" "second statement after ';'"
+
+$pick = ""
+if "a" == "b" { $pick = "then" } else { $pick = "else" }
+assert_eq "$pick" "else" "inline if/else on one line"
+
+$a = "1"; $b = "2"
+assert_eq "$a$b" "12" "';' separates top-level statements"
+
+# --- while ---------------------------------------------------------------
+
+$i = 0
+$sum = 0
+while $i < 5 {
+    $sum = $sum + $i
+    $i = $i + 1
+}
+assert_eq "$sum" "10" "while loop accumulates 0..4"
+assert_eq "$i" "5" "loop variable ends at the bound"
+
+$never = "untouched"
+while "1" == "2" {
+    $never = "entered"
+}
+assert_eq "$never" "untouched" "while with a false condition never runs"
+
+# Nested loops, and a conditional inside a loop body.
+$rows = 0
+$cells = 0
+$r = 0
+while $r < 3 {
+    $c = 0
+    while $c < 4 {
+        $cells = $cells + 1
+        $c = $c + 1
+    }
+    if $r == 1 {
+        $rows = $rows + 10
+    } else {
+        $rows = $rows + 1
+    }
+    $r = $r + 1
+}
+assert_eq "$cells" "12" "nested loop body runs rows x columns times"
+assert_eq "$rows" "12" "if/else inside a loop body"
+
+# --- Truthiness ----------------------------------------------------------
+
+$flag = "1"
+$hit = "no"
+if $flag {
+    $hit = "yes"
+}
+assert_eq "$hit" "yes" "a bare truthy value is a condition"
+
+$flag = "0"
+$hit = "no"
+if $flag {
+    $hit = "yes"
+}
+assert_eq "$hit" "no" "zero is falsy"
+
+assert_summary

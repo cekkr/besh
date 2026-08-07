@@ -1,0 +1,585 @@
+# cdiesis/parser.bsh - Token stream to primitive ops.
+#
+# STATUS: experimental implementation (see framework/cdiesis.bsh header).
+#
+# A recursive-descent parser that never builds a syntax tree: each production
+# emits primitive ops as soon as it knows what they are, and returns the name of
+# the slot holding its value. That single-pass shape is what makes the output
+# directly comparable to a WebAssembly emitter, which also produces instructions
+# in source order (ROADMAP.md, Phase 3).
+#
+# GRAMMAR SUBSET
+#   unit        := (namespace | using | extern | class)*
+#   class       := 'class' ID (':' ID)? '{' member* '}'
+#   member      := modifiers type ID ( '(' params ')' block | ('=' expr)? ';' )
+#   statement   := localDecl | if | while | for | foreach | return
+#                | break | continue | block | exprStatement
+#   expr        := assignment
+#   assignment  := orExpr (('='|'+='|'-='|'*='|'/=') assignment)?
+#   orExpr      := andExpr ('||' andExpr)*
+#   andExpr     := equality ('&&' equality)*
+#   equality    := relational (('=='|'!=') relational)*
+#   relational  := additive (('<'|'>'|'<='|'>=') additive)*
+#   additive    := multiplicative (('+'|'-') multiplicative)*
+#   multiplicative := unary (('*'|'/'|'%') unary)*
+#   unary       := ('!'|'-'|'+'|'++'|'--') unary | postfix
+#   postfix     := primary ('.' ID ('(' args ')')? | '[' expr ']' | '++' | '--')*
+#   primary     := NUM | STR | CHR | 'true' | 'false' | 'null' | 'this'
+#                | 'new' type '(' args ')' | ID | '(' expr ')'
+#
+# PARSER STATE
+#   CDS_P_UNIT / _POS / _ERROR      cursor and diagnostics
+#   CDS_P_CLASS / _METHOD           current emission target
+#   CDS_P_TMP                       temporary counter of the current method
+#   CDS_P_LOCAL_<name>              declared type of a local, "" when unknown
+#   CDS_P_LOCALS                    space-separated list of declared locals
+#   CDS_P_BREAK / _CONT             labels of the innermost loop
+
+echo "Loading cDiesis parser (cdiesis/parser.bsh)..."
+
+# --- Cursor ---------------------------------------------------------------
+
+function cds_p_kind (offset result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $__fwd1 = ""
+    $index = $CDS_P_POS + $offset
+    $__fwd1 = ""
+    cds_tok_kind "$CDS_P_UNIT" "$index" __fwd1
+    $($result_var) = "$__fwd1"
+}
+
+function cds_p_value (offset result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $__fwd2 = ""
+    $index = $CDS_P_POS + $offset
+    $__fwd2 = ""
+    cds_tok_value "$CDS_P_UNIT" "$index" __fwd2
+    $($result_var) = "$__fwd2"
+}
+
+function cds_p_advance () {
+    $(CDS_P_POS) = $CDS_P_POS + 1
+}
+
+function cds_p_at (kind value result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $k = ""
+    $v = ""
+    cds_p_kind "0" k
+    cds_p_value "0" v
+    $($result_var) = "0"
+    if $k == "$kind" {
+        if $value == "" {
+            $($result_var) = "1"
+        } else {
+            if $v == "$value" {
+                $($result_var) = "1"
+            }
+        }
+    }
+}
+
+function cds_p_accept (kind value result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $matched = ""
+    cds_p_at "$kind" "$value" matched
+    if $matched == "1" {
+        cds_p_advance
+    }
+    $($result_var) = "$matched"
+}
+
+function cds_p_expect (kind value) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $ok = ""
+    $got = ""
+    $line = ""
+    cds_p_accept "$kind" "$value" ok
+    if $ok != "1" {
+        cds_p_value "0" got
+        $index = $CDS_P_POS
+        cds_tok_line "$CDS_P_UNIT" "$index" line
+        $(CDS_P_ERROR) = "line $line: expected '$value', found '$got'"
+    }
+}
+
+function cds_p_failed (result_var) {
+    if $CDS_P_ERROR == "" {
+        $($result_var) = "0"
+    } else {
+        $($result_var) = "1"
+    }
+}
+
+# --- Emission helpers -----------------------------------------------------
+
+function cds_pemit (text) {
+    cds_emit "$CDS_P_CLASS" "$CDS_P_METHOD" "$text"
+}
+
+function cds_new_temp (result_var) {
+    $idx = $CDS_P_TMP
+    $next = $idx + 1
+    $(CDS_P_TMP) = "$next"
+    $($result_var) = "t${idx}"
+}
+
+function cds_p_const (value result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $ref = ""
+    $slot = ""
+    cds_pool_add "$CDS_P_UNIT" "$value" ref
+    cds_new_temp slot
+    cds_pemit "CONST $slot $ref"
+    $($result_var) = "$slot"
+}
+
+function cds_p_const_ref (ref result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $slot = ""
+    cds_new_temp slot
+    cds_pemit "CONST $slot $ref"
+    $($result_var) = "$slot"
+}
+
+function cds_p_local_declare (name type_name) {
+    $slot = "CDS_P_LOCAL_${name}"
+    $($slot) = "$type_name"
+    $(CDS_P_LOCALS) = "$CDS_P_LOCALS $name"
+}
+
+function cds_p_local_type (name result_var) {
+    $slot = "CDS_P_LOCAL_${name}"
+    $($result_var) = $($slot)
+}
+
+function cds_p_locals_clear () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $count = ""
+    $name = ""
+    cds_str_field_count "$CDS_P_LOCALS" count
+    $idx = "0"
+    while $idx < $count {
+        cds_str_field "$CDS_P_LOCALS" "$idx" name
+        $slot = "CDS_P_LOCAL_${name}"
+        $($slot) = ""
+        $idx = $idx + 1
+    }
+    $(CDS_P_LOCALS) = ""
+}
+
+# --- Unit -----------------------------------------------------------------
+
+function cds_parse_unit (unit result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $done = ""
+    $failed = ""
+    $(CDS_P_UNIT) = "$unit"
+    $(CDS_P_POS) = "0"
+    $(CDS_P_ERROR) = ""
+    $(CDS_P_NS) = ""
+
+    $class_count = "CDS_U_${unit}_CLASS_N"
+    $($class_count) = "0"
+
+    cds_p_at "EOF" "" done
+    while $done != "1" {
+        cds_parse_top_level "$unit"
+        cds_p_failed failed
+        if $failed == "1" {
+            echo "cDiesis parse error in unit '$unit': $CDS_P_ERROR"
+            $($result_var) = "0"
+            return
+        }
+        cds_p_at "EOF" "" done
+    }
+    $($result_var) = "1"
+}
+
+function cds_parse_top_level (unit) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_ns = ""
+    $ns_name = ""
+    $ns_more = ""
+    $ns_part = ""
+    $ignored = ""
+    $is_using = ""
+    $at_semi = ""
+    $at_eof = ""
+    $is_extern = ""
+    $is_class = ""
+    $unexpected = ""
+    cds_p_accept "KW" "namespace" is_ns
+    if $is_ns == "1" {
+        # A namespace name is dotted: consume ID ('.' ID)* as one name.
+        cds_p_value "0" ns_name
+        cds_p_advance
+        $ns_more = "1"
+        while $ns_more == "1" {
+            cds_p_accept "PUNCT" "." ns_more
+            if $ns_more == "1" {
+                cds_p_value "0" ns_part
+                cds_p_advance
+                $ns_name = "${ns_name}.${ns_part}"
+            }
+        }
+        $(CDS_P_NS) = "$ns_name"
+        $ns_slot = "CDS_U_${unit}_NS"
+        $($ns_slot) = "$ns_name"
+        cds_p_accept "PUNCT" ";" ignored
+        return
+    }
+
+    cds_p_accept "KW" "using" is_using
+    if $is_using == "1" {
+        # 'using' is recorded by being consumed: cDiesis has one flat class
+        # namespace, so an import list has nothing to resolve yet.
+        cds_p_at "PUNCT" ";" at_semi
+        while $at_semi != "1" {
+            cds_p_at "EOF" "" at_eof
+            if $at_eof == "1" {
+                return
+            }
+            cds_p_advance
+            cds_p_at "PUNCT" ";" at_semi
+        }
+        cds_p_accept "PUNCT" ";" ignored
+        return
+    }
+
+    cds_p_at "KW" "extern" is_extern
+    if $is_extern == "1" {
+        cds_parse_extern "$unit"
+        return
+    }
+
+    cds_p_at "KW" "class" is_class
+    if $is_class == "1" {
+        cds_parse_class "$unit"
+        return
+    }
+
+    cds_p_value "0" unexpected
+    $(CDS_P_ERROR) = "unexpected top-level token '$unexpected'"
+}
+
+# extern "bsh" string echo(string message);
+#
+# The declaration that makes another language reachable. It compiles to nothing
+# by itself: it records a binding that later calls lower to a single HOST op.
+function cds_parse_extern (unit) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $lang_ref = ""
+    $lang_name = ""
+    $return_type = ""
+    $local_name = ""
+    $at_end = ""
+    $at_eof = ""
+    cds_p_expect "KW" "extern"
+    cds_p_value "0" lang_ref
+    cds_p_advance
+    cds_pool_get "$unit" "$lang_ref" lang_name
+
+    cds_p_value "0" return_type
+    cds_p_advance
+    cds_p_value "0" local_name
+    cds_p_advance
+
+    # The parameter list of an extern is documentation for the reader: the call
+    # site decides the argument count, and the boundary passes strings either
+    # way. Skip it without interpreting it.
+    cds_p_expect "PUNCT" "("
+    cds_p_at "PUNCT" ")" at_end
+    while $at_end != "1" {
+        cds_p_at "EOF" "" at_eof
+        if $at_eof == "1" {
+            $(CDS_P_ERROR) = "unterminated extern declaration"
+            return
+        }
+        cds_p_advance
+        cds_p_at "PUNCT" ")" at_end
+    }
+    cds_p_expect "PUNCT" ")"
+    cds_p_expect "PUNCT" ";"
+
+    cds_extern_declare "$local_name" "$lang_name" "$local_name" "$return_type"
+}
+
+# --- Classes and members --------------------------------------------------
+
+function cds_parse_class (unit) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $class_name = ""
+    $has_base = ""
+    $base_name = ""
+    $at_end = ""
+    $failed = ""
+    cds_p_expect "KW" "class"
+    cds_p_value "0" class_name
+    cds_p_advance
+
+    $base_name = ""
+    cds_p_accept "PUNCT" ":" has_base
+    if $has_base == "1" {
+        cds_p_value "0" base_name
+        cds_p_advance
+    }
+
+    cds_class_declare "$class_name" "$base_name" "$unit"
+
+    $count_slot = "CDS_U_${unit}_CLASS_N"
+    $idx = $($count_slot)
+    $entry = "CDS_U_${unit}_CLASS_${idx}"
+    $($entry) = "$class_name"
+    $next = $idx + 1
+    $($count_slot) = "$next"
+
+    cds_p_expect "PUNCT" "{"
+    cds_p_at "PUNCT" "}" at_end
+    while $at_end != "1" {
+        cds_parse_member "$unit" "$class_name"
+        cds_p_failed failed
+        if $failed == "1" {
+            return
+        }
+        cds_p_at "PUNCT" "}" at_end
+    }
+    cds_p_expect "PUNCT" "}"
+}
+
+# Modifiers are collapsed to a compact string ("s" static, "v" virtual,
+# "o" override, "a" abstract, "c" const) because the runtime only ever asks
+# yes/no questions about them.
+function cds_parse_modifiers (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $m1 = ""
+    $m2 = ""
+    $m3 = ""
+    $m4 = ""
+    $m5 = ""
+    $m6 = ""
+    $m7 = ""
+    $m8 = ""
+    $m9 = ""
+    $scanning = "1"
+    while $scanning == "1" {
+        cds_p_accept "KW" "public" m1
+        cds_p_accept "KW" "private" m2
+        cds_p_accept "KW" "protected" m3
+        cds_p_accept "KW" "internal" m4
+        cds_p_accept "KW" "static" m5
+        cds_p_accept "KW" "virtual" m6
+        cds_p_accept "KW" "override" m7
+        cds_p_accept "KW" "abstract" m8
+        cds_p_accept "KW" "const" m9
+        if $m5 == "1" { $mods = "${mods}s" }
+        if $m6 == "1" { $mods = "${mods}v" }
+        if $m7 == "1" { $mods = "${mods}o" }
+        if $m8 == "1" { $mods = "${mods}a" }
+        if $m9 == "1" { $mods = "${mods}c" }
+
+        $scanning = "0"
+        if $m1 == "1" { $scanning = "1" }
+        if $m2 == "1" { $scanning = "1" }
+        if $m3 == "1" { $scanning = "1" }
+        if $m4 == "1" { $scanning = "1" }
+        if $m5 == "1" { $scanning = "1" }
+        if $m6 == "1" { $scanning = "1" }
+        if $m7 == "1" { $scanning = "1" }
+        if $m8 == "1" { $scanning = "1" }
+        if $m9 == "1" { $scanning = "1" }
+    }
+    $($result_var) = "$mods"
+}
+
+# A type reference, including one generic argument: List<int> -> "List$int".
+function cds_parse_type (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $base = ""
+    $arg = ""
+    $mark = ""
+    $ignored_arg = ""
+    $__fwd3 = ""
+    cds_p_value "0" base
+    cds_p_advance
+    cds_p_value "0" mark
+    if $mark != "<" {
+        $($result_var) = "$base"
+        return
+    }
+    cds_p_advance
+    cds_parse_type arg
+    cds_p_value "0" mark
+    # Multiple generic parameters are accepted for surface compatibility, but
+    # cDiesis erases them to the first argument by design.
+    while $mark == "," {
+        cds_p_advance
+        cds_parse_type ignored_arg
+        cds_p_value "0" mark
+    }
+    if $mark != ">" {
+        $(CDS_P_ERROR) = "expected '>' in generic type '$base'"
+        $($result_var) = "$base"
+        return
+    }
+    cds_p_advance
+    $__fwd3 = ""
+    cds_generic_name "$base" "$arg" __fwd3
+    $($result_var) = "$__fwd3"
+}
+
+function cds_parse_member (unit class_name) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $mods = ""
+    $first = ""
+    $second_kind = ""
+    $second = ""
+    $member_type = ""
+    $member_name = ""
+    $is_method = ""
+    $has_init = ""
+    cds_parse_modifiers mods
+
+    # A constructor is "ClassName(" with no return type.
+    cds_p_value "0" first
+    cds_p_kind "1" second_kind
+    cds_p_value "1" second
+    if $first == "$class_name" {
+        if $second == "(" {
+            # Consume the class name; the parameter list is parsed by
+            # cds_parse_method, which expects the cursor on '('.
+            cds_p_advance
+            cds_parse_method "$unit" "$class_name" "ctor" "void" "$mods"
+            return
+        }
+    }
+
+    cds_parse_type member_type
+    cds_p_value "0" member_name
+    cds_p_advance
+
+    cds_p_at "PUNCT" "(" is_method
+    if $is_method == "1" {
+        cds_parse_method "$unit" "$class_name" "$member_name" "$member_type" "$mods"
+        return
+    }
+
+    cds_class_add_field "$class_name" "$member_name" "$member_type" "$mods"
+    cds_p_accept "OP" "=" has_init
+    if $has_init == "1" {
+        # Field initialisers are compiled into the constructor, exactly like C#.
+        cds_p_skip_to_semicolon
+    }
+    cds_p_expect "PUNCT" ";"
+}
+
+function cds_p_skip_to_semicolon () {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $at_end = ""
+    $at_eof = ""
+    cds_p_at "PUNCT" ";" at_end
+    while $at_end != "1" {
+        cds_p_at "EOF" "" at_eof
+        if $at_eof == "1" {
+            return
+        }
+        cds_p_advance
+        cds_p_at "PUNCT" ";" at_end
+    }
+}
+
+function cds_parse_method (unit class_name method_name return_type mods) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_static = ""
+    cds_method_declare "$class_name" "$method_name" "$return_type" "$mods" "$unit"
+
+    $(CDS_P_CLASS) = "$class_name"
+    $(CDS_P_METHOD) = "$method_name"
+    $(CDS_P_TMP) = "0"
+    $(CDS_P_BREAK) = ""
+    $(CDS_P_CONT) = ""
+    cds_p_locals_clear
+
+    $unit_slot = "CDS_M_${class_name}_${method_name}_UNIT"
+    $($unit_slot) = "$unit"
+
+    # 'this' is parameter zero of every instance method, so instance and static
+    # calls share one calling convention and one CALL opcode.
+    cds_str_index_of "$mods" "s" is_static
+    if $is_static == "-1" {
+        cds_method_add_param "$class_name" "$method_name" "this" "$class_name"
+        cds_p_local_declare "this" "$class_name"
+    }
+
+    cds_p_expect "PUNCT" "("
+    cds_parse_params "$class_name" "$method_name"
+    cds_p_expect "PUNCT" ")"
+
+    cds_parse_block
+    cds_pemit "CONST tvoid k_void_placeholder"
+    cds_p_fix_implicit_return "$class_name" "$method_name"
+}
+
+function cds_parse_params (class_name method_name) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $at_end = ""
+    $param_type = ""
+    $param_name = ""
+    $ignored = ""
+    cds_p_at "PUNCT" ")" at_end
+    while $at_end != "1" {
+        cds_parse_type param_type
+        cds_p_value "0" param_name
+        cds_p_advance
+        cds_method_add_param "$class_name" "$method_name" "$param_name" "$param_type"
+        cds_p_local_declare "$param_name" "$param_type"
+        cds_p_accept "PUNCT" "," ignored
+        cds_p_at "PUNCT" ")" at_end
+    }
+}
+
+# Methods that fall off the end return the default of their declared type. The
+# placeholder emitted by cds_parse_method is rewritten here so that every method
+# ends in exactly one RET, which keeps the op stream structurally uniform.
+function cds_p_fix_implicit_return (class_name method_name) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $default_value = ""
+    $ref = ""
+    $n_slot = "CDS_M_${class_name}_${method_name}_CN"
+    $count = $($n_slot)
+    $last = $count - 1
+    $ret_slot = "CDS_M_${class_name}_${method_name}_RET"
+    $return_type = $($ret_slot)
+    cds_type_default "$return_type" default_value
+    cds_pool_add "$CDS_P_UNIT" "$default_value" ref
+
+    $code_slot = "CDS_M_${class_name}_${method_name}_C${last}"
+    $($code_slot) = "CONST tret $ref"
+    cds_emit "$class_name" "$method_name" "RET tret"
+}
+
+echo "cDiesis parser: declarations loaded."
+
+import cdiesis.statements
+import cdiesis.expressions
+
+echo "cDiesis parser loaded."

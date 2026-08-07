@@ -1,0 +1,708 @@
+# cdiesis/ops.bsh - The cDiesis primitive operation set, its emitter and its
+# executor.
+#
+# STATUS: experimental implementation (see framework/cdiesis.bsh header).
+#
+# This file is the reason cDiesis exists. Every construct the language accepts -
+# typed locals, fields, classes, inheritance, virtual calls, generics, foreach,
+# string interpolation, the standard library - is compiled down to the seventeen
+# instructions below, and nothing else. There is no escape hatch: the executor
+# understands these opcodes only.
+#
+#   OPCODE  OPERANDS                       MEANING                       WASM LOWERING (planned)
+#   ------  -----------------------------  ----------------------------  -----------------------------
+#   CONST   dst k<i>                       load interned constant        i32.const <handle>
+#   MOVE    dst src                        slot to slot                  local.get / local.set
+#   LOADV   dst name                       read a shell variable         call besh.v1.var_get
+#   STOREV  name src                       write a shell variable        call besh.v1.var_set
+#   FGET    dst obj field                  read instance field           call besh.v1.field_get
+#   FSET    obj field src                  write instance field          call besh.v1.field_set
+#   NEW     dst Class argc a0..            allocate + run constructor    call $ctor (handle result)
+#   CALL    dst Class Method argc a0..     static / non-virtual call     call $func
+#   VCALL   dst obj Method argc a0..       virtual dispatch              call_indirect over vtable
+#   HOST    dst lang symbol argc a0..      cross-language / shell call   call besh.v1.host_call
+#   BIN     dst op a b                     binary operator               call besh.v1.op2 (or unboxed)
+#   UN      dst op a                       unary operator                call besh.v1.op1
+#   CAST    dst type src                   checked conversion            call besh.v1.cast
+#   LABEL   L<i>                           branch target                 block / loop boundary
+#   JMP     L<i>                           unconditional branch          br
+#   JMPF    L<i> cond                      branch if falsy               i32.eqz + br_if
+#   RET     src                            return from method            return
+#
+# Every operand is a *slot name*, and every slot holds a string, because that is
+# the only value B[e]SH has. Types are metadata stored next to the slot, never a
+# different storage kind - which is exactly the property the ROADMAP's Phase 2
+# host ABI needs when it turns these slots into opaque i32 handles.
+#
+# STORAGE
+#   CDS_K_<unit>_N / CDS_K_<unit>_<i>        constant pool of a unit
+#   CDS_M_<C>_<M>_CN / CDS_M_<C>_<M>_C<i>    compiled ops of a method
+#   CDS_M_<C>_<M>_LN                         label counter of a method
+#   CDS_FR_NEXT                              next free frame id
+#   CDS_S_<frame>_<slot>                     slot value
+#   CDS_S_<frame>_<slot>__T                  slot static type
+#   CDS_ARG_N / CDS_ARG_<i>                  in-language call arguments
+#   CDS_RET_FLAG / CDS_RET_VALUE             return channel of the running frame
+
+echo "Loading cDiesis primitive op set (cdiesis/ops.bsh)..."
+
+$(CDS_FR_NEXT) = "1"
+$(CDS_ARG_N) = "0"
+$(CDS_RET_FLAG) = "0"
+$(CDS_RET_VALUE) = ""
+$(CDS_TRAP) = ""
+
+# --- Constant pool --------------------------------------------------------
+#
+# Literals never appear inside an op string: whitespace and quotes would make
+# the flat encoding ambiguous, and interning is what a WebAssembly data section
+# wants anyway. CONST carries a pool reference, "k<i>".
+
+function cds_pool_add (unit value result_var) {
+    $n_slot = "CDS_K_${unit}_N"
+    $idx = $($n_slot)
+    if $idx == "" {
+        $idx = "0"
+    }
+    $entry = "CDS_K_${unit}_${idx}"
+    $($entry) = "$value"
+    $next = $idx + 1
+    $($n_slot) = "$next"
+    $($result_var) = "k${idx}"
+}
+
+function cds_pool_get (unit ref result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $idx = ""
+    cds_str_rest "$ref" "1" idx
+    $entry = "CDS_K_${unit}_${idx}"
+    $($result_var) = $($entry)
+}
+
+function cds_pool_drop (unit) {
+    $n_slot = "CDS_K_${unit}_N"
+    $count = $($n_slot)
+    $idx = "0"
+    while $idx < $count {
+        $entry = "CDS_K_${unit}_${idx}"
+        $($entry) = ""
+        $idx = $idx + 1
+    }
+    $($n_slot) = "0"
+}
+
+# --- Emitter --------------------------------------------------------------
+
+function cds_emit (class_name method_name op_text) {
+    $n_slot = "CDS_M_${class_name}_${method_name}_CN"
+    $idx = $($n_slot)
+    if $idx == "" {
+        $idx = "0"
+    }
+    $code_slot = "CDS_M_${class_name}_${method_name}_C${idx}"
+    $($code_slot) = "$op_text"
+    $next = $idx + 1
+    $($n_slot) = "$next"
+}
+
+function cds_emit_reset (class_name method_name) {
+    $n_slot = "CDS_M_${class_name}_${method_name}_CN"
+    $($n_slot) = "0"
+    $l_slot = "CDS_M_${class_name}_${method_name}_LN"
+    $($l_slot) = "0"
+}
+
+function cds_new_label (class_name method_name result_var) {
+    $l_slot = "CDS_M_${class_name}_${method_name}_LN"
+    $idx = $($l_slot)
+    if $idx == "" {
+        $idx = "0"
+    }
+    $next = $idx + 1
+    $($l_slot) = "$next"
+    $($result_var) = "L${idx}"
+}
+
+function cds_find_label (class_name method_name label result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $opcode = ""
+    $name = ""
+    $n_slot = "CDS_M_${class_name}_${method_name}_CN"
+    $count = $($n_slot)
+    $idx = "0"
+    while $idx < $count {
+        $code_slot = "CDS_M_${class_name}_${method_name}_C${idx}"
+        $op = $($code_slot)
+        cds_str_field "$op" "0" opcode
+        if $opcode == "LABEL" {
+            cds_str_field "$op" "1" name
+            if $name == "$label" {
+                $($result_var) = "$idx"
+                return
+            }
+        }
+        $idx = $idx + 1
+    }
+    $($result_var) = "-1"
+}
+
+# --- Frames and slots -----------------------------------------------------
+#
+# A frame is a numeric prefix, not a data structure: slot "t3" of frame 7 is the
+# shell variable CDS_S_7_t3. Frames are therefore free to create and cheap to
+# discard, and every live value in a running cDiesis program is reachable by
+# name from BSH - which is what makes differential testing against a future
+# compiled path possible at all.
+
+function cds_frame_push (result_var) {
+    $id = $CDS_FR_NEXT
+    $next = $id + 1
+    $(CDS_FR_NEXT) = "$next"
+    $slots = "CDS_FR_${id}_SLOTS"
+    $($slots) = ""
+    $($result_var) = "$id"
+}
+
+function cds_slot_set (frame slot value) {
+    $name = "CDS_S_${frame}_${slot}"
+    $($name) = "$value"
+    $registry = "CDS_FR_${frame}_SLOTS"
+    $known = $($registry)
+    $($registry) = "$known $slot"
+}
+
+function cds_slot_get (frame slot result_var) {
+    $name = "CDS_S_${frame}_${slot}"
+    $($result_var) = $($name)
+}
+
+function cds_slot_type_set (frame slot type_name) {
+    $name = "CDS_S_${frame}_${slot}__T"
+    $($name) = "$type_name"
+}
+
+function cds_slot_type_get (frame slot result_var) {
+    $name = "CDS_S_${frame}_${slot}__T"
+    $($result_var) = $($name)
+}
+
+function cds_frame_pop (frame) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $count = ""
+    $slot = ""
+    $registry = "CDS_FR_${frame}_SLOTS"
+    $slots = $($registry)
+    cds_str_field_count "$slots" count
+    $idx = "0"
+    while $idx < $count {
+        cds_str_field "$slots" "$idx" slot
+        $name = "CDS_S_${frame}_${slot}"
+        $($name) = ""
+        $type_name = "CDS_S_${frame}_${slot}__T"
+        $($type_name) = ""
+        $idx = $idx + 1
+    }
+    $($registry) = ""
+}
+
+# --- In-language argument vector -----------------------------------------
+#
+# Distinct from lang.bsh's LANG_ARG vector on purpose: LANG_ARG is the
+# cross-language boundary and must not be clobbered by an ordinary cDiesis call
+# that happens to occur while a foreign call is being assembled.
+
+function cds_arg_reset () {
+    $(CDS_ARG_N) = "0"
+}
+
+function cds_arg_push (value) {
+    $idx = $CDS_ARG_N
+    $slot = "CDS_ARG_${idx}"
+    $($slot) = "$value"
+    $(CDS_ARG_N) = $idx + 1
+}
+
+function cds_arg_get (index result_var) {
+    $slot = "CDS_ARG_${index}"
+    $($result_var) = $($slot)
+}
+
+# --- Executor -------------------------------------------------------------
+#
+# One loop, one dispatch chain, no recursion into the shell parser. This is the
+# interpreter that a compiled Fayasm module must agree with instruction by
+# instruction (ROADMAP.md, "Required Differential and Safety Coverage").
+
+function cds_exec (class_name method_name frame result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $opcode = ""
+    $target = ""
+    $target_pc = ""
+    $cond_slot = ""
+    $cond_value = ""
+    $is_true = ""
+    $src = ""
+    $ret_value = ""
+    $n_slot = "CDS_M_${class_name}_${method_name}_CN"
+    $count = $($n_slot)
+    $pc = "0"
+    $(CDS_RET_FLAG) = "0"
+    $(CDS_RET_VALUE) = ""
+
+    while $pc < $count {
+        $code_slot = "CDS_M_${class_name}_${method_name}_C${pc}"
+        $op = $($code_slot)
+        cds_str_field "$op" "0" opcode
+
+        $next_pc = $pc + 1
+
+        if $opcode == "LABEL" {
+            $pc = "$next_pc"
+        }
+        if $opcode == "JMP" {
+            cds_str_field "$op" "1" target
+            cds_find_label "$class_name" "$method_name" "$target" target_pc
+            $pc = "$target_pc"
+        }
+        if $opcode == "JMPF" {
+            cds_str_field "$op" "1" target
+            cds_str_field "$op" "2" cond_slot
+            cds_slot_get "$frame" "$cond_slot" cond_value
+            cds_truthy "$cond_value" is_true
+            if $is_true == "1" {
+                $pc = "$next_pc"
+            } else {
+                cds_find_label "$class_name" "$method_name" "$target" target_pc
+                $pc = "$target_pc"
+            }
+        }
+        if $opcode == "RET" {
+            cds_str_field "$op" "1" src
+            cds_slot_get "$frame" "$src" ret_value
+            $(CDS_RET_VALUE) = "$ret_value"
+            $(CDS_RET_FLAG) = "1"
+            $pc = "$count"
+        }
+        if $opcode != "LABEL" {
+            if $opcode != "JMP" {
+                if $opcode != "JMPF" {
+                    if $opcode != "RET" {
+                        cds_exec_op "$class_name" "$method_name" "$frame" "$op" "$opcode"
+                        $pc = "$next_pc"
+                    }
+                }
+            }
+        }
+
+        if $CDS_TRAP != "" {
+            echo "cDiesis trap in ${class_name}.${method_name} at op $pc: $CDS_TRAP"
+            $pc = "$count"
+        }
+    }
+
+    $($result_var) = "$CDS_RET_VALUE"
+}
+
+# Data-flow opcodes. Split out of cds_exec so both stay inside the core's
+# 100-line function-body limit.
+function cds_exec_op (class_name method_name frame op opcode) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $dst = ""
+    $ref = ""
+    $value = ""
+    $src = ""
+    $name = ""
+    $bin_op = ""
+    $a = ""
+    $b = ""
+    $lhs = ""
+    $rhs = ""
+    $bin_result = ""
+    $un_op = ""
+    $operand = ""
+    $un_result = ""
+    $type_name = ""
+    $cast_result = ""
+    if $opcode == "CONST" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" ref
+        $unit_slot = "CDS_M_${class_name}_${method_name}_UNIT"
+        cds_pool_get "$($unit_slot)" "$ref" value
+        cds_slot_set "$frame" "$dst" "$value"
+        return
+    }
+    if $opcode == "MOVE" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" src
+        cds_slot_get "$frame" "$src" value
+        cds_slot_set "$frame" "$dst" "$value"
+        return
+    }
+    if $opcode == "LOADV" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" name
+        cds_slot_set "$frame" "$dst" $($name)
+        return
+    }
+    if $opcode == "STOREV" {
+        cds_str_field "$op" "1" name
+        cds_str_field "$op" "2" src
+        cds_slot_get "$frame" "$src" value
+        $($name) = "$value"
+        return
+    }
+    if $opcode == "BIN" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" bin_op
+        cds_str_field "$op" "3" a
+        cds_str_field "$op" "4" b
+        cds_slot_get "$frame" "$a" lhs
+        cds_slot_get "$frame" "$b" rhs
+        cds_binary "$bin_op" "$lhs" "$rhs" bin_result
+        cds_slot_set "$frame" "$dst" "$bin_result"
+        return
+    }
+    if $opcode == "UN" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" un_op
+        cds_str_field "$op" "3" a
+        cds_slot_get "$frame" "$a" operand
+        cds_unary "$un_op" "$operand" un_result
+        cds_slot_set "$frame" "$dst" "$un_result"
+        return
+    }
+    if $opcode == "CAST" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" type_name
+        cds_str_field "$op" "3" src
+        cds_slot_get "$frame" "$src" value
+        cds_cast "$value" "$type_name" cast_result
+        cds_slot_set "$frame" "$dst" "$cast_result"
+        return
+    }
+    cds_exec_op_object "$class_name" "$method_name" "$frame" "$op" "$opcode"
+}
+
+# Object and call opcodes.
+function cds_exec_op_object (class_name method_name frame op opcode) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $dst = ""
+    $obj_slot = ""
+    $field = ""
+    $objref = ""
+    $field_value = ""
+    $src = ""
+    $value = ""
+    $cls = ""
+    $new_ref = ""
+    $target_method = ""
+    $call_result = ""
+    $vcall_result = ""
+    $target_lang = ""
+    $symbol = ""
+    $host_result = ""
+    if $opcode == "FGET" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" obj_slot
+        cds_str_field "$op" "3" field
+        cds_slot_get "$frame" "$obj_slot" objref
+        cds_obj_get "$objref" "$field" field_value
+        cds_slot_set "$frame" "$dst" "$field_value"
+        return
+    }
+    if $opcode == "FSET" {
+        cds_str_field "$op" "1" obj_slot
+        cds_str_field "$op" "2" field
+        cds_str_field "$op" "3" src
+        cds_slot_get "$frame" "$obj_slot" objref
+        cds_slot_get "$frame" "$src" value
+        cds_obj_set "$objref" "$field" "$value"
+        return
+    }
+    if $opcode == "NEW" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" cls
+        cds_collect_args "$frame" "$op" "3"
+        cds_obj_new "$cls" new_ref
+        cds_slot_set "$frame" "$dst" "$new_ref"
+        return
+    }
+    if $opcode == "CALL" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" cls
+        cds_str_field "$op" "3" target_method
+        cds_collect_args "$frame" "$op" "4"
+        cds_invoke_static "$cls" "$target_method" call_result
+        cds_slot_set "$frame" "$dst" "$call_result"
+        return
+    }
+    if $opcode == "VCALL" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" obj_slot
+        cds_str_field "$op" "3" target_method
+        cds_slot_get "$frame" "$obj_slot" objref
+        cds_collect_args "$frame" "$op" "4"
+        cds_invoke_virtual "$objref" "$target_method" vcall_result
+        cds_slot_set "$frame" "$dst" "$vcall_result"
+        return
+    }
+    if $opcode == "HOST" {
+        cds_str_field "$op" "1" dst
+        cds_str_field "$op" "2" target_lang
+        cds_str_field "$op" "3" symbol
+        cds_collect_args "$frame" "$op" "4"
+        cds_host_call "$target_lang" "$symbol" host_result
+        cds_slot_set "$frame" "$dst" "$host_result"
+        return
+    }
+    if $opcode == "NOP" {
+        return
+    }
+    $(CDS_TRAP) = "unknown opcode '$opcode'"
+}
+
+# Reads "argc a0 a1 ..." starting at field 'first' and fills the in-language
+# argument vector with the *values* of those slots.
+function cds_collect_args (frame op first) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $argc = ""
+    $arg_slot = ""
+    $arg_value = ""
+    cds_str_field "$op" "$first" argc
+    cds_arg_reset
+    $idx = "0"
+    while $idx < $argc {
+        $field_index = $first + 1
+        $field_index = $field_index + $idx
+        cds_str_field "$op" "$field_index" arg_slot
+        cds_slot_get "$frame" "$arg_slot" arg_value
+        cds_arg_push "$arg_value"
+        $idx = $idx + 1
+    }
+}
+
+# --- Operators ------------------------------------------------------------
+#
+# cDiesis does not implement arithmetic. It delegates to the same BSH operator
+# handlers the shell itself uses (framework/core_operators.bsh), so a cDiesis
+# '+' and a BSH '+' cannot drift apart.
+
+function cds_binary (op lhs rhs result_var) {
+    if $op == "+" { bsh_op_add_or_concat "+" "$lhs" "$rhs" $result_var; return }
+    if $op == "-" { bsh_op_subtract "-" "$lhs" "$rhs" $result_var; return }
+    if $op == "*" { bsh_op_multiply "*" "$lhs" "$rhs" $result_var; return }
+    if $op == "/" { bsh_op_divide "/" "$lhs" "$rhs" $result_var; return }
+    if $op == "%" { bsh_op_modulo "%" "$lhs" "$rhs" $result_var; return }
+    if $op == "==" { cds_equals "$lhs" "$rhs" $result_var; return }
+    if $op == "!=" { cds_equals "$lhs" "$rhs" eq; cds_not "$eq" $result_var; return }
+    if $op == "<" { bsh_op_less_than "<" "$lhs" "$rhs" $result_var; return }
+    if $op == ">" { bsh_op_greater_than ">" "$lhs" "$rhs" $result_var; return }
+    if $op == "<=" { bsh_op_less_equals "<=" "$lhs" "$rhs" $result_var; return }
+    if $op == ">=" { bsh_op_greater_equals ">=" "$lhs" "$rhs" $result_var; return }
+    if $op == "&&" { cds_and "$lhs" "$rhs" $result_var; return }
+    if $op == "||" { cds_or "$lhs" "$rhs" $result_var; return }
+    $(CDS_TRAP) = "unsupported binary operator '$op'"
+    $($result_var) = ""
+}
+
+function cds_unary (op operand result_var) {
+    if $op == "!" { cds_not "$operand" $result_var; return }
+    if $op == "-" { bsh_op_subtract "-" "0" "$operand" $result_var; return }
+    if $op == "+" { $($result_var) = "$operand"; return }
+    $(CDS_TRAP) = "unsupported unary operator '$op'"
+    $($result_var) = ""
+}
+
+# Equality is type-directed: numbers compare numerically, everything else
+# compares as text. C# reference equality would need identity on the handle,
+# which is what comparing the "obj#<id>" strings already gives.
+function cds_equals (lhs rhs result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $lhs_type = ""
+    $rhs_type = ""
+    $__fwd1 = ""
+    cds_type_of "$lhs" lhs_type
+    cds_type_of "$rhs" rhs_type
+    if $lhs_type == "string" {
+        if $lhs == "$rhs" { $($result_var) = "1" } else { $($result_var) = "0" }
+        return
+    }
+    if $rhs_type == "string" {
+        if $lhs == "$rhs" { $($result_var) = "1" } else { $($result_var) = "0" }
+        return
+    }
+    $__fwd1 = ""
+    bsh_op_equals "==" "$lhs" "$rhs" __fwd1
+    $($result_var) = "$__fwd1"
+}
+
+function cds_truthy (value result_var) {
+    $($result_var) = "1"
+    if $value == "" { $($result_var) = "0" }
+    if $value == "0" { $($result_var) = "0" }
+    if $value == "false" { $($result_var) = "0" }
+    if $value == "null" { $($result_var) = "0" }
+}
+
+function cds_not (value result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $is_true = ""
+    cds_truthy "$value" is_true
+    if $is_true == "1" {
+        $($result_var) = "0"
+    } else {
+        $($result_var) = "1"
+    }
+}
+
+function cds_and (lhs rhs result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $a = ""
+    $b = ""
+    cds_truthy "$lhs" a
+    cds_truthy "$rhs" b
+    if $a == "1" {
+        $($result_var) = "$b"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+function cds_or (lhs rhs result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $a = ""
+    $b = ""
+    cds_truthy "$lhs" a
+    cds_truthy "$rhs" b
+    if $a == "1" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "$b"
+    }
+}
+
+# --- Invocation -----------------------------------------------------------
+
+function cds_invoke_static (class_name method_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $owner = ""
+    $frame = ""
+    $exec_result = ""
+    cds_method_owner "$class_name" "$method_name" owner
+    if $owner == "" {
+        $(CDS_TRAP) = "no such method ${class_name}.${method_name}"
+        $($result_var) = ""
+        return
+    }
+
+    cds_frame_push frame
+    cds_bind_params "$owner" "$method_name" "$frame"
+
+    $saved_ret_flag = "$CDS_RET_FLAG"
+    $saved_ret_value = "$CDS_RET_VALUE"
+
+    cds_exec "$owner" "$method_name" "$frame" exec_result
+
+    $(CDS_RET_FLAG) = "$saved_ret_flag"
+    $(CDS_RET_VALUE) = "$saved_ret_value"
+
+    cds_frame_pop "$frame"
+    $($result_var) = "$exec_result"
+}
+
+function cds_invoke_virtual (objref method_name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $runtime_class = ""
+    $__fwd2 = ""
+    cds_obj_class "$objref" runtime_class
+    if $runtime_class == "" {
+        $(CDS_TRAP) = "virtual call on null reference"
+        $($result_var) = ""
+        return
+    }
+    # 'this' is argument zero for every instance method.
+    cds_arg_unshift "$objref"
+    $__fwd2 = ""
+    cds_invoke_static "$runtime_class" "$method_name" __fwd2
+    $($result_var) = "$__fwd2"
+}
+
+function cds_arg_unshift (value) {
+    $idx = $CDS_ARG_N
+    while $idx > "0" {
+        $prev = $idx - 1
+        $from = "CDS_ARG_${prev}"
+        $to = "CDS_ARG_${idx}"
+        $($to) = $($from)
+        $idx = $prev
+    }
+    $(CDS_ARG_0) = "$value"
+    $(CDS_ARG_N) = $CDS_ARG_N + 1
+}
+
+# Copies the in-language argument vector into the callee's parameter slots and
+# type-checks each one against its declared type.
+function cds_bind_params (class_name method_name frame) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $arg_value = ""
+    $ok = ""
+    $pn_slot = "CDS_M_${class_name}_${method_name}_PN"
+    $param_count = $($pn_slot)
+    $idx = "0"
+    while $idx < $param_count {
+        $name_slot = "CDS_M_${class_name}_${method_name}_P${idx}_NAME"
+        $type_slot = "CDS_M_${class_name}_${method_name}_P${idx}_TYPE"
+        $param_name = $($name_slot)
+        $param_type = $($type_slot)
+
+        cds_arg_get "$idx" arg_value
+        cds_check_assignable "$arg_value" "$param_type" ok
+        if $ok != "1" {
+            $(CDS_TRAP) = "argument $idx of ${class_name}.${method_name} is not a $param_type"
+        }
+        cds_slot_set "$frame" "$param_name" "$arg_value"
+        cds_slot_type_set "$frame" "$param_name" "$param_type"
+        $idx = $idx + 1
+    }
+}
+
+# --- Host boundary --------------------------------------------------------
+#
+# The single point where cDiesis leaves its own world. Everything else - fields,
+# calls, arithmetic - stays inside the op set. This is the function that becomes
+# an imported WebAssembly host function in ROADMAP Phase 2.
+function cds_host_call (target_lang symbol result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $value = ""
+    $__fwd3 = ""
+    lang_arg_reset
+    $idx = "0"
+    while $idx < $CDS_ARG_N {
+        cds_arg_get "$idx" value
+        lang_arg_push "$value"
+        $idx = $idx + 1
+    }
+    $__fwd3 = ""
+    lang_call "$target_lang" "$symbol" __fwd3
+    $($result_var) = "$__fwd3"
+    if $LANG_LAST_ERROR != "" {
+        $(CDS_TRAP) = "host call ${target_lang}:${symbol} failed: $LANG_LAST_ERROR"
+    }
+}
+
+echo "cDiesis primitive op set loaded (17 opcodes, one executor)."

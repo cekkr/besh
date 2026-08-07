@@ -1,0 +1,422 @@
+# lang.bsh - Language Framework Manager for B[e]SH
+#
+# STATUS: experimental implementation. Lifecycle, unload/reload and symmetric
+# cDiesis/RPN calls are exercised by tests/cdiesis_lifecycle.bsh and
+# tests/cdiesis_interop.bsh.
+#
+# PURPOSE
+#   A "language framework" is a set of BSH functions that can read source text
+#   written in some notation, lower it to B[e]SH primitives, and execute it.
+#   This module owns the lifecycle that is common to all of them:
+#
+#     register -> load -> (eval / call) -> unload -> reload
+#
+#   It also owns the cross-language call boundary, so a unit written in one
+#   language framework can call a symbol exported by another one without
+#   knowing anything about how that other language is implemented.
+#
+# STORAGE (all values are strings; names are flat and underscore-mangled)
+#   LANG_LIST_N                  number of registered frameworks
+#   LANG_LIST_<i>                framework name at position i
+#   LANG_REG_<name>_DEF          "1" once registered
+#   LANG_REG_<name>_VERSION      framework version string
+#   LANG_REG_<name>_MODULE       module spec passed to 'import'
+#   LANG_REG_<name>_ONLOAD       BSH function called after import
+#   LANG_REG_<name>_ONUNLOAD     BSH function called before teardown
+#   LANG_REG_<name>_EVAL         BSH function: (source_var result_var)
+#   LANG_REG_<name>_CALL         BSH function: (symbol result_var), args in vector
+#   LANG_REG_<name>_STATE        "registered" | "loaded" | "unloaded"
+#   LANG_X_<name>_<symbol>       exported symbol -> BSH target function name
+#   LANG_ARG_N / LANG_ARG_<i>    the shared argument vector for cross calls
+#   LANG_STACK_N / LANG_STACK_<i> active language stack (for nested calls)
+#   LANG_LAST_ERROR              last boundary error, "" when clean
+
+echo "Loading Language Framework Manager (lang.bsh)..."
+
+$(LANG_MANAGER_VERSION) = "0.1"
+
+# --- Registry -------------------------------------------------------------
+
+function lang_reset () {
+    $(LANG_LIST_N) = "0"
+    $(LANG_ARG_N) = "0"
+    $(LANG_STACK_N) = "0"
+    $(LANG_LAST_ERROR) = ""
+}
+
+# A framework calls this from its entry module, before anything else.
+function lang_register (name version module onload onunload eval_fn call_fn) {
+    $reg_def = "LANG_REG_${name}_DEF"
+    $($reg_def) = "1"
+
+    $reg_ver = "LANG_REG_${name}_VERSION"
+    $($reg_ver) = "$version"
+
+    $reg_mod = "LANG_REG_${name}_MODULE"
+    $($reg_mod) = "$module"
+
+    $reg_onload = "LANG_REG_${name}_ONLOAD"
+    $($reg_onload) = "$onload"
+
+    $reg_onunload = "LANG_REG_${name}_ONUNLOAD"
+    $($reg_onunload) = "$onunload"
+
+    $reg_eval = "LANG_REG_${name}_EVAL"
+    $($reg_eval) = "$eval_fn"
+
+    $reg_call = "LANG_REG_${name}_CALL"
+    $($reg_call) = "$call_fn"
+
+    $reg_state = "LANG_REG_${name}_STATE"
+    $($reg_state) = "registered"
+
+    $idx = $LANG_LIST_N
+    $slot = "LANG_LIST_${idx}"
+    $($slot) = "$name"
+    $(LANG_LIST_N) = $idx + 1
+
+    echo "lang: registered framework '$name' v$version (module '$module')"
+}
+
+function lang_is_registered (name result_var) {
+    $probe = "LANG_REG_${name}_DEF"
+    if $($probe) == "1" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+function lang_is_loaded (name result_var) {
+    $probe = "LANG_REG_${name}_STATE"
+    if $($probe) == "loaded" {
+        $($result_var) = "1"
+    } else {
+        $($result_var) = "0"
+    }
+}
+
+function lang_state (name result_var) {
+    $probe = "LANG_REG_${name}_STATE"
+    $($result_var) = $($probe)
+}
+
+# --- Load / unload --------------------------------------------------------
+#
+# 'lang_load' is idempotent: loading an already loaded framework is a no-op.
+# The module is imported only once per process, because 'import' mutates live
+# global registries; every later load is a re-activation through the ONLOAD
+# hook. That distinction matters, and the hook is where a framework rebuilds
+# whatever tables its unload dropped.
+
+function lang_load (name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $reg_ok = ""
+    $already = ""
+    lang_is_registered "$name" reg_ok
+    if $reg_ok != "1" {
+        # The bootstrap case: the module is expected to self-register on import.
+        import "$name"
+        lang_is_registered "$name" reg_ok
+    }
+    if $reg_ok != "1" {
+        $(LANG_LAST_ERROR) = "lang_load: unknown framework '$name'"
+        $($result_var) = "0"
+        return
+    }
+
+    lang_is_loaded "$name" already
+    if $already == "1" {
+        $($result_var) = "1"
+        return
+    }
+
+    $state_var = "LANG_REG_${name}_STATE"
+    $onload_var = "LANG_REG_${name}_ONLOAD"
+    $onload_fn = $($onload_var)
+
+    if $onload_fn != "" {
+        eval $onload_fn
+    }
+
+    $($state_var) = "loaded"
+    lang_stack_push "$name"
+    $($result_var) = "1"
+    echo "lang: framework '$name' loaded"
+}
+
+# Unloading is cooperative. The C core has no 'undefkeyword' / 'undefoperator',
+# so a framework cannot literally remove syntax it registered; what it CAN do is
+# drop its own tables and mark itself inactive, after which its handlers must
+# behave as if they were never installed. See guides/cdiesis.md, "Unload".
+function lang_unload (name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $was_loaded = ""
+    lang_is_loaded "$name" was_loaded
+    if $was_loaded != "1" {
+        $($result_var) = "1"
+        return
+    }
+
+    $onunload_var = "LANG_REG_${name}_ONUNLOAD"
+    $onunload_fn = $($onunload_var)
+    if $onunload_fn != "" {
+        eval $onunload_fn
+    }
+
+    $state_var = "LANG_REG_${name}_STATE"
+    $($state_var) = "unloaded"
+    lang_stack_drop "$name"
+    $($result_var) = "1"
+    echo "lang: framework '$name' unloaded"
+}
+
+function lang_reload (name result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $unload_ok = ""
+    $load_ok = ""
+    lang_unload "$name" unload_ok
+    lang_load "$name" load_ok
+    $($result_var) = "$load_ok"
+}
+
+# --- Active language stack ------------------------------------------------
+
+function lang_stack_push (name) {
+    $idx = $LANG_STACK_N
+    $slot = "LANG_STACK_${idx}"
+    $($slot) = "$name"
+    $(LANG_STACK_N) = $idx + 1
+}
+
+function lang_stack_top (result_var) {
+    if $LANG_STACK_N == "0" {
+        $($result_var) = ""
+        return
+    }
+    $idx = $LANG_STACK_N - 1
+    $slot = "LANG_STACK_${idx}"
+    $($result_var) = $($slot)
+}
+
+function lang_stack_pop (result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $__fwd1 = ""
+    $__fwd1 = ""
+    lang_stack_top __fwd1
+    $($result_var) = "$__fwd1"
+    if $LANG_STACK_N != "0" {
+        $(LANG_STACK_N) = $LANG_STACK_N - 1
+    }
+}
+
+# Remove the topmost occurrence of 'name' by compacting the stack.
+function lang_stack_drop (name) {
+    $read_idx = "0"
+    $write_idx = "0"
+    while $read_idx < $LANG_STACK_N {
+        $read_slot = "LANG_STACK_${read_idx}"
+        $entry = $($read_slot)
+        if $entry != "$name" {
+            $write_slot = "LANG_STACK_${write_idx}"
+            $($write_slot) = "$entry"
+            $write_idx = $write_idx + 1
+        }
+        $read_idx = $read_idx + 1
+    }
+    $(LANG_STACK_N) = "$write_idx"
+}
+
+# --- Argument vector ------------------------------------------------------
+#
+# Cross-language calls do not use BSH positional parameters: the C core caps a
+# function at 10 parameters, and a language boundary should not inherit that
+# limit. Arguments travel through one shared vector of string values, which is
+# also the shape the planned Fayasm host ABI wants (a table of opaque handles).
+
+function lang_arg_reset () {
+    $(LANG_ARG_N) = "0"
+}
+
+function lang_arg_push (value) {
+    $idx = $LANG_ARG_N
+    $slot = "LANG_ARG_${idx}"
+    $($slot) = "$value"
+    $(LANG_ARG_N) = $idx + 1
+}
+
+function lang_arg_get (index result_var) {
+    $slot = "LANG_ARG_${index}"
+    $($result_var) = $($slot)
+}
+
+function lang_arg_count (result_var) {
+    $($result_var) = "$LANG_ARG_N"
+}
+
+# --- Exported symbols and cross-language dispatch -------------------------
+
+# Called by a framework to publish one of its units/functions to everyone else.
+# 'target' is the BSH function that performs the call for this symbol.
+function lang_export (name symbol target) {
+    $slot = "LANG_X_${name}_${symbol}"
+    $($slot) = "$target"
+}
+
+function lang_resolve (name symbol result_var) {
+    $slot = "LANG_X_${name}_${symbol}"
+    $($result_var) = $($slot)
+}
+
+# lang_call is THE cross-language boundary.
+#   caller: lang_arg_reset; lang_arg_push ...; lang_call "cdiesis" "Demo.Main" out
+# The callee framework must be loaded; an unloaded framework is an error, never
+# a silent fallback, so that a script cannot accidentally run against a language
+# it thinks it unloaded.
+function lang_call (name symbol result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $ok = ""
+    $discarded = ""
+    $(LANG_LAST_ERROR) = ""
+
+    lang_is_loaded "$name" ok
+    if $ok != "1" {
+        $(LANG_LAST_ERROR) = "lang_call: framework '$name' is not loaded"
+        $($result_var) = ""
+        return
+    }
+
+    lang_stack_push "$name"
+
+    $call_var = "LANG_REG_${name}_CALL"
+    $call_fn = $($call_var)
+    if $call_fn == "" {
+        $(LANG_LAST_ERROR) = "lang_call: framework '$name' exposes no call entry"
+        $($result_var) = ""
+        lang_stack_pop discarded
+        return
+    }
+
+    # A function named by a variable is reached through eval: BSH resolves
+    # command names at parse time, not from a value.
+    $__lang_call_cmd = "$call_fn \"$symbol\" $result_var"
+    eval $__lang_call_cmd
+    lang_stack_pop discarded
+}
+
+# lang_eval runs a whole source unit written in 'name'. 'source_var' is the NAME
+# of a variable holding the source text, not the text itself: source units are
+# routinely longer than one expanded argument.
+function lang_eval (name source_var result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $ok = ""
+    $discarded = ""
+    $(LANG_LAST_ERROR) = ""
+
+    lang_is_loaded "$name" ok
+    if $ok != "1" {
+        $(LANG_LAST_ERROR) = "lang_eval: framework '$name' is not loaded"
+        $($result_var) = ""
+        return
+    }
+
+    lang_stack_push "$name"
+
+    $eval_var = "LANG_REG_${name}_EVAL"
+    $eval_fn = $($eval_var)
+    if $eval_fn == "" {
+        $(LANG_LAST_ERROR) = "lang_eval: framework '$name' exposes no eval entry"
+        $($result_var) = ""
+        lang_stack_pop discarded
+        return
+    }
+
+    $__lang_eval_cmd = "$eval_fn $source_var $result_var"
+    eval $__lang_eval_cmd
+    lang_stack_pop discarded
+}
+
+# --- Built-in 'bsh' pseudo-framework --------------------------------------
+#
+# BSH itself is registered as a language so that foreign code has exactly one
+# way to reach the shell: lang_call "bsh" <function> ... . No language
+# framework should call shell functions by any other route, because this is the
+# seam that a future Fayasm host import replaces.
+
+function bsh_lang_on_load () {
+    $BSH_LANG_ACTIVE = "1"
+}
+
+function bsh_lang_on_unload () {
+    # The host shell is never really unloadable; refuse politely instead of
+    # pretending the state changed.
+    $BSH_LANG_ACTIVE = "1"
+    echo "lang: 'bsh' is the host language and cannot be unloaded"
+}
+
+function bsh_lang_call (symbol result_var) {
+    # Reserve result holders in this frame: a callee writes its result
+    # into the innermost scope that already defines the name.
+    $target = ""
+    $argc = ""
+    $a0 = ""
+    $a1 = ""
+    $a2 = ""
+    $a3 = ""
+    lang_resolve "bsh" "$symbol" target
+    if $target == "" {
+        $target = "$symbol"
+    }
+
+    lang_arg_count argc
+    lang_arg_get "0" a0
+    lang_arg_get "1" a1
+    lang_arg_get "2" a2
+    lang_arg_get "3" a3
+
+    if $argc == "0" {
+        eval $target
+    }
+    if $argc == "1" {
+        $__bsh_bridge_cmd = "$target \"$a0\""
+        eval $__bsh_bridge_cmd
+    }
+    if $argc == "2" {
+        $__bsh_bridge_cmd = "$target \"$a0\" \"$a1\""
+        eval $__bsh_bridge_cmd
+    }
+    if $argc == "3" {
+        $__bsh_bridge_cmd = "$target \"$a0\" \"$a1\" \"$a2\""
+        eval $__bsh_bridge_cmd
+    }
+    if $argc == "4" {
+        $__bsh_bridge_cmd = "$target \"$a0\" \"$a1\" \"$a2\" \"$a3\""
+        eval $__bsh_bridge_cmd
+    }
+    if $argc > "4" {
+        $(LANG_LAST_ERROR) = "bsh_lang_call: '$symbol' arity $argc exceeds bridge limit 4"
+    }
+
+    # BSH functions answer through a result variable named by the caller; the
+    # bridge convention is that they write LANG_RETURN.
+    $($result_var) = "$LANG_RETURN"
+    $(LANG_RETURN) = ""
+}
+
+function bsh_lang_eval (source_var result_var) {
+    # A BSH "unit" is just shell text, so evaluation is the core 'eval'.
+    eval $($source_var)
+    $($result_var) = "$LAST_OP_RESULT"
+}
+
+lang_reset
+lang_register "bsh" "0.1" "" "bsh_lang_on_load" "bsh_lang_on_unload" "bsh_lang_eval" "bsh_lang_call"
+lang_load "bsh" bsh_lang_ready
+
+echo "Language Framework Manager loaded (lang_load / lang_unload / lang_call / lang_eval)."
