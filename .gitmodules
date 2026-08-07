@@ -1,0 +1,3 @@
+[submodule "thirds/fayasm"]
+	path = thirds/fayasm
+	url = https://github.com/Geckos-Ink/fayasm.git
