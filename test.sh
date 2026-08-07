@@ -6,10 +6,9 @@
 #   ./test.sh --no-build   skip the build step
 #   ./test.sh --list       list the suites without running them
 #
-# Each suite is a BSH script in tests/ that ends with 'assert_summary', which
-# prints "SUITE-RESULT: PASS" or "SUITE-RESULT: FAIL". A suite that crashes,
-# hangs or exits early prints neither and is reported as a failure - silence is
-# never treated as success.
+# Each suite is a BSH or Bash script in tests/ that prints "SUITE-RESULT: PASS"
+# or "SUITE-RESULT: FAIL". A suite that crashes, hangs or exits early prints
+# neither and is reported as a failure - silence is never treated as success.
 #
 # Every suite runs with an isolated HOME (so a developer's own ~/.bshrc cannot
 # change the result) and an explicit BSH_MODULE_PATH.
@@ -75,7 +74,7 @@ run_with_timeout() {
 
 # --- Run -----------------------------------------------------------------
 
-suites=$(find tests -maxdepth 1 -name '*.bsh' | sort)
+suites=$(find tests -maxdepth 1 \( -name '*.bsh' -o -name '*.sh' \) | sort)
 
 total=0
 passed=0
@@ -83,7 +82,9 @@ failed=0
 failed_names=""
 
 for suite in $suites; do
-    name=$(basename "$suite" .bsh)
+    name=$(basename "$suite")
+    name=${name%.bsh}
+    name=${name%.sh}
     if [ -n "$FILTER" ]; then
         case "$name" in
             *"$FILTER"*) ;;

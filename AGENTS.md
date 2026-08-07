@@ -61,6 +61,8 @@ When these disagree, inspect the affected control path and run the narrowest saf
 - **Array and object storage is name-mangled:** arrays use `<base>_ARRAYIDX_<expanded-index>`; object properties use underscore-separated names and `<base>_BSH_STRUCT_TYPE` metadata. Change the mangling only with assignment, expansion, property helpers, stringification, and round-trip checks updated together.
 - **The BSH object format is not general JSON:** `object:`/`json:` assignment currently enters the same handwritten parser, which accepts bracketed quoted key/value pairs and nested brackets. Do not claim full JSON support or silently feed untrusted general JSON into it.
 - **External commands execute directly:** `find_command_in_path_dynamic` resolves `PATH`; `execute_external_command` uses `fork`/`execv`, optionally captures both stdout and stderr into one fixed-size buffer, trims trailing newlines, and writes `LAST_COMMAND_STATUS`. Do not introduce shell-string execution as a shortcut; preserve argument boundaries.
+- **Bash compatibility delegates instead of emulates:** CLI `.sh`, `-c`, `-s`, and `--bash` modes execute the installed `bash`; native `.bsh` input still uses the BSH parser. [`framework/bash.bsh`](framework/bash.bsh) reaches Bash through the argv-preserving `process` primitive. Do not claim that native BSH syntax is Bash-compatible or add partial Bash grammar to the BSH tokenizer.
+- **The Bash/cDiesis bridge is stateful:** [`framework/bash/cdiesis.sh`](framework/bash/cdiesis.sh) keeps one `bsh --bsh-stdin` process alive through private FIFOs. Object handles and mutations survive bridge calls but become invalid at `cdiesis_close`; values cross through private files, while class/method/field names are identifier-validated.
 - **Dynamic-library ABI is fixed:** `calllib` expects a symbol compatible with `int func(int argc, char *argv[], char *output_buffer, int buffer_size)`. `LAST_LIB_CALL_STATUS` and `LAST_LIB_CALL_OUTPUT` are the BSH-facing result channel. Arbitrary C signatures are unsupported and unsafe.
 - **File-backed loops depend on seeking:** while-loop replay uses `ftell`/`fseek` through block frames. `execute_user_function` passes `NULL` as its input source, so do not assume identical loop behavior in interactive input, script files, imports, and stored function bodies without focused verification.
 - **Module lookup is process-relative:** `BSH_MODULE_PATH` defaults to `./framework:~/.bsh_framework:/usr/local/share/bsh/framework`. The C code splits these strings but does not expand `~`; running outside the repository can prevent root `.bshrc` imports. Set `BSH_MODULE_PATH` explicitly in portable tests.
@@ -72,6 +74,8 @@ Primary implementation:
 `main` → `initialize_shell` → `$HOME/.bshrc` or [`.bshrc`](.bshrc) → `import` framework modules → `defoperator`/`defunc` registration
 
 `script or stdin line` → `process_line` → `advanced_tokenize_line` → assignment / built-in / user function / external command / expression parser
+
+`bsh -c` / `bsh -s` / `bsh *.sh` / `bsh --bash ...` → installed `bash` with the original argv boundaries
 
 `expression` → `parse_expression_recursive` → `OperatorDefinition` lookup → `invoke_bsh_operator_handler` → BSH handler → optional `calllib` → result-holder variable
 
@@ -90,6 +94,7 @@ Planned Fayasm path (not implemented):
 Owns the primary shell executable: data structures, tokenizer, runtime operator registry, expression evaluator, dispatcher, scopes, blocks, module and executable resolution, dynamic libraries, structured values, and entry point. Framework semantics belong in `.bsh` files, not here.
 
 - **Key functions and subparts:** `main` and `initialize_shell` bootstrap scopes, paths, variables, and startup scripts; `advanced_tokenize_line` emits tokens using registered operators; `process_line` dispatches all line forms; `parse_operand`, `parse_expression_recursive`, and `evaluate_expression_from_tokens` evaluate expressions; `handle_*` functions implement built-ins and control flow; `enter_scope`/`leave_scope` and scoped variable helpers own lifetime; `execute_script`, `execute_external_command`, and `execute_user_function` cross execution contexts; object parse/stringify helpers own the flattened representation.
+- **Bash/process additions:** `delegate_to_bash` owns CLI routing for Bash entry points; `handle_process_statement` captures a child launched with distinct argv entries; `--bsh-stdin` runs prompt-free native BSH input for stateful adapters. `BSH_EXECUTABLE` exposes the resolved current binary to scripts.
 - **Called by / depends on:** built by [`compile.sh`](compile.sh); loads [`.bshrc`](.bshrc) and modules in [`framework/`](framework/); uses POSIX process APIs and `dlfcn`.
 - **Tests:** [`test.sh`](test.sh) builds with warnings enabled and runs the isolated suites under [`tests/`](tests/).
 - **Common mistakes:** Do not add an operator only to C or only to a framework file; do not bypass scoped setters; do not assume capture keeps stderr separate; do not treat comments describing intended behavior as implemented.
@@ -204,12 +209,28 @@ A second, deliberately different loadable language (stack-based, untyped, no com
 - **Tests:** [`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh) covers direct calls, callbacks, stack isolation, and independent unload.
 - **Common mistakes:** Its `@lang:symbol/N` form pops arguments in reverse order; do not assume left-to-right pushes.
 
+### [`framework/bash.bsh`](framework/bash.bsh) and [`framework/bash/cdiesis.sh`](framework/bash/cdiesis.sh)
+
+The Bash language adapter and Bash-facing cDiesis object bridge.
+
+- **Key functions:** `bash_on_load`/`bash_on_unload`, `bash_eval`, `bash_run`, and `bash_call` register Bash with [`framework/lang.bsh`](framework/lang.bsh). The sourced Bash library exports `cdiesis_import`, `cdiesis_new`, `cdiesis_call`, `cdiesis_get`, `cdiesis_set`, and `cdiesis_close`.
+- **Depends on:** an installed `bash`, the core `process` command, and `bsh --bsh-stdin`; cDiesis bridge calls additionally depend on [`framework/cdiesis.bsh`](framework/cdiesis.bsh). Bash 3.2 or newer is sufficient for the sourced library.
+- **Tests:** [`tests/bash_framework.bsh`](tests/bash_framework.bsh) covers lifecycle/eval/call/script status and [`tests/bash_cdiesis.sh`](tests/bash_cdiesis.sh) covers CLI Bash syntax plus persistent cDiesis objects and fields.
+- **Common mistakes:** Native `.bsh` is not Bash syntax. Framework eval/call starts a fresh Bash process each time, while only the cDiesis FIFO bridge is persistent. The captured channel intentionally merges stdout and stderr.
+
 ### [`examples/cdiesis/`](examples/cdiesis/)
 
 Demonstration units and drivers for the language-framework work: [`hello.cds`](examples/cdiesis/hello.cds), [`shapes.cds`](examples/cdiesis/shapes.cds) (inheritance and virtual dispatch), [`inventory.cds`](examples/cdiesis/inventory.cds) (generics, dictionaries, `foreach`), [`interop.cds`](examples/cdiesis/interop.cds), plus the BSH drivers [`run_cdiesis.bsh`](examples/cdiesis/run_cdiesis.bsh) (compile, dump ops, run, unload, reload) and [`mixed_languages.bsh`](examples/cdiesis/mixed_languages.bsh) (BSH ↔ cDiesis ↔ RPN, with a mid-run unload).
 
 - **Status:** demonstrations; `hello.cds`, `shapes.cds`, and `inventory.cds` are also executed by [`tests/cdiesis_stdlib.bsh`](tests/cdiesis_stdlib.bsh).
 - **Common mistakes:** the older drivers assemble source inline, while current tests load `.cds` files through `readfile`.
+
+### [`examples/bash/`](examples/bash/)
+
+[`counter.cds`](examples/bash/counter.cds) is a cDiesis library with a mutable public field and instance methods. [`cdiesis_objects.sh`](examples/bash/cdiesis_objects.sh) is an ordinary Bash script that sources the bridge, compiles the library, constructs an object, calls methods, and reads/writes the field.
+
+- **Execution:** both `bash examples/bash/cdiesis_objects.sh` and `./bsh examples/bash/cdiesis_objects.sh` use genuine Bash syntax.
+- **Common mistakes:** call `cdiesis_close` (normally from an `EXIT` trap); handles belong to one bridge session and cannot be reused after it closes.
 
 ### [`examples/basicExample.bsh`](examples/basicExample.bsh)
 
@@ -254,7 +275,8 @@ Canonical primary build wrapper: `gcc -fno-common bsh.c -o bsh -g`.
 
 Build and acceptance harness. It performs a warnings-enabled build, creates an isolated `.test-home`, sets an explicit module path, bounds every `.bsh` suite with an alarm, and accepts only a zero exit with an explicit pass and no failure result; an empty filter match fails.
 
-- **Suites:** core variables/expansion, functions/scopes/recursion, control flow, cDiesis lifecycle, compiler/runtime, standard library and shipped examples, and cDiesis/RPN interop.
+- **Suites:** core variables/expansion, functions/scopes/recursion, control flow, cDiesis lifecycle, compiler/runtime, standard library and shipped examples, cDiesis/RPN interop, the Bash language framework, Bash CLI routing, and Bash-to-cDiesis objects.
+- **Discovery:** top-level `tests/*.bsh` and `tests/*.sh` are suites. Bash fixtures belong below `tests/fixtures/` so the runner does not execute them as standalone suites.
 - **Common mistakes:** output before a timeout is buffered per suite; inspect the reported `/tmp/bsh_test_<name>.out` when a suite exits without a result line. Do not weaken silence or timeout into success.
 
 ### [`groupFramework.py`](groupFramework.py)
@@ -345,6 +367,13 @@ Design document for the language-framework layer: cDiesis's architecture, the 17
 - **Authority:** design and dependency analysis plus the verified cDiesis contract; production-readiness claims still require evidence beyond this research suite.
 - **Maintenance:** keep the `CDS-REQ` table synchronized with **Known Gaps** here; when a requirement is implemented and verified, update both.
 
+### [`guides/bash.md`](guides/bash.md)
+
+Documents the boundary between native BSH and real Bash execution, direct CLI routing, the Bash language-framework API, captured-process limits, and the stateful Bash-to-cDiesis object bridge.
+
+- **Authority:** current usage contract for `.sh`, `-c`, `-s`, `--bash`, `bash_eval`/`bash_run`/`bash_call`, and `cdiesis_*` Bash functions; verify behavior with the two `bash_*` suites.
+- **Common mistakes:** Do not infer native Bash grammar in `.bsh` files or persistence across separate Bash framework subprocesses.
+
 ### [`guides/addToVSCode.md`](guides/addToVSCode.md)
 
 Documents a `settings.json` association mapping `*.bsh` to shell script highlighting.
@@ -407,10 +436,17 @@ MIT license for the repository. Preserve its notice in substantial copies.
 
 ### Loadable language frameworks — Experimental/scaffold
 
-- **Behavior:** [`framework/lang.bsh`](framework/lang.bsh) registers named language frameworks, activates and deactivates them at runtime, and routes calls between them; [`framework/cdiesis.bsh`](framework/cdiesis.bsh) and [`framework/rpn.bsh`](framework/rpn.bsh) are two languages implemented on that lifecycle.
+- **Behavior:** [`framework/lang.bsh`](framework/lang.bsh) registers named language frameworks, activates and deactivates them at runtime, and routes calls between them; [`framework/cdiesis.bsh`](framework/cdiesis.bsh), [`framework/rpn.bsh`](framework/rpn.bsh), and [`framework/bash.bsh`](framework/bash.bsh) use that lifecycle.
 - **Flow and owners:** `import <framework>` → `lang_register` → `lang_load` → framework `on_load` hook → compile/execute → `lang_call`/`lang_eval` across frameworks → `lang_unload` → framework `on_unload` hook drops its tables.
 - **Constraints:** unload is cooperative because the C core cannot undefine keywords, operators or functions; cross-language values are strings; object handles are opaque outside their owning framework.
-- **Tests and gaps:** lifecycle, compiler/runtime, stdlib/examples, and cross-language calls are covered by the four `tests/cdiesis_*.bsh` suites; unload remains cooperative (`CDS-REQ-7`).
+- **Tests and gaps:** lifecycle, compiler/runtime, stdlib/examples, cross-language calls, and Bash subprocess behavior have focused suites; unload remains cooperative (`CDS-REQ-7`). Each Bash framework eval/call is process-isolated rather than a persistent shell session.
+
+### Bash command-line and script support — Experimental
+
+- **Behavior:** `.sh`, `-c`, `-s`, and explicit `--bash` command lines are forwarded to the installed Bash interpreter; `framework/bash.bsh` exposes captured Bash eval/call/run through the language manager; `framework/bash/cdiesis.sh` provides a persistent cDiesis object session to Bash.
+- **Flow and owners:** `shell_main` → `delegate_to_bash` for direct CLI modes; `lang_eval` → `bash_eval` → `process` → `execute_external_command` for framework mode; Bash bridge → FIFO → `--bsh-stdin` → imported request scripts for cDiesis objects.
+- **Constraints:** Bash must be on `PATH`; capture is capped at `INPUT_BUFFER_SIZE - 1` and merges stdout/stderr; bridge processes and temporary files are trusted local execution, not isolation.
+- **Tests and gaps:** [`tests/bash_framework.bsh`](tests/bash_framework.bsh) and [`tests/bash_cdiesis.sh`](tests/bash_cdiesis.sh) cover the supported paths. Shebang detection for non-`.sh` filenames and persistent state across `lang_eval` calls are not provided.
 
 ### Pitfall: trusting startup success messages
 
@@ -438,9 +474,9 @@ MIT license for the repository. Preserve its notice in substantial copies.
 
 ## Interface Ownership Map
 
-- Executable entry points `./bsh` and `./bsh <script>` → `main` in [`bsh.c`](bsh.c).
+- Executable entry points `./bsh` and `./bsh <script.bsh>` → `main` in [`bsh.c`](bsh.c); `./bsh <script.sh>`, `./bsh -c`, `./bsh -s`, and `./bsh --bash ...` → `delegate_to_bash`.
 - Assignment `$name = expression` and `$array[index] = value` → `process_line` / `handle_assignment_advanced`.
-- Built-ins `echo`, `defkeyword`, `defoperator`, `if`, `else`, `while`, `defunc`, `loadlib`, `calllib`, `import`, `update_cwd`, `eval`, and `exit` → dispatch table expressed by the conditional chain in `process_line`.
+- Built-ins `echo`, `defkeyword`, `defoperator`, `if`, `else`, `while`, `defunc`, `loadlib`, `calllib`, `import`, `update_cwd`, `eval`, `process`, and `exit` → dispatch table expressed by the conditional chain in `process_line`.
 - Alias `function` → `defkeyword defunc function` in [`.bshrc`](.bshrc).
 - User-defined command names → `UserFunction` registry / `execute_user_function`.
 - Unknown command names → `PATH` resolution / `execute_external_command`.
@@ -448,6 +484,7 @@ MIT license for the repository. Preserve its notice in substantial copies.
 - Module names → `handle_import_statement` / `find_module_in_path`; default modules live in [`framework/`](framework/).
 - Native extension surface → `loadlib` and `calllib`; ABI defined under **Critical Implementation Contracts**.
 - Language-framework lifecycle and cross-language calls → `lang_register`, `lang_load`, `lang_unload`, `lang_call`, `lang_eval`, `lang_export` in [`framework/lang.bsh`](framework/lang.bsh).
+- Bash language and cDiesis bridge → [`framework/bash.bsh`](framework/bash.bsh) and [`framework/bash/cdiesis.sh`](framework/bash/cdiesis.sh); full usage contract in [`guides/bash.md`](guides/bash.md).
 - cDiesis compile/run/introspect surface → `cds_compile`, `cds_run`, `cds_call`, `cds_dump_ops` in [`framework/cdiesis.bsh`](framework/cdiesis.bsh); the 17 opcodes and their executor are owned by [`framework/cdiesis/ops.bsh`](framework/cdiesis/ops.bsh).
 
 ## Build, Run, Test, Debug, and Release
@@ -460,13 +497,15 @@ git submodule update --init --recursive
 ./test.sh
 ./bsh
 ./bsh examples/evalExample.bsh
+./bsh -c 'printf "hello from Bash\n"'
+./bsh examples/bash/cdiesis_objects.sh
 python3 groupFramework.py
 git diff --check
 ```
 
 - `git submodule update --init --recursive` materializes the pinned Fayasm dependency. It contacts the configured Git remote when objects are absent and does not integrate or build Fayasm into B[e]SH.
 - `./compile.sh` is the canonical debug build. `./test.sh` performs the stricter warnings-enabled build, creates an isolated `HOME`, sets `BSH_MODULE_PATH`, bounds every suite, and requires an explicit result line.
-- `./bsh` starts interactively; `./bsh <path>` runs a script. Startup executes a user `$HOME/.bshrc` preferentially, so use an isolated environment when testing repository startup behavior.
+- `./bsh` starts native BSH interactively; `./bsh <path.bsh>` runs a BSH script. Startup executes a user `$HOME/.bshrc` preferentially, so use an isolated environment when testing repository startup behavior. `.sh`, `-c`, `-s`, and `--bash` route to Bash without BSH startup. `--bsh-stdin` is the prompt-free native input mode used by adapters, not a Bash mode.
 - `python3 groupFramework.py` mutates ignored `allFramework.txt`; it is a debug inspection aid, not a build step.
 - Linting, formatting, static analysis, benchmarks, packaging, release, and deployment workflows are not defined. The current warnings-enabled suite build is clean on the verified macOS toolchain.
 
@@ -483,6 +522,7 @@ Debugging: [`.vscode/launch.json`](.vscode/launch.json) provides a generic GDB l
 - Object flatten/stringify round trips → no focused fixture or test.
 - Module path resolution is exercised by suite imports; external command capture, dynamic loading failures, extreme nesting limits, and global cleanup still lack focused tests.
 - Language-framework lifecycle, cDiesis compilation/execution, stdlib/examples, and cross-language calls → [`tests/cdiesis_lifecycle.bsh`](tests/cdiesis_lifecycle.bsh), [`tests/cdiesis_runtime.bsh`](tests/cdiesis_runtime.bsh), [`tests/cdiesis_stdlib.bsh`](tests/cdiesis_stdlib.bsh), and [`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh).
+- Bash language lifecycle/evaluation/script execution → [`tests/bash_framework.bsh`](tests/bash_framework.bsh); Bash CLI syntax and persistent cDiesis object access → [`tests/bash_cdiesis.sh`](tests/bash_cdiesis.sh).
 
 When fixing behavior, add an automated test harness if practical. Until one exists, make focused scripts fail observably rather than relying only on printed “Expected” comments.
 
@@ -491,6 +531,7 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 - Canonical project source is tracked root C, BSH, configuration, and documentation content outside [`gold/`](gold/). The root `bsh`, `allFramework.txt`, shared objects, `/tmp/bsh_compile_cache`, and `.bsh_history` are derived/runtime data.
 - Shell variables live in process memory and are freed by scope/cleanup routines; there is no persistence, migration, backup, or restore mechanism.
 - Imported BSH files, startup scripts, external executables, and loaded libraries execute with the user's privileges. There is no sandbox, signature verification, capability restriction, or trust separation.
+- Bash scripts and command strings, Bash framework subprocesses, and the Bash/cDiesis bridge execute with the user's privileges. The bridge uses a private temporary directory and FIFOs for transport, but this is an IPC mechanism, not a sandbox.
 - `$HOME/.bshrc` takes precedence over the repository fallback. Tests MUST avoid accidentally executing a real user startup file when reproducibility or safety matters.
 - Never commit credentials or place secret values in `.bshrc`, examples, generated bundles, command output, or debug logs. External-command capture merges stderr with stdout and may store it in variables.
 - Validate lengths against fixed buffers and recursion/nesting/argument limits before copying. Maintain null termination on every truncated string path.
@@ -511,7 +552,7 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 
 - The entire primary shell is research-stage.
 - Script-defined operators, framework math/string/type support, runtime C compilation, structured objects, arrays, loop/function behavior, and optional filesystem extensions require focused validation.
-- The language-framework layer ([`framework/lang.bsh`](framework/lang.bsh), [`framework/cdiesis.bsh`](framework/cdiesis.bsh) with [`framework/cdiesis/`](framework/cdiesis/), and [`framework/rpn.bsh`](framework/rpn.bsh)) is an experimental implementation with focused lifecycle, runtime, stdlib/example, and interop coverage.
+- The language-framework layer ([`framework/lang.bsh`](framework/lang.bsh), cDiesis, RPN, and Bash) is an experimental implementation with focused lifecycle, runtime, stdlib/example, interop, Bash subprocess, and Bash/cDiesis bridge coverage.
 - [`gold/bsh-rs/`](gold/bsh-rs/) is archived and excluded from current project scope.
 
 ### Known Gaps
@@ -522,6 +563,7 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 - Native string and filesystem libraries are absent; number/string operations have a verified `prim` fallback, while the optional filesystem framework remains untested.
 - No CI, formatter/linter configuration, packaging, or release workflow exists.
 - The language layer cannot truly remove syntax: the C core has no `undefkeyword`, `undefoperator`, or function removal, so `lang_unload` is cooperative. Full requirement list: `CDS-REQ-0` … `CDS-REQ-8` in [`guides/cdiesis.md`](guides/cdiesis.md).
+- Native BSH is not Bash-compatible. Bash support depends on an installed `bash`; framework calls are isolated subprocesses, capture merges stderr/stdout and is limited to one BSH value, and automatic CLI routing uses the `.sh` suffix rather than shebang inspection.
 
 ### Planned
 

@@ -1,0 +1,153 @@
+# bash.bsh - GNU Bash language framework for B[e]SH.
+#
+# Bash syntax is deliberately owned by the installed Bash interpreter. BSH
+# supplies lifecycle and cross-language dispatch; the C core supplies only the
+# generic `process` primitive that preserves argv boundaries and captures
+# output. This keeps Bash compatibility exact for the selected interpreter.
+#
+# Public API:
+#   import bash
+#   lang_load "bash" ok
+#   lang_eval "bash" SOURCE output
+#   bash_run "/path/to/script.sh" output
+#
+# `bash_call` treats its symbol as a Bash command string. LANG_ARG_* values are
+# exposed as Bash positional parameters ($1 ... $4).
+
+echo "Loading Bash Language Framework (bash.bsh)..."
+
+import lang
+
+$(BASH_FRAMEWORK_VERSION) = "0.1"
+$(BASH_FRAMEWORK_ACTIVE) = "0"
+$(BASH_PROGRAM) = "bash"
+$(BASH_LAST_STATUS) = "0"
+$(BASH_LAST_ERROR) = ""
+
+function bash_on_load () {
+    $(BASH_FRAMEWORK_ACTIVE) = "1"
+    $(BASH_LAST_STATUS) = "0"
+    $(BASH_LAST_ERROR) = ""
+}
+
+function bash_on_unload () {
+    $(BASH_FRAMEWORK_ACTIVE) = "0"
+    $(BASH_LAST_STATUS) = "0"
+    $(BASH_LAST_ERROR) = ""
+}
+
+function bash_require_active (result_var) {
+    if $BASH_FRAMEWORK_ACTIVE == "1" {
+        $($result_var) = "1"
+    } else {
+        $(BASH_LAST_ERROR) = "Bash framework is not loaded"
+        $($result_var) = "0"
+    }
+}
+
+function bash_record_status () {
+    $(BASH_LAST_STATUS) = "$LAST_COMMAND_STATUS"
+    if $LAST_COMMAND_STATUS == "0" {
+        $(BASH_LAST_ERROR) = ""
+    } else {
+        $(BASH_LAST_ERROR) = "Bash exited with status $LAST_COMMAND_STATUS"
+    }
+}
+
+# Framework eval entry. source_var is the NAME of the variable containing Bash
+# source, matching the lang_eval contract for long/multiline source units.
+function bash_eval (source_var result_var) {
+    $active = ""
+    $captured = ""
+    bash_require_active active
+    if $active != "1" {
+        $($result_var) = ""
+        return
+    }
+
+    $source = $($source_var)
+    process captured "$BASH_PROGRAM" "-c" "$source"
+    $($result_var) = "$captured"
+    bash_record_status
+}
+
+# Execute a .sh file with Bash. The optional arguments intentionally stop at
+# four because BSH functions currently have a ten-parameter core limit.
+function bash_run (script_path result_var arg0 arg1 arg2 arg3) {
+    $active = ""
+    $captured = ""
+    bash_require_active active
+    if $active != "1" {
+        $($result_var) = ""
+        return
+    }
+
+    if $arg3 != "" {
+        process captured "$BASH_PROGRAM" "$script_path" "$arg0" "$arg1" "$arg2" "$arg3"
+    } else {
+        if $arg2 != "" {
+            process captured "$BASH_PROGRAM" "$script_path" "$arg0" "$arg1" "$arg2"
+        } else {
+            if $arg1 != "" {
+                process captured "$BASH_PROGRAM" "$script_path" "$arg0" "$arg1"
+            } else {
+                if $arg0 != "" {
+                    process captured "$BASH_PROGRAM" "$script_path" "$arg0"
+                } else {
+                    process captured "$BASH_PROGRAM" "$script_path"
+                }
+            }
+        }
+    }
+    $($result_var) = "$captured"
+    bash_record_status
+}
+
+function bash_call (symbol result_var) {
+    $active = ""
+    $argc = ""
+    $a0 = ""
+    $a1 = ""
+    $a2 = ""
+    $a3 = ""
+    $captured = ""
+    bash_require_active active
+    if $active != "1" {
+        $($result_var) = ""
+        return
+    }
+
+    lang_arg_count argc
+    lang_arg_get "0" a0
+    lang_arg_get "1" a1
+    lang_arg_get "2" a2
+    lang_arg_get "3" a3
+
+    if $argc == "0" {
+        process captured "$BASH_PROGRAM" "-c" "$symbol" "besh-bash"
+    }
+    if $argc == "1" {
+        process captured "$BASH_PROGRAM" "-c" "$symbol" "besh-bash" "$a0"
+    }
+    if $argc == "2" {
+        process captured "$BASH_PROGRAM" "-c" "$symbol" "besh-bash" "$a0" "$a1"
+    }
+    if $argc == "3" {
+        process captured "$BASH_PROGRAM" "-c" "$symbol" "besh-bash" "$a0" "$a1" "$a2"
+    }
+    if $argc == "4" {
+        process captured "$BASH_PROGRAM" "-c" "$symbol" "besh-bash" "$a0" "$a1" "$a2" "$a3"
+    }
+    if $argc > "4" {
+        $(BASH_LAST_STATUS) = "2"
+        $(BASH_LAST_ERROR) = "bash_call supports at most four boundary arguments"
+        $($result_var) = ""
+        return
+    }
+    $($result_var) = "$captured"
+    bash_record_status
+}
+
+lang_register "bash" "$BASH_FRAMEWORK_VERSION" "bash" "bash_on_load" "bash_on_unload" "bash_eval" "bash_call"
+
+echo "Bash Language Framework registered (lang_eval / lang_call / bash_run)."

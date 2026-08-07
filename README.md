@@ -18,6 +18,26 @@ commands is minimal. The true power and research interest lie in its extensibili
 primarily through its defunc mechanism for user-defined functions (macros) and a conceptual
 framework for integrating external C libraries.
 
+## Native BSH and Bash execution
+
+The native `.bsh` language is shell-like but is **not Bash syntax**. BSH uses
+forms such as `$name = "value"` and runtime-defined operators. Bash constructs
+are executed by the installed Bash interpreter, which preserves their actual
+quoting, expansion, pipeline, redirection, array, function and built-in rules:
+
+```sh
+./compile.sh
+./bsh examples/evalExample.bsh
+./bsh -c 'values=(real bash); printf "%s %s\n" "${values[0]}" "${values[1]}"'
+./bsh examples/bash/cdiesis_objects.sh
+```
+
+`framework/bash.bsh` also registers Bash with the loadable language manager for
+`lang_eval`, `lang_call`, and `bash_run`. Bash scripts can source
+`framework/bash/cdiesis.sh` to compile a cDiesis library, construct persistent
+objects, call instance methods, and read/write public fields. The complete
+contract and limits are documented in [`guides/bash.md`](guides/bash.md).
+
 ## Core Philosophy and Design
 
 The design of B[e]SH is guided by several key principles:
@@ -245,4 +265,3 @@ boundaries of basic, yet extensible, shell environments.
 
 ### Final notes
 Well, this is just for faya. An experimental shell about incremental syntax and runtime construction
-

@@ -1,0 +1,33 @@
+# tests/bash_framework.bsh - Bash language lifecycle, eval, call and scripts.
+
+import tests.lib.assert
+assert_start "Bash: language framework"
+
+import bash
+lang_load "bash" loaded
+assert_eq "$loaded" "1" "framework loads"
+
+$BASH_SOURCE_TEXT = "printf alpha | tr a-z A-Z"
+lang_eval "bash" BASH_SOURCE_TEXT eval_output
+assert_eq "$eval_output" "ALPHA" "lang_eval uses Bash pipelines"
+assert_eq "$BASH_LAST_STATUS" "0" "successful eval publishes status"
+
+$BASH_SOURCE_TEXT = "printf failure; exit 7"
+lang_eval "bash" BASH_SOURCE_TEXT failed_output
+assert_eq "$failed_output" "failure" "failed eval still captures output"
+assert_eq "$BASH_LAST_STATUS" "7" "failed eval preserves Bash exit status"
+
+bash_run "tests/fixtures/bash_args.sh" script_output "left" "right"
+assert_eq "$script_output" "left:right" "bash_run preserves script arguments"
+
+lang_arg_reset
+lang_call "bash" "printf boundary" call_output
+assert_eq "$call_output" "boundary" "lang_call dispatches a Bash command string"
+
+lang_unload "bash" unloaded
+assert_eq "$unloaded" "1" "framework unloads"
+lang_eval "bash" BASH_SOURCE_TEXT after_unload
+assert_empty "$after_unload" "eval refuses after unload"
+assert_contains "$LANG_LAST_ERROR" "not loaded" "manager reports unloaded framework"
+
+assert_summary

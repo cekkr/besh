@@ -461,6 +461,7 @@ void handle_prim_statement(Token *tokens, int num_tokens);
 void handle_libloaded_statement(Token *tokens, int num_tokens);
 void handle_writefile_statement(Token *tokens, int num_tokens);
 void handle_readfile_statement(Token *tokens, int num_tokens);
+void handle_process_statement(Token *tokens, int num_tokens);
 void set_variable_indirect(const char *name_raw, const char *value_to_set, bool is_array_elem);
 
 
@@ -2157,6 +2158,7 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
         else if (strcmp(command_name, "libloaded") == 0) { handle_libloaded_statement(tokens, num_tokens); }
         else if (strcmp(command_name, "writefile") == 0) { handle_writefile_statement(tokens, num_tokens); }
         else if (strcmp(command_name, "readfile") == 0) { handle_readfile_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "process") == 0) { handle_process_statement(tokens, num_tokens); }
         // Add other built-ins here
         else {
             // Resolve the command against the user-function registry. Without
@@ -2678,6 +2680,31 @@ void initialize_shell() {
 typedef struct { int argc; char** argv; int status; } ShellMainArgs;
 static int shell_main(int argc, char *argv[]);
 
+static bool has_suffix(const char* text, const char* suffix) {
+    size_t text_len = strlen(text);
+    size_t suffix_len = strlen(suffix);
+    return text_len >= suffix_len && strcmp(text + text_len - suffix_len, suffix) == 0;
+}
+
+// Bash owns Bash grammar. The B[e]SH executable routes Bash's conventional
+// command-string and script-file entry points without attempting to duplicate
+// that grammar in the BSH tokenizer.
+static int delegate_to_bash(int argc, char* argv[], int first_bash_arg) {
+    int forwarded = argc - first_bash_arg;
+    char** bash_argv = calloc((size_t)forwarded + 2, sizeof(char*));
+    if (!bash_argv) {
+        perror("bsh: calloc for Bash argv");
+        return 1;
+    }
+    bash_argv[0] = "bash";
+    for (int i = 0; i < forwarded; ++i) bash_argv[i + 1] = argv[first_bash_arg + i];
+    bash_argv[forwarded + 1] = NULL;
+    execvp("bash", bash_argv);
+    fprintf(stderr, "bsh: cannot execute Bash: %s\n", strerror(errno));
+    free(bash_argv);
+    return 127;
+}
+
 static void* shell_main_thread(void* raw_args) {
     ShellMainArgs* args = (ShellMainArgs*)raw_args;
     args->status = shell_main(args->argc, args->argv);
@@ -2707,7 +2734,21 @@ int main(int argc, char *argv[]) {
 
 static int shell_main(int argc, char *argv[]) {
 
+    if (argc > 1) {
+        if (strcmp(argv[1], "--bash") == 0) return delegate_to_bash(argc, argv, 2);
+        if (strcmp(argv[1], "-c") == 0 || strcmp(argv[1], "-s") == 0 || has_suffix(argv[1], ".sh")) {
+            return delegate_to_bash(argc, argv, 1);
+        }
+    }
+
     initialize_shell(); //
+
+    char executable_path[MAX_FULL_PATH_LEN];
+    if (realpath(argv[0], executable_path)) {
+        set_variable_scoped("BSH_EXECUTABLE", executable_path, false);
+    } else {
+        set_variable_scoped("BSH_EXECUTABLE", argv[0], false);
+    }
 
     // Execute default startup script
     char startup_script_path[MAX_FULL_PATH_LEN]; //
@@ -2726,7 +2767,15 @@ static int shell_main(int argc, char *argv[]) {
         }
     }
 
-    if (argc > 1) {  //
+    if (argc > 1 && strcmp(argv[1], "--bsh-stdin") == 0) {
+        char line_buffer[INPUT_BUFFER_SIZE];
+        int line_no = 0;
+        while (fgets(line_buffer, sizeof(line_buffer), stdin)) {
+            line_no++;
+            process_line(line_buffer, stdin, line_no, STATE_NORMAL);
+            if (current_exec_state == STATE_RETURN_REQUESTED && bsh_exit_requested) break;
+        }
+    } else if (argc > 1) {  //
         execute_script(argv[1], false, false);  //
     } else { // Interactive mode
         char line_buffer[INPUT_BUFFER_SIZE]; //
@@ -2789,8 +2838,12 @@ static int shell_main(int argc, char *argv[]) {
         }
     }
 
+    int final_status = 0;
+    if (bsh_exit_requested && bsh_return_value_is_set && bsh_last_return_value[0] != '\0') {
+        final_status = (int)strtol(bsh_last_return_value, NULL, 10);
+    }
     cleanup_shell(); //
-    return 0; //
+    return final_status; //
 }
 
 /////
@@ -3835,6 +3888,88 @@ void handle_readfile_statement(Token *tokens, int num_tokens) {
     set_variable_scoped(result_var, buffer, false);
     set_variable_scoped("LAST_FILE_STATUS", "0", false);
     free(buffer);
+}
+
+// 'process <result_var_name> <program> [args...]' is the framework-facing
+// process primitive. It preserves argv boundaries, captures the child's
+// combined stdout/stderr into the named variable, and publishes the exit code
+// through LAST_COMMAND_STATUS. Syntax policy (Bash, RPN tools, compilers, ...)
+// stays in the calling framework rather than in this core mechanism.
+void handle_process_statement(Token *tokens, int num_tokens) {
+    if (current_exec_state == STATE_BLOCK_SKIP) return;
+    if (num_tokens < 3) {
+        fprintf(stderr, "Syntax: process <result_var_name> <program> [args...]\n");
+        set_variable_scoped("LAST_COMMAND_STATUS", "2", false);
+        return;
+    }
+
+    char result_var[MAX_VAR_NAME_LEN];
+    if (tokens[1].type == TOKEN_STRING) {
+        char unescaped[MAX_VAR_NAME_LEN];
+        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, result_var, sizeof(result_var));
+    } else {
+        expand_variables_in_string_advanced(tokens[1].text, result_var, sizeof(result_var));
+    }
+    trim_whitespace(result_var);
+    if (result_var[0] == '\0') {
+        fprintf(stderr, "process: result variable name cannot be empty.\n");
+        set_variable_scoped("LAST_COMMAND_STATUS", "2", false);
+        return;
+    }
+
+    static char expanded_args[MAX_CALL_ARGS][INPUT_BUFFER_SIZE];
+    char* args[MAX_CALL_ARGS + 1];
+    int arg_count = 0;
+    for (int i = 2; i < num_tokens && arg_count < MAX_CALL_ARGS; ++i) {
+        if (tokens[i].type == TOKEN_COMMENT) break;
+        if (tokens[i].type == TOKEN_STRING) {
+            char unescaped[INPUT_BUFFER_SIZE];
+            unescape_string(tokens[i].text, unescaped, sizeof(unescaped));
+            expand_variables_in_string_advanced(unescaped, expanded_args[arg_count], INPUT_BUFFER_SIZE);
+        } else {
+            expand_variables_in_string_advanced(tokens[i].text, expanded_args[arg_count], INPUT_BUFFER_SIZE);
+        }
+        args[arg_count] = expanded_args[arg_count];
+        arg_count++;
+    }
+    if (num_tokens - 2 > MAX_CALL_ARGS) {
+        fprintf(stderr, "process: too many arguments (maximum %d including program).\n", MAX_CALL_ARGS);
+        set_variable_scoped(result_var, "", false);
+        set_variable_scoped("LAST_COMMAND_STATUS", "2", false);
+        return;
+    }
+    args[arg_count] = NULL;
+
+    char command_path[MAX_FULL_PATH_LEN];
+    bool found = false;
+    if (strchr(args[0], '/')) {
+        if (access(args[0], X_OK) == 0) {
+            strncpy(command_path, args[0], sizeof(command_path) - 1);
+            command_path[sizeof(command_path) - 1] = '\0';
+            found = true;
+        }
+    } else {
+        found = find_command_in_path_dynamic(args[0], command_path);
+    }
+    if (!found) {
+        fprintf(stderr, "process: command not found: %s\n", args[0]);
+        set_variable_scoped(result_var, "", false);
+        set_variable_scoped("LAST_COMMAND_STATUS", "127", false);
+        return;
+    }
+    args[0] = command_path;
+
+    char output[INPUT_BUFFER_SIZE];
+    output[0] = '\0';
+    int status = execute_external_command(command_path, args, arg_count, output, sizeof(output));
+    if (status < 0) {
+        set_variable_scoped(result_var, "", false);
+        set_variable_scoped("LAST_COMMAND_STATUS", "1", false);
+        return;
+    }
+    set_variable_scoped(result_var, output, false);
+    set_variable_scoped("LAST_COMMAND_OUTPUT", output, false);
 }
 
 // 'libloaded <alias> <result_var>' lets a framework choose between a native
@@ -4985,7 +5120,7 @@ int execute_external_command(char *command_path, char **args, int arg_count, cha
     if (pid == 0) { 
         if (output_buffer) { close(pipefd[0]); dup2(pipefd[1], STDOUT_FILENO); dup2(pipefd[1], STDERR_FILENO); close(pipefd[1]); }
         execv(command_path, args);
-        perror("execv failed"); exit(EXIT_FAILURE);
+        perror("execv failed"); _exit(127);
     } else if (pid < 0) { 
         perror("fork failed"); if (output_buffer) { close(pipefd[0]); close(pipefd[1]); } return -1;
     } else { 
@@ -4993,17 +5128,25 @@ int execute_external_command(char *command_path, char **args, int arg_count, cha
             close(pipefd[1]); ssize_t bytes_read; size_t total_bytes_read = 0;
             char read_buf[INPUT_BUFFER_SIZE]; output_buffer[0] = '\0';
             while((bytes_read = read(pipefd[0], read_buf, sizeof(read_buf)-1)) > 0) {
-                if (total_bytes_read + bytes_read < output_buffer_size) {
-                    read_buf[bytes_read] = '\0'; strcat(output_buffer, read_buf); total_bytes_read += bytes_read;
-                } else { strncat(output_buffer, read_buf, output_buffer_size - total_bytes_read -1); break; }
+                size_t available = (total_bytes_read < output_buffer_size - 1)
+                    ? output_buffer_size - total_bytes_read - 1 : 0;
+                size_t to_copy = (size_t)bytes_read < available ? (size_t)bytes_read : available;
+                if (to_copy > 0) {
+                    memcpy(output_buffer + total_bytes_read, read_buf, to_copy);
+                    total_bytes_read += to_copy;
+                    output_buffer[total_bytes_read] = '\0';
+                }
+                // Keep draining after the capture buffer fills. Stopping here
+                // can deadlock a child that is still writing to the pipe.
             } close(pipefd[0]);
             char* nl = strrchr(output_buffer, '\n');
             while(nl && (nl == output_buffer + strlen(output_buffer) -1)) { *nl = '\0'; nl = strrchr(output_buffer, '\n');}
         }
         do { waitpid(pid, &status, WUNTRACED); } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-        char status_str[12]; snprintf(status_str, sizeof(status_str), "%d", WEXITSTATUS(status));
+        int exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        char status_str[12]; snprintf(status_str, sizeof(status_str), "%d", exit_status);
         set_variable_scoped("LAST_COMMAND_STATUS", status_str, false);
-        return WEXITSTATUS(status);
+        return exit_status;
     }
     return -1; 
 }
