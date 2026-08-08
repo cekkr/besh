@@ -57,3 +57,5 @@ dkms.conf
 .DS_Store
 .DS_Store
 .DS_Store
+.build-fayasm/
+.test-home/

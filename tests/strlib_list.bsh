@@ -1,0 +1,205 @@
+# The heap string and list libraries, and the compilation tier each function
+# reaches. A function that quietly stops compiling as a "kernel" still produces
+# the right answer, so the tier assertions are what stop that regression from
+# going unnoticed.
+import tests.lib.assert
+import list
+
+assert_start "strlib and list: heap strings and vectors"
+
+# --- construction and conversion -----------------------------------------
+
+str_make "Hello, World"
+$greeting = "$LAST_RETURN_VALUE"
+assert_ne "$greeting" "0" "str_make allocates"
+
+str_text "$greeting"
+assert_eq "$LAST_RETURN_VALUE" "Hello, World" "str_text recovers the value"
+
+str_len "$greeting"
+assert_eq "$LAST_RETURN_VALUE" "12" "str_len counts bytes"
+
+str_byte "$greeting" 0
+assert_eq "$LAST_RETURN_VALUE" "72" "str_byte reads a byte"
+
+str_byte "$greeting" 99
+assert_eq "$LAST_RETURN_VALUE" "0" "str_byte is bounds checked"
+
+# --- searching and comparison --------------------------------------------
+
+str_make "World"
+$needle = "$LAST_RETURN_VALUE"
+str_find "$greeting" "$needle"
+assert_eq "$LAST_RETURN_VALUE" "7" "str_find locates a substring"
+
+str_make "absent"
+$missing = "$LAST_RETURN_VALUE"
+str_find "$greeting" "$missing"
+assert_eq "$LAST_RETURN_VALUE" "-1" "str_find reports a miss as -1"
+
+str_contains "$greeting" "$needle"
+assert_eq "$LAST_RETURN_VALUE" "1" "str_contains agrees with str_find"
+
+str_cmp "$needle" "$needle"
+assert_eq "$LAST_RETURN_VALUE" "0" "str_cmp is zero for equal strings"
+
+str_cmp "$greeting" "$needle"
+assert_eq "$LAST_RETURN_VALUE" "-1" "str_cmp orders by byte then length"
+
+str_eq "$needle" "$needle"
+assert_eq "$LAST_RETURN_VALUE" "1" "str_eq matches identical bytes"
+
+str_eq "$needle" "$missing"
+assert_eq "$LAST_RETURN_VALUE" "0" "str_eq rejects different bytes"
+
+str_hash "$needle"
+$hash_first = "$LAST_RETURN_VALUE"
+str_make "World"
+str_hash "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "$hash_first" "str_hash depends only on the bytes"
+
+# --- slicing and rewriting ------------------------------------------------
+
+str_slice "$greeting" 7 5
+str_text "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "World" "str_slice copies a range"
+
+str_slice "$greeting" 7 999
+str_text "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "World" "str_slice clamps to the end"
+
+str_copy "$greeting"
+$loud = "$LAST_RETURN_VALUE"
+str_upper "$loud"
+str_text "$loud"
+assert_eq "$LAST_RETURN_VALUE" "HELLO, WORLD" "str_upper folds ASCII in place"
+
+str_lower "$loud"
+str_text "$loud"
+assert_eq "$LAST_RETURN_VALUE" "hello, world" "str_lower folds the other way"
+
+str_copy "$greeting"
+str_reverse "$LAST_RETURN_VALUE"
+str_text "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "dlroW ,olleH" "str_reverse reverses in place"
+
+str_make "  padded  "
+str_trim "$LAST_RETURN_VALUE"
+str_text "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "padded" "str_trim removes spaces and tabs"
+
+str_make "abc"
+$left = "$LAST_RETURN_VALUE"
+str_make "def"
+str_concat "$left" "$LAST_RETURN_VALUE"
+str_text "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "abcdef" "str_concat allocates the join"
+
+# --- lists ----------------------------------------------------------------
+
+list_new_int 2
+$squares = "$LAST_RETURN_VALUE"
+$i = 0
+while $i < 6 {
+    prim imul "$i" "$i" square
+    list_push "$squares" "$square"
+    $squares = "$LAST_RETURN_VALUE"
+    prim iadd "$i" 1 i
+}
+
+list_len "$squares"
+assert_eq "$LAST_RETURN_VALUE" "6" "list_push grows past the initial capacity"
+
+list_get "$squares" 3
+assert_eq "$LAST_RETURN_VALUE" "9" "list_get indexes in one load"
+
+list_get "$squares" 99
+assert_eq "$LAST_RETURN_VALUE" "0" "list_get is bounds checked"
+
+list_set "$squares" 0 100
+list_get "$squares" 0
+assert_eq "$LAST_RETURN_VALUE" "100" "list_set writes an element"
+
+list_sum "$squares"
+assert_eq "$LAST_RETURN_VALUE" "155" "list_sum adds the slots"
+
+list_index_of "$squares" 16
+assert_eq "$LAST_RETURN_VALUE" "4" "list_index_of finds a value"
+
+list_index_of "$squares" 17
+assert_eq "$LAST_RETURN_VALUE" "-1" "list_index_of reports a miss as -1"
+
+list_pop "$squares"
+assert_eq "$LAST_RETURN_VALUE" "25" "list_pop returns the last element"
+list_len "$squares"
+assert_eq "$LAST_RETURN_VALUE" "5" "list_pop shortens the list"
+
+# --- splitting and joining ------------------------------------------------
+
+str_make "alpha,beta,,gamma"
+$csv = "$LAST_RETURN_VALUE"
+str_split_byte "$csv" 44
+$fields = "$LAST_RETURN_VALUE"
+
+list_len "$fields"
+assert_eq "$LAST_RETURN_VALUE" "4" "str_split_byte keeps empty fields"
+
+list_get "$fields" 0
+str_text "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "alpha" "first field"
+
+list_get "$fields" 2
+str_text "$LAST_RETURN_VALUE"
+assert_empty "$LAST_RETURN_VALUE" "the empty field stays empty"
+
+list_get "$fields" 3
+str_text "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "gamma" "last field"
+
+str_join_byte "$fields" 45
+str_text "$LAST_RETURN_VALUE"
+assert_eq "$LAST_RETURN_VALUE" "alpha-beta--gamma" "str_join_byte is the inverse"
+
+list_free_deep "$fields"
+
+# --- compilation tier -----------------------------------------------------
+#
+# The point of writing these loops against pointers is that they compile to
+# WebAssembly with no host call inside the loop. If one of them drops to the
+# general tier the library still works, but the reason it exists is gone.
+
+bytecode mode auto
+
+bytecode info str_len tier
+assert_eq "$tier" "kernel" "str_len compiles to a kernel"
+bytecode info str_byte tier
+assert_eq "$tier" "kernel" "str_byte compiles to a kernel"
+bytecode info str_cmp tier
+assert_eq "$tier" "kernel" "str_cmp compiles to a kernel"
+bytecode info str_eq tier
+assert_eq "$tier" "kernel" "str_eq compiles to a kernel"
+bytecode info str_find_from tier
+assert_eq "$tier" "kernel" "str_find_from compiles to a kernel"
+bytecode info str_hash tier
+assert_eq "$tier" "kernel" "str_hash compiles to a kernel"
+bytecode info str_upper tier
+assert_eq "$tier" "kernel" "str_upper compiles to a kernel"
+bytecode info str_reverse tier
+assert_eq "$tier" "kernel" "str_reverse compiles to a kernel"
+bytecode info list_get tier
+assert_eq "$tier" "kernel" "list_get compiles to a kernel"
+bytecode info list_set tier
+assert_eq "$tier" "kernel" "list_set compiles to a kernel"
+bytecode info list_sum tier
+assert_eq "$tier" "kernel" "list_sum compiles to a kernel"
+bytecode info list_index_of tier
+assert_eq "$tier" "kernel" "list_index_of compiles to a kernel"
+
+# Functions that allocate cannot be kernels - allocation is a host call - but
+# they must still compile rather than fall back to the interpreter.
+bytecode info str_slice tier
+assert_eq "$tier" "general" "str_slice compiles on the general tier"
+bytecode info str_split_byte tier
+assert_eq "$tier" "general" "str_split_byte compiles on the general tier"
+
+assert_summary

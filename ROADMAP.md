@@ -10,9 +10,16 @@ B[e]SH deliberately reduces the core language to primitive values and operations
 
 Current status:
 
-- Fayasm is pinned as a Git submodule at [`thirds/fayasm/`](thirds/fayasm/).
-- B[e]SH does not yet link Fayasm, emit WebAssembly, or execute compiled BSH functions.
-- The C interpreter builds and the isolated suite in [`test.sh`](test.sh) verifies the core baseline and experimental language frameworks; Fayasm integration has not begun.
+- Fayasm is pinned as a Git submodule at [`thirds/fayasm/`](thirds/fayasm/) and is
+  compiled into the `bsh` executable by [`compile.sh`](compile.sh) and
+  [`test.sh`](test.sh).
+- BSH function bodies are parsed into IR, emitted as in-memory WebAssembly
+  modules, and executed by Fayasm through the `besh.v1` host imports. The
+  interpreter remains the reference implementation and the fallback. The
+  contract is [`guides/bytecode.md`](guides/bytecode.md).
+- Phases 0-3 are implemented and verified; Phase 4 is partly done (framework
+  modules compile, but each function is still its own module) and Phase 5 has
+  not started.
 
 ## Architectural Boundary
 
@@ -72,7 +79,11 @@ progress against a Fayasm exit gate.
 
 ## Phase 0 — Restore and Measure the Interpreter Baseline
 
-**Status: In progress — build and semantic suite established; benchmarks and independent Fayasm validation remain.**
+**Status: Done.** The interpreter builds warnings-clean, [`test.sh`](test.sh)
+runs the semantic suites with an isolated `HOME`, and interpreted/compiled
+timings for a kernel loop, the string library and the cDiesis standard library
+are recorded in [`guides/bytecode.md`](guides/bytecode.md). A repeatable
+benchmark harness, as opposed to those single measurements, is still missing.
 
 1. Fix the blocking C compilation errors and the argument-buffer warnings documented in [`AGENTS.md`](AGENTS.md).
 2. Add a non-interactive test harness that can run BSH fixtures with an isolated `HOME` and explicit `BSH_MODULE_PATH`.
@@ -88,7 +99,13 @@ progress against a Fayasm exit gate.
 
 ## Phase 1 — Define a Stable BSH Intermediate Representation
 
-**Status: Planned**
+**Status: Done for the supported subset.** [`besh_jit.c`](besh_jit.c) parses a
+function body once, at first call, into the `IRExpr`/`IRStmt` forms: literals,
+variable references, interpolation, array indexing, resolved binary/unary
+operators, calls, assignment, `if`/`else`, `while`, `return`, `echo`, `prim`,
+`mem`, and a `raw` node for anything else. Not done: the IR is not versioned,
+the interpreter does not execute it (it still replays source lines), and cache
+keys are not derived from it - invalidation is wholesale.
 
 The current `UserFunction` stores raw body lines and re-enters `process_line` for every invocation. Compilation must start from a stable semantic representation, not from ad hoc string rewriting.
 
@@ -108,7 +125,12 @@ The current `UserFunction` stores raw body lines and re-enters `process_line` fo
 
 ## Phase 2 — Freeze the B[e]SH ↔ Fayasm Host ABI
 
-**Status: Planned**
+**Status: Implemented, not frozen.** The `besh.v1` import module exists with the
+callbacks listed in [`guides/bytecode.md`](guides/bytecode.md), values cross as
+invocation-scoped opaque handles, and every callback validates its arguments
+through the `fa_RuntimeHostCall_*` helpers. Not done: ABI conformance tests
+against a hand-built module independent of the BSH compiler, and a written
+compatibility promise for the name `besh.v1`.
 
 B[e]SH values remain strings even when a value can be interpreted as an integer or float. The first ABI should therefore favor semantic correctness over aggressive unboxing.
 
@@ -129,7 +151,13 @@ B[e]SH values remain strings even when a value can be interpreted as an integer 
 
 ## Phase 3 — Emit and Execute the First Compiled Functions
 
-**Status: Planned**
+**Status: Done.** [`besh_wasm.c`](besh_wasm.c) emits the type, import, function,
+export and code sections; [`besh_jit.c`](besh_jit.c) loads the bytes with
+Fayasm, binds the imports and the shared memory, and runs the exported entry.
+Control flow lowers to structured WebAssembly, unsupported statements fall back
+through the `raw` import, and `off`/`auto`/`force` are implemented. Not done:
+direct `call` between compiled functions in one module (every call goes through
+the host dispatcher), and diagnostics that map a trap back to a source line.
 
 1. Add a BSH-to-WebAssembly emitter for the stable IR subset. Generate only the required type, import, function, export, code, and optional data sections.
 2. Load emitted bytes from memory using Fayasm's module API, run the required parser/load phases, attach the module to `fa_Runtime`, bind `besh.v1` host functions, create a job, and execute the exported function.
@@ -152,7 +180,10 @@ B[e]SH values remain strings even when a value can be interpreted as an integer 
 
 ## Phase 4 — Compile Framework Modules as Units
 
-**Status: Planned**
+**Status: Partly done.** Framework functions compile like any other, and
+`defoperator`, `defkeyword` and redefinition invalidate cached modules. Not
+done: the dependency graph, grouping related functions into one module, and
+per-import invalidation - invalidation is currently all-or-nothing.
 
 Frameworks provide most of B[e]SH's enlarged language, so compiling them is the main performance objective.
 
@@ -170,7 +201,15 @@ Frameworks provide most of B[e]SH's enlarged language, so compiling them is the 
 
 ## Phase 5 — Cache, Specialize, and Optimize
 
-**Status: Planned after semantic parity**
+**Status: Not started**, beyond the in-memory module cache keyed by function
+name and the unboxed-integer kernel tier described in
+[`guides/bytecode.md`](guides/bytecode.md). The kernel tier already includes a
+guard-and-deoptimise path: a promoted local whose value would not behave as a
+machine integer aborts the compiled body before it runs and hands the work back
+to the interpreter. No deterministic cache key, no disk cache, no hotness
+threshold, and no host-call frequency profiling exist yet. Host-call frequency
+is the measured bottleneck for framework code, which currently runs at parity
+with the interpreter.
 
 1. Cache emitted modules by a deterministic key containing:
    - canonical IR/source hash;

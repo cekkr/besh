@@ -125,147 +125,35 @@
 #include <limits.h>
 #include <libgen.h>
 
-// --- Constants and Definitions ---
-#define MAX_LINE_LENGTH 2048
-#define MAX_ARGS 128
-#define MAX_VAR_NAME_LEN 256
-#define INPUT_BUFFER_SIZE 16384 // also the cap on a single variable's value
-// Scratch arrays sized [MAX_CALL_ARGS][INPUT_BUFFER_SIZE] are static; keeping
-// this well under MAX_ARGS is what keeps that memory reasonable.
-#define MAX_CALL_ARGS 32
-#define MAX_FULL_PATH_LEN 1024
-#ifndef PATH_MAX
-    #ifdef _XOPEN_PATH_MAX
-        #define PATH_MAX _XOPEN_PATH_MAX
-    #else
-        #define PATH_MAX 4096
-    #endif
-#endif
-#define TOKEN_STORAGE_SIZE (MAX_LINE_LENGTH * 2) // Should be ample for token text
-#define MAX_NESTING_DEPTH 128
-#define MAX_FUNC_LINES 256  // framework parsers contain deliberately large stored bodies
-#define MAX_FUNC_PARAMS 10
-#define MAX_OPERATOR_LEN 16 // Increased for potentially longer operators like "?:"
-#define DEFAULT_STARTUP_SCRIPT ".bshrc"
-#define MAX_KEYWORD_LEN 32
-#define MAX_SCOPE_DEPTH 512  // recursive framework code (parsers) needs real depth
-#define DEFAULT_MODULE_PATH "./framework:~/.bsh_framework:/usr/local/share/bsh/framework"
-#define MAX_EXPRESSION_TOKENS MAX_ARGS // Max tokens in a single expression to be parsed
+#include "besh_core.h"
 
-#define JSON_STDOUT_PREFIX "json:" // json are not managed (?)
-#define OBJECT_STDOUT_PREFIX "object:"
-
-// --- Tokenizer Types (Simplified) ---
-typedef enum {
-    TOKEN_EMPTY,        // Should not appear in active processing
-    TOKEN_WORD,         // Identifiers, command names, unquoted literals
-    TOKEN_STRING,       // "quoted string"
-    TOKEN_NUMBER,       // 123, 3.14 (parsed by C)
-    TOKEN_VARIABLE,     // $var, ${var}
-    TOKEN_OPERATOR,     // Generic for script-defined operators (+, ==, ++, ?:)
-    TOKEN_LPAREN,       // (
-    TOKEN_RPAREN,       // )
-    TOKEN_LBRACE,       // {
-    TOKEN_RBRACE,       // }
-    TOKEN_LBRACKET,     // [
-    TOKEN_RBRACKET,     // ]
-    TOKEN_SEMICOLON,    // ;
-    TOKEN_ASSIGN,       // = (could also be TOKEN_OPERATOR if fully dynamic)
-    TOKEN_COMMENT,      // #...
-    TOKEN_EOF,          // End of input
-    TOKEN_ERROR         // Tokenization error
-    // TOKEN_QMARK, TOKEN_COLON removed, will be TOKEN_OPERATOR
-} TokenType;
-
-typedef struct {
-    TokenType type;
-    const char *text; // Points into the token_storage buffer or original line
-    int len;
-    int line;         // Line number of the token
-    int col;          // Column number of the token
-    // Precedence and associativity are properties of OPERATORS, not tokens themselves.
-    // They will be looked up from OperatorDefinition when a TOKEN_OPERATOR is encountered.
-} Token;
-
-// --- Operator Definition (Dynamic List) ---
-typedef enum {
-    OP_TYPE_NONE,
-    OP_TYPE_UNARY_PREFIX,
-    OP_TYPE_UNARY_POSTFIX,
-    OP_TYPE_BINARY_INFIX,
-    // For ternary "A ? B : C", '?' could be TERNARY_COND_OP and ':' could be TERNARY_BRANCH_OP
-    // Or a single operator token like "?:" defined with a special type.
-    // For simplicity, let's imagine "?" and ":" are defined separately with specific roles if used in ternary.
-    // A more robust way for ternary is for "?" to expect a ":" later at the same precedence level.
-    OP_TYPE_TERNARY_PRIMARY, // e.g., "?"
-    OP_TYPE_TERNARY_SECONDARY, // e.g., ":"
-    // Add other N-ary types if needed
-} OperatorType;
-
-typedef enum {
-    ASSOC_NONE,
-    ASSOC_LEFT,
-    ASSOC_RIGHT
-} OperatorAssociativity;
-
-typedef struct OperatorDefinition {
-    char op_str[MAX_OPERATOR_LEN + 1];
-    TokenType token_type; // Will usually be TOKEN_OPERATOR, but can map to others if needed
-    OperatorType op_type_prop; // The new type property (unary, binary, etc.)
-    int precedence;
-    OperatorAssociativity associativity;
-    char bsh_handler_name[MAX_VAR_NAME_LEN]; // BSH function to call
-    struct OperatorDefinition *next;
-} OperatorDefinition;
+// --- Interpreter-owned globals (declared in besh_core.h) ---
 OperatorDefinition *operator_list_head = NULL;
-
-// --- Keyword Aliasing (Dynamic List) ---
-typedef struct KeywordAlias {
-    char original[MAX_KEYWORD_LEN + 1];
-    char alias[MAX_KEYWORD_LEN + 1];
-    struct KeywordAlias *next;
-} KeywordAlias;
 KeywordAlias *keyword_alias_head = NULL;
-
-// --- PATH Directories (Dynamic List) ---
-typedef struct PathDirNode {
-    char *path;
-    struct PathDirNode *next;
-} PathDirNode;
 PathDirNode *path_list_head = NULL;
 PathDirNode *module_path_list_head = NULL;
-
-// Modules already imported in this process, so that 'import' is idempotent.
-#define MAX_IMPORTED_MODULES 256
 char imported_modules[MAX_IMPORTED_MODULES][MAX_FULL_PATH_LEN];
 int imported_module_count = 0;
-
-// --- Variable Scoping and Management ---
-typedef struct Variable {
-    char name[MAX_VAR_NAME_LEN];
-    char *value;
-    bool is_array_element;
-    int scope_id;
-    struct Variable *next;       // next in hash bucket
-    struct Variable *scope_next; // next variable created in the same scope
-} Variable;
-
-typedef struct ScopeFrame {
-    int scope_id;
-    struct Variable *vars_head; // variables created in this scope, newest first
-} ScopeFrame;
 ScopeFrame scope_stack[MAX_SCOPE_DEPTH];
 int scope_stack_top = -1;
 int next_scope_id = 1;
-#define GLOBAL_SCOPE_ID 0
-
-// Variables live in a hash table keyed by name. A single linked list made
-// every read and write O(number of variables); framework code that builds
-// tables out of mangled names (thousands of entries) turned that into
-// quadratic behaviour. Chaining keeps lookup flat.
-#define VARIABLE_BUCKET_COUNT 4096
 Variable *variable_buckets[VARIABLE_BUCKET_COUNT];
+UserFunction *function_list = NULL;
+bool is_defining_function = false;
+UserFunction *current_function_definition = NULL;
+int func_def_brace_depth = 0;
+int bsh_operator_handler_depth = 0;
+ExecutionState current_exec_state = STATE_NORMAL;
+char bsh_last_return_value[INPUT_BUFFER_SIZE];
+bool bsh_return_value_is_set = false;
+bool bsh_exit_requested = false;
+int bsh_pending_body_jump = -1;
+long bsh_current_line_start_fpos = -1L;
+BlockFrame block_stack[MAX_NESTING_DEPTH];
+int block_stack_top_bf = -1;
+DynamicLib *loaded_libs = NULL;
 
+// --- Variable table helpers (private to the interpreter) ---
 static unsigned long variable_hash(const char* name) {
     unsigned long hash = 5381UL;
     for (const unsigned char* p = (const unsigned char*)name; *p; ++p) {
@@ -307,184 +195,6 @@ static Variable* variable_create(const char* clean_name, const char* value, bool
     }
     return new_var;
 }
-
-
-// --- User-Defined Functions ---
-typedef struct UserFunction {
-    char name[MAX_VAR_NAME_LEN];
-    char params[MAX_FUNC_PARAMS][MAX_VAR_NAME_LEN];
-    int param_count;
-    char* body[MAX_FUNC_LINES];
-    int line_count;
-    struct UserFunction *next;
-} UserFunction;
-UserFunction *function_list = NULL;
-bool is_defining_function = false;
-UserFunction *current_function_definition = NULL;
-// Depth of blocks opened *inside* the function body currently being captured.
-// Only a '}' seen at depth 0 closes the definition itself.
-int func_def_brace_depth = 0;
-// Guard against an operator handler that (directly or indirectly) uses the
-// operator it implements.
-#define MAX_OPERATOR_HANDLER_DEPTH 48
-int bsh_operator_handler_depth = 0;
-
-
-// --- Execution State and Block Management ---
-typedef enum {
-    STATE_NORMAL, STATE_BLOCK_EXECUTE, STATE_BLOCK_SKIP,
-    STATE_DEFINE_FUNC_BODY, STATE_IMPORT_PARSING,
-    STATE_RETURN_REQUESTED // For 'return' and 'exit' functionality
-} ExecutionState;
-ExecutionState current_exec_state = STATE_NORMAL;
-// For 'return' or 'exit' with value
-char bsh_last_return_value[INPUT_BUFFER_SIZE];
-bool bsh_return_value_is_set = false;
-// 'exit' must terminate the shell/script; 'return' must only unwind the
-// current function body. Both raise STATE_RETURN_REQUESTED, so this flag is
-// what tells them apart.
-bool bsh_exit_requested = false;
-// Set by a '}' that closes a 'while' whose body came from a stored function
-// body rather than a seekable file: the body executor jumps back to this
-// 0-based body line instead of seeking.
-int bsh_pending_body_jump = -1;
-// Offset of the line currently being executed from a script file. A 'while'
-// must resume at its own header - ftell() after fgets() already points past it.
-long bsh_current_line_start_fpos = -1L;
-
-
-typedef enum {
-    BLOCK_TYPE_IF, BLOCK_TYPE_ELSE, BLOCK_TYPE_WHILE, BLOCK_TYPE_FUNCTION_DEF
-} BlockType;
-
-typedef struct BlockFrame {
-    BlockType type;
-    long loop_start_fpos;
-    int loop_start_line_no;
-    bool condition_true;
-    ExecutionState prev_exec_state;
-} BlockFrame;
-BlockFrame block_stack[MAX_NESTING_DEPTH];
-int block_stack_top_bf = -1;
-
-// --- Dynamic Library Handles ---
-typedef struct DynamicLib {
-    char alias[MAX_VAR_NAME_LEN];
-    void *handle;
-    struct DynamicLib *next;
-} DynamicLib;
-DynamicLib *loaded_libs = NULL;
-
-// --- Expression Parsing Context ---
-// Used by the recursive descent parser
-typedef struct ExprParseContext {
-    Token* tokens;      // Array of tokens for the current expression
-    int current_token_idx; // Index of the next token to process
-    int num_tokens;     // Total number of tokens in the expression
-    char* result_buffer; // Buffer to store the final result of the expression
-    size_t result_buffer_size;
-    int recursion_depth; // To prevent stack overflow in parser
-} ExprParseContext;
-#define MAX_EXPR_RECURSION_DEPTH 64
-
-
-// --- Function Prototypes (Updated/New) ---
-// Core
-void initialize_shell();
-void process_line(char *line, FILE *input_source, int current_line_no, ExecutionState exec_mode);
-void execute_script(const char *filename, bool is_import, bool is_startup_script);
-void cleanup_shell();
-
-// Tokenizer & Operator/Keyword Management
-void initialize_operators_core_structural(); // Renamed
-void add_operator_definition(const char* op_str, TokenType token_type, OperatorType op_type_prop, int precedence, OperatorAssociativity assoc, const char* bsh_handler); // Changed signature
-OperatorDefinition* get_operator_definition(const char* op_str); // New helper
-int match_operator_text(const char *input, const char **op_text); // Simplified from match_operator_dynamic
-void add_keyword_alias(const char* original, const char* alias_name);
-const char* resolve_keyword_alias(const char* alias_name);
-void free_keyword_alias_list();
-int advanced_tokenize_line(const char *line_text, int line_num, Token *tokens, int max_tokens, char *token_storage, size_t storage_size); // Added line_num, col
-
-// Path Management
-void add_path_to_list(PathDirNode **list_head, const char* dir_path);
-void free_path_dir_list(PathDirNode **list_head);
-void initialize_module_path();
-
-// Variable & Scope Management
-int enter_scope();
-void leave_scope(int scope_id_to_leave);
-void cleanup_variables_for_scope(int scope_id);
-char* get_variable_scoped(const char *name_raw);
-void set_variable_scoped(const char *name_raw, const char *value_to_set, bool is_array_elem);
-void expand_variables_in_string_advanced(const char *input_str, char *expanded_str, size_t expanded_str_size); // Keep as is for now
-char* get_array_element_scoped(const char* array_base_name, const char* index_str_raw);
-void set_array_element_scoped(const char* array_base_name, const char* index_str_raw, const char* value);
-
-// Command Execution
-bool find_command_in_path_dynamic(const char *command, char *full_path);
-bool find_module_in_path(const char* module_name, char* full_path);
-int execute_external_command(char *command_path, char **args, int arg_count, char *output_buffer, size_t output_buffer_size);
-void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context);
-
-// Expression Evaluation (New/Rewritten)
-bool evaluate_expression_from_tokens(Token* tokens, int num_tokens, char* result_buffer, size_t buffer_size);
-bool parse_expression_recursive(ExprParseContext* ctx, int min_precedence); // Core of precedence climbing
-bool parse_operand(ExprParseContext* ctx, char* operand_result_buffer, size_t operand_buffer_size); // Parses primary, unary prefix
-
-// BSH Handler Invocation
-bool invoke_bsh_operator_handler(const char* bsh_handler_name,
-                                 const char* op_symbol, // The operator itself
-                                 int arg_count, // Number of string arguments for BSH
-                                 const char* args[], // Array of string arguments
-                                 const char* result_holder_bsh_var,
-                                 char* c_result_buffer, size_t c_result_buffer_size);
-// Built-in Commands & Operation Handlers
-void handle_defoperator_statement(Token *tokens, int num_tokens); // Updated
-void handle_defkeyword_statement(Token *tokens, int num_tokens);
-void handle_assignment_advanced(Token *tokens, int num_tokens); // Will use evaluate_expression_from_tokens
-void handle_echo_advanced(Token *tokens, int num_tokens);
-bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, Token* operand2_token); // May be replaced by generic expr eval
-void handle_if_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no); // Will use evaluate_expression_from_tokens for condition
-void handle_else_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no);
-void handle_while_statement_advanced(Token *tokens, int num_tokens, FILE* input_source, int current_line_no); // Will use evaluate_expression_from_tokens for condition
-void handle_defunc_statement_advanced(Token *tokens, int num_tokens);
-// void handle_inc_dec_statement_advanced(Token *tokens, int num_tokens, bool increment); // ++/-- are now generic TOKEN_OPERATOR
-void handle_loadlib_statement(Token *tokens, int num_tokens);
-void handle_calllib_statement(Token *tokens, int num_tokens);
-void handle_import_statement(Token *tokens, int num_tokens);
-void handle_update_cwd_statement(Token *tokens, int num_tokens);
-// void handle_unary_op_statement(Token* var_token, Token* op_token, bool is_prefix); // Replaced by generic expression eval
-void handle_exit_statement(Token *tokens, int num_tokens);
-void handle_eval_statement(Token *tokens, int num_tokens);
-void handle_return_statement(Token *tokens, int num_tokens);
-void handle_prim_statement(Token *tokens, int num_tokens);
-void handle_libloaded_statement(Token *tokens, int num_tokens);
-void handle_writefile_statement(Token *tokens, int num_tokens);
-void handle_readfile_statement(Token *tokens, int num_tokens);
-void handle_process_statement(Token *tokens, int num_tokens);
-void set_variable_indirect(const char *name_raw, const char *value_to_set, bool is_array_elem);
-
-
-// Block Management
-void push_block_bf(BlockType type, bool condition_true, long loop_start_fpos, int loop_start_line_no);
-BlockFrame* pop_block_bf();
-BlockFrame* peek_block_bf();
-void handle_opening_brace_token(Token token); // Needs to respect current_exec_state
-void handle_closing_brace_token(Token token, FILE* input_source); // Needs to respect current_exec_state
-
-// Utility & BSH Callers
-char* trim_whitespace(char *str);
-void free_all_variables();
-void free_function_list();
-void free_operator_list(); // Updated for new OperatorDefinition
-void free_loaded_libs();
-long get_file_pos(FILE* f);
-char* unescape_string(const char* input, char* output_buffer, size_t buffer_size);
-bool input_source_is_file(FILE* f);
-
-// object: management
-void parse_and_flatten_bsh_object_string(const char* data_string, const char* base_var_name, int current_scope_id);
-bool stringify_bsh_object_to_string(const char* base_var_name, char* output_buffer, size_t buffer_size);
 
 
 // --- Tokenizer & Operator/Keyword Management Implementations ---
@@ -683,6 +393,7 @@ void free_keyword_alias_list() {
 }
 
 void cleanup_shell() {
+    besh_jit_shutdown();
     free_all_variables();
     free_function_list();
     free_operator_list();
@@ -1016,6 +727,10 @@ void handle_defoperator_statement(Token *tokens, int num_tokens) {
     add_operator_definition(op_symbol, TOKEN_OPERATOR, op_type_prop, precedence, assoc, bsh_handler_name);
     // printf("DEBUG: Defined operator '%s' TYPE %d PREC %d ASSOC %d HANDLER '%s'\n",
     //        op_symbol, op_type_prop, precedence, assoc, bsh_handler_name);
+    // Operator resolution is baked into emitted modules, so every cached unit
+    // has to be rebuilt after the registry changes.
+    besh_jit_invalidate_all("defoperator");
+
 }
 
 
@@ -1822,6 +1537,50 @@ bool evaluate_expression_tokens(Token* tokens_arr, int start_idx, int end_idx, c
     return false; // Should not be reached if logic is complete
 }
 
+// Compares two already-expanded values exactly the way `if` and `while` do.
+// The comparison lives here, and not in a BSH operator handler, because the
+// interpreter has always evaluated conditions in C; compiled code calls this
+// same function through the `cond` host import so the two agree.
+bool besh_compare_values(const char* lhs, const char* op_str, const char* rhs) {
+    if (!lhs) lhs = "";
+    if (!rhs) rhs = "";
+    if (strcmp(op_str, "==") == 0) return strcmp(lhs, rhs) == 0;
+    if (strcmp(op_str, "!=") == 0) return strcmp(lhs, rhs) != 0;
+
+    long num1, num2; char *endptr1, *endptr2;
+    errno = 0; num1 = strtol(lhs, &endptr1, 10); bool num1_valid = (errno == 0 && lhs[0] != '\0' && *endptr1 == '\0');
+    errno = 0; num2 = strtol(rhs, &endptr2, 10); bool num2_valid = (errno == 0 && rhs[0] != '\0' && *endptr2 == '\0');
+    bool numeric_possible = num1_valid && num2_valid;
+
+    if (numeric_possible) {
+        if (strcmp(op_str, ">") == 0) return num1 > num2;
+        if (strcmp(op_str, "<") == 0) return num1 < num2;
+        if (strcmp(op_str, ">=") == 0) return num1 >= num2;
+        if (strcmp(op_str, "<=") == 0) return num1 <= num2;
+    } else {
+        if (strcmp(op_str, ">") == 0) return strcmp(lhs, rhs) > 0;
+        if (strcmp(op_str, "<") == 0) return strcmp(lhs, rhs) < 0;
+        if (strcmp(op_str, ">=") == 0) return strcmp(lhs, rhs) >= 0;
+        if (strcmp(op_str, "<=") == 0) return strcmp(lhs, rhs) <= 0;
+    }
+    fprintf(stderr, "Unsupported operator or type mismatch in condition: '%s' %s '%s'\n", lhs, op_str, rhs);
+    return false;
+}
+
+// Truthiness of a condition value. `if` and `while` differ by one detail - the
+// `if` handler compares "false" case-insensitively - and compiled code has to
+// reproduce each of them exactly, so both live here.
+bool besh_value_is_true(const char* text, bool if_semantics) {
+    if (!text || text[0] == '\0') return false;
+    if (strcmp(text, "0") == 0) return false;
+    if (if_semantics) {
+        if (strcasecmp(text, "false") == 0) return false;
+    } else if (strcmp(text, "false") == 0) {
+        return false;
+    }
+    return true;
+}
+
 bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, Token* operand2_token) {
     if (!operand1_token || !operator_token || !operand2_token) return false;
 
@@ -1831,26 +1590,7 @@ bool evaluate_condition_advanced(Token* operand1_token, Token* operator_token, T
     if (operand2_token->type == TOKEN_STRING) { char unescaped[INPUT_BUFFER_SIZE]; unescape_string(operand2_token->text, unescaped, sizeof(unescaped)); expand_variables_in_string_advanced(unescaped, val2_expanded, sizeof(val2_expanded));
     } else { expand_variables_in_string_advanced(operand2_token->text, val2_expanded, sizeof(val2_expanded)); }
 
-    const char* op_str = operator_token->text;
-    if (strcmp(op_str, "==") == 0) return strcmp(val1_expanded, val2_expanded) == 0;
-    if (strcmp(op_str, "!=") == 0) return strcmp(val1_expanded, val2_expanded) != 0;
-
-    long num1, num2; char *endptr1, *endptr2;
-    errno = 0; num1 = strtol(val1_expanded, &endptr1, 10); bool num1_valid = (errno == 0 && val1_expanded[0] != '\0' && *endptr1 == '\0');
-    errno = 0; num2 = strtol(val2_expanded, &endptr2, 10); bool num2_valid = (errno == 0 && val2_expanded[0] != '\0' && *endptr2 == '\0');
-    bool numeric_possible = num1_valid && num2_valid;
-
-    if (numeric_possible) {
-        if (strcmp(op_str, ">") == 0) return num1 > num2; if (strcmp(op_str, "<") == 0) return num1 < num2;
-        if (strcmp(op_str, ">=") == 0) return num1 >= num2; if (strcmp(op_str, "<=") == 0) return num1 <= num2;
-    } else { 
-        if (strcmp(op_str, ">") == 0) return strcmp(val1_expanded, val2_expanded) > 0;
-        if (strcmp(op_str, "<") == 0) return strcmp(val1_expanded, val2_expanded) < 0;
-        if (strcmp(op_str, ">=") == 0) return strcmp(val1_expanded, val2_expanded) >= 0;
-        if (strcmp(op_str, "<=") == 0) return strcmp(val1_expanded, val2_expanded) <= 0;
-    }
-    fprintf(stderr, "Unsupported operator or type mismatch in condition: '%s' %s '%s'\n", val1_expanded, op_str, val2_expanded);
-    return false;
+    return besh_compare_values(val1_expanded, operator_token->text, val2_expanded);
 }
 
 bool is_comparison_or_assignment_operator(const char* op_str) {
@@ -1888,7 +1628,7 @@ static void inline_split_flush(const char* start, size_t len, char** out, int* c
     out[(*count)++] = piece;
 }
 
-static int split_line_into_statements(const char* line, char** out, int max_out) {
+int besh_split_line_into_statements(const char* line, char** out, int max_out) {
     int count = 0;
     const char* segment_start = line;
     const char* p = line;
@@ -1938,7 +1678,7 @@ static int split_line_into_statements(const char* line, char** out, int max_out)
 }
 
 // Cheap pre-check: only lines with structure worth splitting pay for the split.
-static bool line_needs_statement_split(const char* line) {
+bool besh_line_needs_statement_split(const char* line) {
     bool in_string = false;
     bool seen_structure = false;
     for (const char* p = line; *p; ++p) {
@@ -2022,9 +1762,9 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
     // Rewrite inline blocks and ';'-separated statements into the one-statement
     // -per-line form the dispatcher below expects. Done after body capture, so
     // stored function bodies keep their original text.
-    if (line_needs_statement_split(line)) {
+    if (besh_line_needs_statement_split(line)) {
         char* parts[MAX_INLINE_STATEMENTS];
-        int part_count = split_line_into_statements(line, parts, MAX_INLINE_STATEMENTS);
+        int part_count = besh_split_line_into_statements(line, parts, MAX_INLINE_STATEMENTS);
         if (part_count > 1) {
             for (int i = 0; i < part_count; ++i) {
                 process_line(parts[i], input_source, current_line_no, exec_mode_param);
@@ -2159,6 +1899,8 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
         else if (strcmp(command_name, "writefile") == 0) { handle_writefile_statement(tokens, num_tokens); }
         else if (strcmp(command_name, "readfile") == 0) { handle_readfile_statement(tokens, num_tokens); }
         else if (strcmp(command_name, "process") == 0) { handle_process_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "mem") == 0) { handle_mem_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "bytecode") == 0) { handle_bytecode_statement(tokens, num_tokens); }
         // Add other built-ins here
         else {
             // Resolve the command against the user-function registry. Without
@@ -2630,6 +2372,10 @@ void initialize_shell() {
     scope_stack_top = -1; 
     enter_scope();        
 
+    // The heap and the bytecode path come up before any script runs, so that
+    // `mem` and compiled functions are available to .bshrc itself.
+    besh_jit_init();
+
     // Initialize core structural operators if they are not dynamically defined
     initialize_operators_core_structural(); // Call the new initializer
 
@@ -3035,6 +2781,8 @@ void handle_defunc_statement_advanced(Token *tokens, int num_tokens) {
     memset(current_function_definition, 0, sizeof(UserFunction));
     func_def_brace_depth = 0;
     strncpy(current_function_definition->name, tokens[1].text, MAX_VAR_NAME_LEN - 1);
+    // A redefinition must not keep executing the module built from the old body.
+    besh_jit_invalidate_function(current_function_definition->name);
 
     int token_idx = 2;
     if (token_idx < num_tokens && tokens[token_idx].type == TOKEN_LPAREN) {
@@ -3285,6 +3033,9 @@ void handle_defkeyword_statement(Token *tokens, int num_tokens) {
     }
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     add_keyword_alias(tokens[1].text, tokens[2].text);
+    // Keyword aliases decide which statements compile natively.
+    besh_jit_invalidate_all("defkeyword");
+
 }
 
 void handle_update_cwd_statement(Token *tokens, int num_tokens) {
@@ -3609,8 +3360,8 @@ static bool prim_truthy(const char* text) {
 }
 
 // Returns false when the operation name is unknown.
-static bool prim_dispatch(const char* op, char args[][INPUT_BUFFER_SIZE], int argc,
-                          char* out, size_t out_size) {
+bool besh_prim_dispatch(const char* op, char args[][INPUT_BUFFER_SIZE], int argc,
+                        char* out, size_t out_size) {
     double a = 0.0, b = 0.0;
     bool a_num = (argc > 0) && prim_parse_number(args[0], &a);
     bool b_num = (argc > 1) && prim_parse_number(args[1], &b);
@@ -3657,6 +3408,54 @@ static bool prim_dispatch(const char* op, char args[][INPUT_BUFFER_SIZE], int ar
         else truth = (cmp >= 0);
         snprintf(out, out_size, "%d", truth);
         return true;
+    }
+
+    // 32-bit integer operations. These exist so that BSH code which only needs
+    // machine integers - the string and list library, index arithmetic, loop
+    // counters - can say so. The bytecode compiler lowers exactly this set to
+    // native WebAssembly instructions (see int_binary_opcode in besh_jit.c),
+    // so an interpreted and a compiled run must agree bit for bit.
+    {
+        static const struct { const char* name; char kind; } kIntOps[] = {
+            {"iadd",'+'}, {"isub",'-'}, {"imul",'*'}, {"idiv",'/'}, {"imod",'%'},
+            {"iand",'&'}, {"ior",'|'}, {"ixor",'^'}, {"ishl",'<'}, {"ishr",'>'},
+            {"ieq",'='}, {"ine",'!'}, {"ilt",'l'}, {"igt",'g'}, {"ile",'L'}, {"ige",'G'},
+            {NULL,0}
+        };
+        for (int i = 0; kIntOps[i].name; ++i) {
+            if (strcmp(op, kIntOps[i].name) != 0) continue;
+            if (argc < 2) { snprintf(out, out_size, "PRIM_ERR_NAN"); return true; }
+            int32_t x = (int32_t)strtol(args[0], NULL, 0);
+            int32_t y = (int32_t)strtol(args[1], NULL, 0);
+            int32_t r = 0;
+            switch (kIntOps[i].kind) {
+                case '+': r = (int32_t)((uint32_t)x + (uint32_t)y); break;
+                case '-': r = (int32_t)((uint32_t)x - (uint32_t)y); break;
+                case '*': r = (int32_t)((uint32_t)x * (uint32_t)y); break;
+                case '/': if (y == 0) { snprintf(out, out_size, "PRIM_ERR_DIV0"); return true; }
+                          r = (y == -1) ? (int32_t)(-(uint32_t)x) : x / y; break;
+                case '%': if (y == 0) { snprintf(out, out_size, "PRIM_ERR_DIV0"); return true; }
+                          r = (y == -1) ? 0 : x % y; break;
+                case '&': r = x & y; break;
+                case '|': r = x | y; break;
+                case '^': r = x ^ y; break;
+                case '<': r = (int32_t)((uint32_t)x << (y & 31)); break;
+                case '>': r = x >> (y & 31); break;
+                case '=': r = (x == y); break;
+                case '!': r = (x != y); break;
+                case 'l': r = (x < y); break;
+                case 'g': r = (x > y); break;
+                case 'L': r = (x <= y); break;
+                default:  r = (x >= y); break;
+            }
+            snprintf(out, out_size, "%d", r);
+            return true;
+        }
+        if (strcmp(op, "inot") == 0) {
+            int32_t x = (argc > 0) ? (int32_t)strtol(args[0], NULL, 0) : 0;
+            snprintf(out, out_size, "%d", x == 0 ? 1 : 0);
+            return true;
+        }
     }
 
     if (strcmp(op, "neg") == 0) {
@@ -3798,7 +3597,7 @@ void handle_prim_statement(Token *tokens, int num_tokens) {
 
     char result_buffer[INPUT_BUFFER_SIZE];
     result_buffer[0] = '\0';
-    if (!prim_dispatch(op, &expanded[1], expanded_count - 2, result_buffer, sizeof(result_buffer))) {
+    if (!besh_prim_dispatch(op, &expanded[1], expanded_count - 2, result_buffer, sizeof(result_buffer))) {
         fprintf(stderr, "prim: unknown operation '%s'.\n", op);
         snprintf(result_buffer, sizeof(result_buffer), "PRIM_ERR_UNKNOWN_OP");
     }
@@ -5151,34 +4950,21 @@ int execute_external_command(char *command_path, char **args, int arg_count, cha
     return -1; 
 }
 
-void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context) {
-    (void)input_source_for_context;
-    if (!func) return;
-    int function_scope_id = enter_scope();
-    if (function_scope_id == -1) { return; }
-
-    for (int i = 0; i < func->param_count; ++i) {
-        if (i < call_arg_token_count) {
-            char expanded_arg_val[INPUT_BUFFER_SIZE]; 
-            if (call_arg_tokens[i].type == TOKEN_STRING) {
-                 char unescaped_temp[INPUT_BUFFER_SIZE];
-                 unescape_string(call_arg_tokens[i].text, unescaped_temp, sizeof(unescaped_temp));
-                 expand_variables_in_string_advanced(unescaped_temp, expanded_arg_val, sizeof(expanded_arg_val));
-            } else {
-                 expand_variables_in_string_advanced(call_arg_tokens[i].text, expanded_arg_val, sizeof(expanded_arg_val));
-            }
-            set_variable_scoped(func->params[i], expanded_arg_val, false);
-        } else {
-            set_variable_scoped(func->params[i], "", false); 
-        }
-    }
-
+// Runs a function body once its scope exists and its parameters are bound.
+// The bytecode path gets first refusal: when besh_jit_run_function reports that
+// it executed the body, the stored source lines are not replayed at all.
+static void run_user_function_body(UserFunction* func, int function_scope_id) {
     int func_outer_block_stack_top_bf = block_stack_top_bf;
     ExecutionState func_outer_exec_state = current_exec_state;
     current_exec_state = STATE_NORMAL;
 
     int outer_pending_jump = bsh_pending_body_jump;
     bsh_pending_body_jump = -1;
+
+    BeshRunStatus compiled = besh_jit_run_function(func);
+    if (compiled != BESH_RUN_FALLBACK) {
+        goto function_epilogue;
+    }
 
     for (int i = 0; i < func->line_count; ++i) {
         char line_copy[MAX_LINE_LENGTH];
@@ -5194,6 +4980,7 @@ void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_
         if (current_exec_state == STATE_RETURN_REQUESTED) break; // 'return' or 'exit'
     }
 
+function_epilogue:
     bsh_pending_body_jump = outer_pending_jump;
 
     while(block_stack_top_bf > func_outer_block_stack_top_bf) {
@@ -5215,4 +5002,79 @@ void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_
         bsh_return_value_is_set = false;
         bsh_last_return_value[0] = '\0';
     }
+}
+
+void execute_user_function(UserFunction* func, Token* call_arg_tokens, int call_arg_token_count, FILE* input_source_for_context) {
+    (void)input_source_for_context;
+    if (!func) return;
+    int function_scope_id = enter_scope();
+    if (function_scope_id == -1) { return; }
+
+    for (int i = 0; i < func->param_count; ++i) {
+        if (i < call_arg_token_count) {
+            char expanded_arg_val[INPUT_BUFFER_SIZE];
+            if (call_arg_tokens[i].type == TOKEN_STRING) {
+                 char unescaped_temp[INPUT_BUFFER_SIZE];
+                 unescape_string(call_arg_tokens[i].text, unescaped_temp, sizeof(unescaped_temp));
+                 expand_variables_in_string_advanced(unescaped_temp, expanded_arg_val, sizeof(expanded_arg_val));
+            } else {
+                 expand_variables_in_string_advanced(call_arg_tokens[i].text, expanded_arg_val, sizeof(expanded_arg_val));
+            }
+            set_variable_scoped(func->params[i], expanded_arg_val, false);
+        } else {
+            set_variable_scoped(func->params[i], "", false);
+        }
+    }
+
+    run_user_function_body(func, function_scope_id);
+}
+
+// Resolves a command word to a user function or an external executable and runs
+// it with already-expanded argument values. This is the runtime half of the
+// compiled `call` statement; built-ins are not routed here, because compiled
+// code hands those back to process_line so their token-level semantics survive.
+void besh_dispatch_command_values(const char* name, const char** argv, int argc,
+                                  char* out, size_t out_size) {
+    if (out && out_size) out[0] = '\0';
+    if (!name || !*name) return;
+
+    const char* resolved = resolve_keyword_alias(name);
+
+    UserFunction* func = function_list;
+    while (func && strcmp(func->name, resolved) != 0) func = func->next;
+    if (func) {
+        execute_user_function_values(func, argv, argc);
+        char* returned = get_variable_scoped("LAST_RETURN_VALUE");
+        if (out && out_size && returned) snprintf(out, out_size, "%s", returned);
+        return;
+    }
+
+    char command_path[MAX_FULL_PATH_LEN];
+    if (find_command_in_path_dynamic(resolved, command_path)) {
+        char* args[MAX_CALL_ARGS + 2];
+        int count = 0;
+        args[count++] = command_path;
+        for (int i = 0; i < argc && count < MAX_CALL_ARGS + 1; ++i) {
+            args[count++] = (char*)argv[i];
+        }
+        args[count] = NULL;
+        execute_external_command(command_path, args, count, out, out_size);
+        return;
+    }
+
+    fprintf(stderr, "Command not found: %s\n", resolved);
+    set_variable_scoped("LAST_COMMAND_STATUS", "127", false);
+}
+
+// Same contract as execute_user_function, but the arguments arrive as values
+// that have already been expanded - the form compiled code hands to the `call`
+// host import. They are bound verbatim, so a value containing '$' stays intact.
+void execute_user_function_values(UserFunction* func, const char** argv, int argc) {
+    if (!func) return;
+    int function_scope_id = enter_scope();
+    if (function_scope_id == -1) return;
+    for (int i = 0; i < func->param_count; ++i) {
+        set_variable_scoped(func->params[i], (i < argc && argv[i]) ? argv[i] : "", false);
+    }
+    run_user_function_body(func, function_scope_id);
 }

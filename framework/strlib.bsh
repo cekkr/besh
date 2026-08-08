@@ -1,0 +1,432 @@
+# strlib.bsh - strings that live in the B[e]SH heap.
+#
+# `framework/string.bsh` operates on BSH string *values*: every character it
+# touches is copied through a shell variable, and every operation is a fresh
+# `prim` dispatch. That is fine for names and short labels and wrong for
+# anything that scans text, which is why string work used to reach for external
+# commands.
+#
+# This module works on heap strings instead. A heap string is a vector (see
+# `mem.bsh`) with element size 1 and kind MEM_KIND_STR, held by its address.
+# Scanning one is integer arithmetic and byte loads, so the hot functions here
+# compile to WebAssembly with no host calls in their loops - the "kernel" tier
+# reported by `bytecode info`.
+#
+# Conventions
+# -----------
+# * A string is an integer address. 0 is the null string.
+# * Results come back through `return`, so callers read `$LAST_RETURN_VALUE`.
+#   That keeps the hot functions free of the indirect writes that would force
+#   them off the kernel tier.
+# * `str_make` and `str_text` convert between heap strings and ordinary BSH
+#   values; everything in between stays on the heap.
+# * Allocating functions return a fresh string the caller must `str_free`.
+#
+# Every function marked "kernel" below must keep compiling as one. Check with:
+#
+#     bytecode info str_find
+
+import mem
+
+echo "Loading String Library (strlib.bsh)..."
+
+# --- construction and conversion -----------------------------------------
+
+# BSH value -> heap string.
+defunc str_make (text) {
+    mem str "$text" __sl_p
+    return $__sl_p
+}
+
+# heap string -> BSH value.
+defunc str_text (p) {
+    mem cstr "$p" __sl_t
+    return $__sl_t
+}
+
+# An empty heap string with room for `cap` bytes.
+defunc str_alloc (cap) {
+    prim iadd "$cap" 1 __sl_c
+    mem vec 1 1 "$__sl_c" __sl_p
+    return $__sl_p
+}
+
+defunc str_free (p) {
+    mem free "$p"
+    return 0
+}
+
+# --- inspection (kernel) --------------------------------------------------
+
+# Byte length, excluding the terminator.
+defunc str_len (p) {
+    mem peek32 "$p" n
+    return $n
+}
+
+# Byte at `i`, or 0 when `i` is outside the string.
+defunc str_byte (p i) {
+    mem peek32 "$p" n
+    $b = 0
+    prim ilt "$i" "$n" ok
+    prim ige "$i" 0 lo
+    prim iand "$ok" "$lo" ok
+    if $ok {
+        prim iadd "$p" 16 a
+        prim iadd "$a" "$i" a
+        mem peek "$a" b
+    }
+    return $b
+}
+
+# Writes `b` at `i`. Returns 1 when it landed inside the string.
+defunc str_set_byte (p i b) {
+    mem peek32 "$p" n
+    $ok = 0
+    prim ilt "$i" "$n" ok
+    prim ige "$i" 0 lo
+    prim iand "$ok" "$lo" ok
+    if $ok {
+        prim iadd "$p" 16 a
+        prim iadd "$a" "$i" a
+        mem poke "$a" "$b"
+    }
+    return $ok
+}
+
+# -1, 0 or 1, comparing bytes then length. Kernel.
+defunc str_cmp (a b) {
+    mem peek32 "$a" la
+    mem peek32 "$b" lb
+    prim iadd "$a" 16 pa
+    prim iadd "$b" 16 pb
+
+    $lim = $la
+    prim ilt "$lb" "$la" swap
+    if $swap {
+        $lim = $lb
+    }
+
+    $i = 0
+    $res = 0
+    $go = 1
+    prim ige "$i" "$lim" stop
+    prim inot "$stop" go
+    while $go {
+        prim iadd "$pa" "$i" xa
+        prim iadd "$pb" "$i" xb
+        mem peek "$xa" ca
+        mem peek "$xb" cb
+        prim ine "$ca" "$cb" diff
+        if $diff {
+            $res = 1
+            prim ilt "$ca" "$cb" less
+            if $less {
+                prim isub 0 1 res
+            }
+        }
+        prim iadd "$i" 1 i
+        prim ige "$i" "$lim" stop
+        prim inot "$stop" go
+        prim ine "$res" 0 decided
+        if $decided {
+            $go = 0
+        }
+    }
+
+    prim ieq "$res" 0 undecided
+    if $undecided {
+        prim ilt "$la" "$lb" shorter
+        prim igt "$la" "$lb" longer
+        if $shorter {
+            prim isub 0 1 res
+        }
+        if $longer {
+            $res = 1
+        }
+    }
+    return $res
+}
+
+# 1 when the two heap strings hold the same bytes. Kernel.
+defunc str_eq (a b) {
+    mem peek32 "$a" la
+    mem peek32 "$b" lb
+    $same = 0
+    prim ieq "$la" "$lb" lengths
+    if $lengths {
+        prim iadd "$a" 16 pa
+        prim iadd "$b" 16 pb
+        $i = 0
+        $same = 1
+        $go = 1
+        prim ige "$i" "$la" stop
+        prim inot "$stop" go
+        while $go {
+            prim iadd "$pa" "$i" xa
+            prim iadd "$pb" "$i" xb
+            mem peek "$xa" ca
+            mem peek "$xb" cb
+            prim ine "$ca" "$cb" diff
+            if $diff {
+                $same = 0
+                $go = 0
+            }
+            prim iadd "$i" 1 i
+            prim ige "$i" "$la" stop
+            if $stop {
+                $go = 0
+            }
+        }
+    }
+    return $same
+}
+
+# First index of `needle` in `hay` at or after `from`, or -1. Kernel.
+defunc str_find_from (hay needle from) {
+    mem peek32 "$hay" hl
+    mem peek32 "$needle" nl
+    prim iadd "$hay" 16 hp
+    prim iadd "$needle" 16 np
+
+    prim isub 0 1 found
+    prim isub "$hl" "$nl" last
+    $i = $from
+    prim ilt "$i" 0 neg
+    if $neg {
+        $i = 0
+    }
+
+    $go = 1
+    prim igt "$i" "$last" stop
+    prim inot "$stop" go
+    while $go {
+        $j = 0
+        $match = 1
+        $inner = 1
+        prim ige "$j" "$nl" done
+        prim inot "$done" inner
+        while $inner {
+            prim iadd "$hp" "$i" xa
+            prim iadd "$xa" "$j" xa
+            prim iadd "$np" "$j" xb
+            mem peek "$xa" ca
+            mem peek "$xb" cb
+            prim ine "$ca" "$cb" diff
+            if $diff {
+                $match = 0
+                $inner = 0
+            }
+            prim iadd "$j" 1 j
+            prim ige "$j" "$nl" done
+            if $done {
+                $inner = 0
+            }
+        }
+        if $match {
+            $found = $i
+            $go = 0
+        }
+        prim iadd "$i" 1 i
+        prim igt "$i" "$last" stop
+        if $stop {
+            $go = 0
+        }
+    }
+    return $found
+}
+
+# 32-bit FNV-1a over the bytes. Kernel.
+defunc str_hash (p) {
+    mem peek32 "$p" n
+    prim iadd "$p" 16 base
+    $h = 2166136261
+    $i = 0
+    $go = 1
+    prim ige "$i" "$n" stop
+    prim inot "$stop" go
+    while $go {
+        prim iadd "$base" "$i" a
+        mem peek "$a" c
+        prim ixor "$h" "$c" h
+        prim imul "$h" 16777619 h
+        prim iadd "$i" 1 i
+        prim ige "$i" "$n" stop
+        prim inot "$stop" go
+    }
+    prim iand "$h" 2147483647 h
+    return $h
+}
+
+# ASCII case folding in place; returns the same address. Kernel.
+defunc str_upper (p) {
+    mem peek32 "$p" n
+    prim iadd "$p" 16 base
+    $i = 0
+    $go = 1
+    prim ige "$i" "$n" stop
+    prim inot "$stop" go
+    while $go {
+        prim iadd "$base" "$i" a
+        mem peek "$a" c
+        prim ige "$c" 97 lo
+        prim ile "$c" 122 hi
+        prim iand "$lo" "$hi" fold
+        if $fold {
+            prim isub "$c" 32 c
+            mem poke "$a" "$c"
+        }
+        prim iadd "$i" 1 i
+        prim ige "$i" "$n" stop
+        prim inot "$stop" go
+    }
+    return $p
+}
+
+defunc str_lower (p) {
+    mem peek32 "$p" n
+    prim iadd "$p" 16 base
+    $i = 0
+    $go = 1
+    prim ige "$i" "$n" stop
+    prim inot "$stop" go
+    while $go {
+        prim iadd "$base" "$i" a
+        mem peek "$a" c
+        prim ige "$c" 65 lo
+        prim ile "$c" 90 hi
+        prim iand "$lo" "$hi" fold
+        if $fold {
+            prim iadd "$c" 32 c
+            mem poke "$a" "$c"
+        }
+        prim iadd "$i" 1 i
+        prim ige "$i" "$n" stop
+        prim inot "$stop" go
+    }
+    return $p
+}
+
+# Reverses the bytes in place. Kernel.
+defunc str_reverse (p) {
+    mem peek32 "$p" n
+    prim iadd "$p" 16 base
+    $i = 0
+    prim isub "$n" 1 j
+    $go = 1
+    prim ige "$i" "$j" stop
+    prim inot "$stop" go
+    while $go {
+        prim iadd "$base" "$i" a
+        prim iadd "$base" "$j" b
+        mem peek "$a" ca
+        mem peek "$b" cb
+        mem poke "$a" "$cb"
+        mem poke "$b" "$ca"
+        prim iadd "$i" 1 i
+        prim isub "$j" 1 j
+        prim ige "$i" "$j" stop
+        prim inot "$stop" go
+    }
+    return $p
+}
+
+# --- operations that allocate --------------------------------------------
+
+defunc str_find (hay needle) {
+    str_find_from "$hay" "$needle" 0
+    return $LAST_RETURN_VALUE
+}
+
+defunc str_contains (hay needle) {
+    str_find_from "$hay" "$needle" 0
+    prim ige "$LAST_RETURN_VALUE" 0 __sl_yes
+    return $__sl_yes
+}
+
+# A fresh copy of `count` bytes starting at `start`.
+defunc str_slice (p start count) {
+    str_len "$p"
+    $__sl_n = $LAST_RETURN_VALUE
+    $__sl_s = $start
+    if $__sl_s < 0 {
+        $__sl_s = 0
+    }
+    if $__sl_s > $__sl_n {
+        $__sl_s = $__sl_n
+    }
+    $__sl_c = $count
+    if $__sl_c < 0 {
+        $__sl_c = 0
+    }
+    prim iadd "$__sl_s" "$__sl_c" __sl_end
+    if $__sl_end > $__sl_n {
+        prim isub "$__sl_n" "$__sl_s" __sl_c
+    }
+    str_alloc "$__sl_c"
+    $__sl_out = $LAST_RETURN_VALUE
+    prim iadd "$p" 16 __sl_src
+    prim iadd "$__sl_src" "$__sl_s" __sl_src
+    prim iadd "$__sl_out" 16 __sl_dst
+    mem copy "$__sl_dst" "$__sl_src" "$__sl_c"
+    mem setlen "$__sl_out" "$__sl_c"
+    return $__sl_out
+}
+
+defunc str_copy (p) {
+    str_len "$p"
+    str_slice "$p" 0 "$LAST_RETURN_VALUE"
+    return $LAST_RETURN_VALUE
+}
+
+# A fresh string holding a then b.
+defunc str_concat (a b) {
+    mem concat "$a" "$b" __sl_out
+    return $__sl_out
+}
+
+# Removes ASCII spaces and tabs from both ends, returning a fresh string.
+defunc str_trim (p) {
+    str_len "$p"
+    $__sl_n = $LAST_RETURN_VALUE
+    $__sl_s = 0
+    $__sl_go = 1
+    while $__sl_go {
+        $__sl_go = 0
+        if $__sl_s < $__sl_n {
+            str_byte "$p" "$__sl_s"
+            $__sl_c = $LAST_RETURN_VALUE
+            if $__sl_c == 32 {
+                prim iadd "$__sl_s" 1 __sl_s
+                $__sl_go = 1
+            }
+            if $__sl_c == 9 {
+                prim iadd "$__sl_s" 1 __sl_s
+                $__sl_go = 1
+            }
+        }
+    }
+    $__sl_e = $__sl_n
+    $__sl_go = 1
+    while $__sl_go {
+        $__sl_go = 0
+        if $__sl_e > $__sl_s {
+            prim isub "$__sl_e" 1 __sl_last
+            str_byte "$p" "$__sl_last"
+            $__sl_c = $LAST_RETURN_VALUE
+            if $__sl_c == 32 {
+                $__sl_e = $__sl_last
+                $__sl_go = 1
+            }
+            if $__sl_c == 9 {
+                $__sl_e = $__sl_last
+                $__sl_go = 1
+            }
+        }
+    }
+    prim isub "$__sl_e" "$__sl_s" __sl_count
+    str_slice "$p" "$__sl_s" "$__sl_count"
+    return $LAST_RETURN_VALUE
+}
+
+echo "String Library loaded (heap strings: str_make/str_text/str_find/str_cmp/...)."

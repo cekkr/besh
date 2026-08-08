@@ -1,18 +1,19 @@
 # B[e]SH — AI Agent Reference
 
-This is the fast-access operational reference for the Basic [extensible] Shell (B[e]SH), an early research shell for experimenting with a small C execution core and language behavior assembled at runtime from BSH scripts. The project is [`bsh.c`](bsh.c) together with [`.bshrc`](.bshrc) and [`framework/`](framework/). It is not intended to replace a production Unix shell. **[`gold/bsh-rs/`](gold/bsh-rs/) is an archived experimental Rust port, not part of the project implementation; ignore it during normal discovery, changes, builds, and validation.**
+This is the fast-access operational reference for the Basic [extensible] Shell (B[e]SH), an early research shell for experimenting with a small C execution core and language behavior assembled at runtime from BSH scripts. The project is [`bsh.c`](bsh.c) and the bytecode path in [`besh_mem.c`](besh_mem.c), [`besh_wasm.c`](besh_wasm.c) and [`besh_jit.c`](besh_jit.c), together with [`.bshrc`](.bshrc) and [`framework/`](framework/). The pinned [`thirds/fayasm/`](thirds/fayasm/) WebAssembly runtime is compiled into the executable. It is not intended to replace a production Unix shell. **[`gold/bsh-rs/`](gold/bsh-rs/) is an archived experimental Rust port, not part of the project implementation; ignore it during normal discovery, changes, builds, and validation.**
 
 ## Read This First
 
 Use this source-of-truth order when facts conflict:
 
 1. [`LICENSE`](LICENSE) — legal terms for all repository content.
-2. Executable behavior and interfaces in [`bsh.c`](bsh.c), [`.bshrc`](.bshrc), and [`framework/`](framework/), plus a successful [`test.sh`](test.sh) run or focused execution check.
+2. Executable behavior and interfaces in [`bsh.c`](bsh.c), [`besh_core.h`](besh_core.h), [`besh_mem.c`](besh_mem.c), [`besh_wasm.c`](besh_wasm.c), [`besh_jit.c`](besh_jit.c), [`.bshrc`](.bshrc), and [`framework/`](framework/), plus a successful [`test.sh`](test.sh) run or focused execution check.
 3. [`compile.sh`](compile.sh) and other root build/tool configuration — exact declared workflows for the project implementation.
 4. [`README.md`](README.md) — project intent, vocabulary, and research goals; implementation claims in it must be checked against current source.
 5. [`ROADMAP.md`](ROADMAP.md) — planned B[e]SH work and the Fayasm integration sequence; roadmap entries do not prove implementation.
-6. [`TooBad.md`](TooBad.md), examples, studies, and comments marked conceptual — known concerns, demonstrations, and design exploration, not proof of working behavior.
-7. [`gold/`](gold/) and Git history — historical reference only; neither overrides the current implementation.
+6. [`guides/bytecode.md`](guides/bytecode.md), [`guides/cdiesis.md`](guides/cdiesis.md), and [`guides/bash.md`](guides/bash.md) — usage contracts for shipped subsystems; verify feature claims against source and tests.
+7. [`TooBad.md`](TooBad.md), examples, studies, and comments marked conceptual — known concerns, demonstrations, and design exploration, not proof of working behavior.
+8. [`gold/`](gold/) and Git history — historical reference only; neither overrides the current implementation.
 
 When these disagree, inspect the affected control path and run the narrowest safe check. Do not upgrade a conceptual comment, README aspiration, example expectation, or archived-port behavior into a claim about the project implementation. Record unresolved contradictions under **Known Gaps**.
 
@@ -65,6 +66,12 @@ When these disagree, inspect the affected control path and run the narrowest saf
 - **The Bash/cDiesis bridge is stateful:** [`framework/bash/cdiesis.sh`](framework/bash/cdiesis.sh) keeps one `bsh --bsh-stdin` process alive through private FIFOs. Object handles and mutations survive bridge calls but become invalid at `cdiesis_close`; values cross through private files, while class/method/field names are identifier-validated.
 - **Dynamic-library ABI is fixed:** `calllib` expects a symbol compatible with `int func(int argc, char *argv[], char *output_buffer, int buffer_size)`. `LAST_LIB_CALL_STATUS` and `LAST_LIB_CALL_OUTPUT` are the BSH-facing result channel. Arbitrary C signatures are unsupported and unsafe.
 - **File-backed loops depend on seeking:** while-loop replay uses `ftell`/`fseek` through block frames. `execute_user_function` passes `NULL` as its input source, so do not assume identical loop behavior in interactive input, script files, imports, and stored function bodies without focused verification.
+- **The interpreter is the reference, the bytecode path is opt-in-by-default:** `run_user_function_body` in [`bsh.c`](bsh.c) offers each call to `besh_jit_run_function` first and replays the stored source lines only when it answers `BESH_RUN_FALLBACK`. Any behavior difference between the two is a bug in the compiler, never a new feature. [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh) is the guard.
+- **Conditions are decided in C, not by operator handlers:** `handle_if_statement_advanced` uses `besh_compare_values` for a three-token comparison and the expression evaluator otherwise; `handle_while_statement_advanced` uses a different rule again, and the two disagree on the case of `false`. `besh_compare_values` and `besh_value_is_true` are shared with the `cond`/`truthy` host imports so both tiers make the same choices. Changing either handler means changing the matching branch in `compile_one`.
+- **The `besh.v1` host ABI is the only channel into the shell:** compiled code receives opaque `i32` handles, never a `Variable *`, `UserFunction *`, or scope-stack pointer. Imports, handle encoding, the reserved abort word at memory offset 0, and the deoptimisation guard are specified in [`guides/bytecode.md`](guides/bytecode.md). Fayasm resolves an imported memory during `fa_Runtime_attachModule`, so the memory binding must be established *before* attaching.
+- **Built-ins are either modelled or handed back:** `is_interpreter_builtin` in [`besh_jit.c`](besh_jit.c) lists the commands compiled code routes to `process_line` through the `raw` import. It must stay in step with the dispatch chain in `process_line`; a built-in added to one and not the other changes behavior inside compiled functions only.
+- **The heap is the WebAssembly memory:** [`besh_mem.c`](besh_mem.c) owns one contiguous buffer bound to Fayasm as `besh.v1`/`memory`. It must not move while compiled code runs, so `besh_mem_lock` refuses growth during execution. `coalesce_forward` rewrites its argument's header and must only ever be called on a free block; `besh_mem_realloc` must split the neighbour it absorbs rather than taking all of it.
+- **Cached modules are invalidated wholesale:** `defoperator` and `defkeyword` drop every unit, redefinition drops one, and invalidation is refused while a module is executing. There is no deterministic cache key yet, so anything that changes how source resolves must call `besh_jit_invalidate_all`.
 - **Module lookup is process-relative:** `BSH_MODULE_PATH` defaults to `./framework:~/.bsh_framework:/usr/local/share/bsh/framework`. The C code splits these strings but does not expand `~`; running outside the repository can prevent root `.bshrc` imports. Set `BSH_MODULE_PATH` explicitly in portable tests.
 
 ## Architecture and Data/Control Flow
@@ -83,9 +90,13 @@ Primary implementation:
 
 The process boundary is the external command launched by `fork`/`execv`. The native-code trust boundary is a loaded shared library invoked through the fixed BSH C ABI. Imported `.bsh` files execute in the same process and mutate global registries/state; they are trusted code, not data.
 
-Planned Fayasm path (not implemented):
+Compiled path (implemented; see [`guides/bytecode.md`](guides/bytecode.md)):
 
-`parsed BSH function/framework IR` → `WASM emitter` → [`thirds/fayasm/`](thirds/fayasm/) in-memory module/runtime → narrow B[e]SH host imports → existing scoped variables and primitives. See [`ROADMAP.md`](ROADMAP.md); do not describe this path as current behavior.
+`function body` → `besh_split_line_into_statements` → IR in [`besh_jit.c`](besh_jit.c) → `besh_wasm.c` module bytes → `wasm_module_init_from_memory` → `fa_Runtime_attachModule` → `fa_Runtime_executeJob` → `besh.v1` host imports → existing scoped variables, operators, primitives and the shared heap
+
+`heap pointer` → `mem` builtin or a compiled `i32.load`/`i32.store` → the one buffer owned by [`besh_mem.c`](besh_mem.c) and bound to Fayasm as `besh.v1`/`memory`
+
+Not implemented: direct `call` between compiled functions in one module, a deterministic cache key, disk caching, and typed specialization beyond the integer kernel tier. See [`ROADMAP.md`](ROADMAP.md).
 
 ## Linked Source Tree and File Reference
 
@@ -96,8 +107,42 @@ Owns the primary shell executable: data structures, tokenizer, runtime operator 
 - **Key functions and subparts:** `main` and `initialize_shell` bootstrap scopes, paths, variables, and startup scripts; `advanced_tokenize_line` emits tokens using registered operators; `process_line` dispatches all line forms; `parse_operand`, `parse_expression_recursive`, and `evaluate_expression_from_tokens` evaluate expressions; `handle_*` functions implement built-ins and control flow; `enter_scope`/`leave_scope` and scoped variable helpers own lifetime; `execute_script`, `execute_external_command`, and `execute_user_function` cross execution contexts; object parse/stringify helpers own the flattened representation.
 - **Bash/process additions:** `delegate_to_bash` owns CLI routing for Bash entry points; `handle_process_statement` captures a child launched with distinct argv entries; `--bsh-stdin` runs prompt-free native BSH input for stateful adapters. `BSH_EXECUTABLE` exposes the resolved current binary to scripts.
 - **Called by / depends on:** built by [`compile.sh`](compile.sh); loads [`.bshrc`](.bshrc) and modules in [`framework/`](framework/); uses POSIX process APIs and `dlfcn`.
+- **Bytecode integration:** `run_user_function_body` offers every call to `besh_jit_run_function` before replaying source lines; `besh_prim_dispatch`, `besh_split_line_into_statements`, `besh_line_needs_statement_split`, `besh_compare_values`, `besh_value_is_true`, `execute_user_function_values` and `besh_dispatch_command_values` are the interfaces the compiler consumes. `prim` carries the 32-bit integer operations (`iadd` … `ige`, `inot`) the compiler lowers natively.
 - **Tests:** [`test.sh`](test.sh) builds with warnings enabled and runs the isolated suites under [`tests/`](tests/).
-- **Common mistakes:** Do not add an operator only to C or only to a framework file; do not bypass scoped setters; do not assume capture keeps stderr separate; do not treat comments describing intended behavior as implemented.
+- **Common mistakes:** Do not add an operator only to C or only to a framework file; do not bypass scoped setters; do not assume capture keeps stderr separate; do not treat comments describing intended behavior as implemented. Do not change a condition handler without changing the matching branch in `compile_one`.
+
+### [`besh_core.h`](besh_core.h)
+
+Shared declarations: every constant, tokenizer/operator/variable/function type, and the `extern` view of the interpreter's globals. It exists so the interpreter and the bytecode translation units describe the same objects exactly once.
+
+- **Ownership:** [`bsh.c`](bsh.c) defines every global declared `extern` here; the header defines none.
+- **Common mistakes:** `INPUT_BUFFER_SIZE` is derived from `BESH_ARG_SIZE` in [`besh_mem.h`](besh_mem.h) so the `mem` argument vector cannot drift from it — change one and you have changed both. Adding a type here without removing it from `bsh.c` will not compile.
+
+### [`besh_mem.h`](besh_mem.h) and [`besh_mem.c`](besh_mem.c)
+
+The linear heap: pointers, blocks, vectors, heap strings, and the `mem` built-in. The same bytes are handed to Fayasm as an imported WebAssembly memory, so a pointer means the same thing in interpreted BSH, in C, and inside emitted bytecode.
+
+- **Key functions:** `besh_mem_init`/`besh_mem_shutdown`, `besh_mem_alloc`/`besh_mem_realloc`/`besh_mem_free`, `besh_mem_lock`, `besh_vec_*`, `besh_str_*`, `besh_mem_command`, `besh_mem_produces_value`.
+- **Layout:** an 8-byte block header before every payload; a vector payload starts with `len`, `cap`, `esz`, `kind`. Address 0 is null and the first word of the heap is reserved for the compiled path's abort flag.
+- **Tests:** [`tests/mem_heap.bsh`](tests/mem_heap.bsh).
+- **Common mistakes:** `coalesce_forward` marks its argument free, so calling it on a live block loses that allocation; `besh_mem_realloc` must split the neighbour it absorbs or a small vector will swallow the rest of the heap. Growth is refused while compiled code runs — that is deliberate, not a bug.
+
+### [`besh_wasm.h`](besh_wasm.h) and [`besh_wasm.c`](besh_wasm.c)
+
+A WebAssembly binary writer: LEB128, a growable byte buffer, instruction shorthands, and a module builder that emits the type, import, function, export and code sections. It knows nothing about BSH.
+
+- **Key functions:** `besh_buf_*`, `besh_emit_*`, `besh_wasm_new`, `besh_wasm_type`, `besh_wasm_import_func`, `besh_wasm_import_memory`, `besh_wasm_add_func`, `besh_wasm_add_local`, `besh_wasm_code`, `besh_wasm_export_func`, `besh_wasm_finish`.
+- **Tests:** exercised through every compiled function; `bytecode dump <function>` prints the bytes.
+- **Common mistakes:** imported functions occupy the low function indices, so every import must be declared before the first `besh_wasm_add_func`; the builder sets an overflow flag rather than aborting, and `besh_wasm_finish` returns false for it.
+
+### [`besh_jit.h`](besh_jit.h) and [`besh_jit.c`](besh_jit.c)
+
+The compiled path: IR, statement and expression compilation, the kernel/general tier decision, WebAssembly emission, the `besh.v1` host imports, the Fayasm runtime pool, and the `bytecode` and `mem` built-ins.
+
+- **Key functions:** `besh_jit_run_function`, `unit_compile`, `unit_build_ir`, `compile_block`/`compile_one`/`compile_expr_range`, `block_is_native`, `unit_emit`, `emit_stmt`/`emit_value`/`emit_int`/`emit_condition`, `unit_acquire_runtime`, `host_*` for each import, `handle_bytecode_statement`, `handle_mem_statement`.
+- **Contracts:** full specification in [`guides/bytecode.md`](guides/bytecode.md) — handle encoding, import table, the reserved abort word, the kernel guard, tier rules, invalidation.
+- **Tests:** [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh) and the tier assertions in [`tests/strlib_list.bsh`](tests/strlib_list.bsh).
+- **Common mistakes:** every unit keeps its own Fayasm runtime pool so re-entrant and recursive calls never share a job; a module currently executing must not be freed, which is why invalidation is refused during execution. `BSH_COMPILE_DEBUG=1` explains why a function did not reach the tier you expected.
 
 ### [`.bshrc`](.bshrc)
 
@@ -116,6 +161,32 @@ Registers arithmetic, comparison, increment/decrement, ternary, and dot operator
 - **Depends on:** [`framework/type.bsh`](framework/type.bsh), [`framework/number.bsh`](framework/number.bsh), and [`framework/string.bsh`](framework/string.bsh).
 - **Tests:** arithmetic and comparisons are exercised throughout the core and cDiesis suites; prefix/postfix collision still lacks a focused assertion.
 - **Common mistakes:** Handler arity must match the C dispatcher. Prefix and postfix registration of the same symbol currently collide in C. The `[cite: 124]` text is stray prose, not syntax or evidence.
+
+### [`framework/mem.bsh`](framework/mem.bsh)
+
+Names for the heap layout: the vector header offsets, the `MEM_KIND_*` tags, and kernel-tier accessors (`mem_data`, `mem_count`, `mem_capacity`, `mem_elemsize`, `mem_kind`, `mem_set_count`).
+
+- **Depends on:** the `mem` built-in only. Not imported by [`.bshrc`](.bshrc).
+- **Tests:** [`tests/mem_heap.bsh`](tests/mem_heap.bsh) covers the built-in; the helpers are used by `strlib`/`list`.
+- **Common mistakes:** the offsets here must match `BESH_VEC_HDR` and the `BESH_VEC_*` constants in [`besh_mem.h`](besh_mem.h).
+
+### [`framework/strlib.bsh`](framework/strlib.bsh)
+
+Strings held in the heap rather than in shell variables, written so their scanning loops compile to the kernel tier. This is the answer to string work that previously reached for external commands; [`framework/string.bsh`](framework/string.bsh) still owns operations on BSH string *values* and is unchanged.
+
+- **Key functions:** `str_make`/`str_text`/`str_alloc`/`str_free`; kernel-tier `str_len`, `str_byte`, `str_set_byte`, `str_cmp`, `str_eq`, `str_find_from`, `str_hash`, `str_upper`, `str_lower`, `str_reverse`; allocating `str_find`, `str_contains`, `str_slice`, `str_copy`, `str_concat`, `str_trim`.
+- **Contracts:** a string is an integer address, 0 is null, results come back through `return` (so callers read `$LAST_RETURN_VALUE`) because an indirect write would force the general tier.
+- **Tests:** [`tests/strlib_list.bsh`](tests/strlib_list.bsh), including an assertion on the compilation tier of every kernel function.
+- **Common mistakes:** do not convert these to the result-variable convention; do not use a comparison operator in a loop condition that must stay a kernel — compute a flag with `prim ilt` instead.
+
+### [`framework/list.bsh`](framework/list.bsh)
+
+Dynamic lists over the same vector representation: one load per index, resizable, passable by address — unlike the core's `<base>_ARRAYIDX_<index>` variables.
+
+- **Key functions:** `list_new`, `list_new_int`, `list_free`, `list_free_deep`; kernel-tier `list_len`, `list_capacity`, `list_get`, `list_set`, `list_index_of`, `list_sum`; `list_push`, `list_pop`, `str_split_byte`, `str_join_byte`.
+- **Contracts:** `list_push` may move the list, so callers must keep the returned address.
+- **Tests:** [`tests/strlib_list.bsh`](tests/strlib_list.bsh).
+- **Common mistakes:** `list_free_deep` assumes every element is an owned heap block; use `list_free` for a list of plain integers.
 
 ### [`framework/c_compiler.bsh`](framework/c_compiler.bsh)
 
@@ -265,17 +336,17 @@ Large expectation-oriented demonstration of numeric and string framework APIs.
 
 ### [`compile.sh`](compile.sh)
 
-Canonical primary build wrapper: `gcc -fno-common bsh.c -o bsh -g`.
+Canonical primary build wrapper. It compiles `bsh.c`, `besh_mem.c`, `besh_wasm.c`, `besh_jit.c` and every `thirds/fayasm/src/*.c` into the ignored root executable `bsh` with debug symbols, and refuses to run when the submodule has not been initialised.
 
-- **Produces:** ignored root executable `bsh` with debug symbols.
+- **Produces:** ignored root executable `bsh`.
 - **Tests:** compilation only.
-- **Common mistakes:** The script has no strict shell flags and does not run the suite; use [`test.sh`](test.sh) for the acceptance gate.
+- **Common mistakes:** The build needs `git submodule update --init --recursive` first. Use [`test.sh`](test.sh) for the acceptance gate; it is the one that enables warnings.
 
 ### [`test.sh`](test.sh) and [`tests/`](tests/)
 
-Build and acceptance harness. It performs a warnings-enabled build, creates an isolated `.test-home`, sets an explicit module path, bounds every `.bsh` suite with an alarm, and accepts only a zero exit with an explicit pass and no failure result; an empty filter match fails.
+Build and acceptance harness. It compiles the pinned Fayasm sources into ignored `.build-fayasm/` objects without project warning flags, performs a warnings-enabled build of the B[e]SH sources against them, creates an isolated `.test-home`, sets an explicit module path, bounds every `.bsh` suite with an alarm, and accepts only a zero exit with an explicit pass and no failure result; an empty filter match fails.
 
-- **Suites:** core variables/expansion, functions/scopes/recursion, control flow, cDiesis lifecycle, compiler/runtime, standard library and shipped examples, cDiesis/RPN interop, the Bash language framework, Bash CLI routing, and Bash-to-cDiesis objects.
+- **Suites:** core variables/expansion, functions/scopes/recursion, control flow, the heap and `mem` primitives, the heap string and list libraries with their compilation tiers, the interpreted-versus-compiled differential, cDiesis lifecycle, compiler/runtime, standard library and shipped examples, cDiesis/RPN interop, the Bash language framework, Bash CLI routing, and Bash-to-cDiesis objects.
 - **Discovery:** top-level `tests/*.bsh` and `tests/*.sh` are suites. Bash fixtures belong below `tests/fixtures/` so the runner does not execute them as standalone suites.
 - **Common mistakes:** output before a timeout is buffered per suite; inspect the reported `/tmp/bsh_test_<name>.out` when a suite exits without a result line. Do not weaken silence or timeout into success.
 
@@ -367,6 +438,13 @@ Design document for the language-framework layer: cDiesis's architecture, the 17
 - **Authority:** design and dependency analysis plus the verified cDiesis contract; production-readiness claims still require evidence beyond this research suite.
 - **Maintenance:** keep the `CDS-REQ` table synchronized with **Known Gaps** here; when a requirement is implemented and verified, update both.
 
+### [`guides/bytecode.md`](guides/bytecode.md)
+
+The contract for the compiled path: modes and introspection commands, the kernel and general tiers and exactly what qualifies for each, the handle encoding, the full `besh.v1` import table, which built-ins are lowered and which are handed back to `process_line`, unwinding through the reserved abort word, the deoptimisation guard, cache invalidation, the heap and the `mem` built-in, how to write library code that stays on the kernel tier, and the measured timings.
+
+- **Authority:** current usage contract for `bytecode`, `mem`, `BSH_COMPILE`, `BSH_COMPILE_DEBUG` and `BSH_HEAP_BYTES`; verify with the three bytecode/heap suites.
+- **Common mistakes:** the general tier is currently at parity with the interpreter, not faster; do not quote the kernel-tier numbers for framework code.
+
 ### [`guides/bash.md`](guides/bash.md)
 
 Documents the boundary between native BSH and real Bash execution, direct CLI routing, the Bash language-framework API, captured-process limits, and the stateful Bash-to-cDiesis object bridge.
@@ -448,6 +526,28 @@ MIT license for the repository. Preserve its notice in substantial copies.
 - **Constraints:** Bash must be on `PATH`; capture is capped at `INPUT_BUFFER_SIZE - 1` and merges stdout/stderr; bridge processes and temporary files are trusted local execution, not isolation.
 - **Tests and gaps:** [`tests/bash_framework.bsh`](tests/bash_framework.bsh) and [`tests/bash_cdiesis.sh`](tests/bash_cdiesis.sh) cover the supported paths. Shebang detection for non-`.sh` filenames and persistent state across `lang_eval` calls are not provided.
 
+### Bytecode execution on Fayasm — Experimental, verified
+
+- **Behavior:** a BSH function body is parsed once into IR, lowered to an in-memory WebAssembly module, and executed by the linked Fayasm runtime; the interpreter remains the reference and the fallback. Two tiers come out of one IR: a "kernel" tier with unboxed integer locals and no host calls, and a "general" tier where control flow is WebAssembly and values move through `besh.v1` host imports. Statements the compiler does not model are handed back to `process_line`, so every command and syntax form still works inside a compiled function.
+- **Flow and owners:** `run_user_function_body` → `besh_jit_run_function` → `unit_compile` → `besh_wasm_finish` → `wasm_module_init_from_memory` → `fa_Runtime_attachModule` → `fa_Runtime_executeJob` → `besh.v1` imports in [`besh_jit.c`](besh_jit.c).
+- **Constraints:** compiled code sees only opaque handles; the shared heap cannot move during execution; caches are invalidated wholesale by `defoperator`/`defkeyword` and per function by redefinition; a mode change from inside a running function is ignored.
+- **Tests and gaps:** [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh) compares both modes across values, operators, conditions, loops, calls, recursion, returns, scoping, indirection, arrays, primitives, raw built-ins, external commands and redefinition. Gaps: no direct call between compiled functions, no deterministic cache key, no disk cache, no source-line mapping for traps, and the general tier is at parity rather than faster.
+
+### Heap, pointers and vectors — Experimental, verified
+
+- **Behavior:** `mem` gives BSH real addresses into a contiguous heap that is also the WebAssembly linear memory. Blocks carry an 8-byte header; vectors carry `len`/`cap`/`esz`/`kind` and back both heap strings and lists.
+- **Flow and owners:** `handle_mem_statement` → `besh_mem_command` in [`besh_mem.c`](besh_mem.c); compiled `mem peek*`/`poke*` lower to single WebAssembly memory instructions instead.
+- **Constraints:** address 0 is null and the first heap word is the compiled path's abort flag; the heap grows on demand but never while compiled code runs; every accessor is bounds checked.
+- **Tests and gaps:** [`tests/mem_heap.bsh`](tests/mem_heap.bsh) and [`tests/strlib_list.bsh`](tests/strlib_list.bsh). Gaps: no defragmentation, no ownership tracking — a leaked block is leaked until exit — and `mem` has no guard against a pointer from a previous `besh_mem_shutdown`.
+
+### Pitfall: assuming a compiled function is a faster interpreted function
+
+- **Symptom / wrong assumption:** a change to `handle_if_statement_advanced`, `handle_while_statement_advanced`, `prim_dispatch` or the built-in dispatch chain is made in [`bsh.c`](bsh.c) alone, and the suite still passes because the affected function happened to fall back.
+- **Cause and invariant:** the compiler reimplements those decisions in `compile_one`/`emit_stmt`. The two must be changed together, and `is_interpreter_builtin` must list every built-in `process_line` handles.
+- **Risk area:** [`bsh.c`](bsh.c) condition handlers and dispatch chain, `compile_one` and `is_interpreter_builtin` in [`besh_jit.c`](besh_jit.c).
+- **Safe pattern / regression check:** add the construct to [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh) and assert the tier, so agreement is checked against something that actually compiled.
+- **Status:** active structural duplication, guarded by the differential suite.
+
 ### Pitfall: trusting startup success messages
 
 - **Symptom / wrong assumption:** `.bshrc` reports that `bshmath` compiled or loaded and agents infer arithmetic works.
@@ -476,7 +576,11 @@ MIT license for the repository. Preserve its notice in substantial copies.
 
 - Executable entry points `./bsh` and `./bsh <script.bsh>` → `main` in [`bsh.c`](bsh.c); `./bsh <script.sh>`, `./bsh -c`, `./bsh -s`, and `./bsh --bash ...` → `delegate_to_bash`.
 - Assignment `$name = expression` and `$array[index] = value` → `process_line` / `handle_assignment_advanced`.
-- Built-ins `echo`, `defkeyword`, `defoperator`, `if`, `else`, `while`, `defunc`, `loadlib`, `calllib`, `import`, `update_cwd`, `eval`, `process`, and `exit` → dispatch table expressed by the conditional chain in `process_line`.
+- Built-ins `echo`, `defkeyword`, `defoperator`, `if`, `else`, `while`, `defunc`, `loadlib`, `calllib`, `import`, `update_cwd`, `eval`, `prim`, `libloaded`, `writefile`, `readfile`, `process`, `exit`, `mem`, and `bytecode` → dispatch table expressed by the conditional chain in `process_line`.
+- Heap, pointers, vectors and heap strings → `mem` / `besh_mem_command` in [`besh_mem.c`](besh_mem.c).
+- Compilation mode, introspection and cache control → `bytecode` / `handle_bytecode_statement` in [`besh_jit.c`](besh_jit.c); contract in [`guides/bytecode.md`](guides/bytecode.md).
+- Compiled execution of a function body → `besh_jit_run_function`, called from `run_user_function_body` in [`bsh.c`](bsh.c).
+- Heap string and list libraries → [`framework/strlib.bsh`](framework/strlib.bsh) and [`framework/list.bsh`](framework/list.bsh) over [`framework/mem.bsh`](framework/mem.bsh).
 - Alias `function` → `defkeyword defunc function` in [`.bshrc`](.bshrc).
 - User-defined command names → `UserFunction` registry / `execute_user_function`.
 - Unknown command names → `PATH` resolution / `execute_external_command`.
@@ -503,10 +607,11 @@ python3 groupFramework.py
 git diff --check
 ```
 
-- `git submodule update --init --recursive` materializes the pinned Fayasm dependency. It contacts the configured Git remote when objects are absent and does not integrate or build Fayasm into B[e]SH.
+- `git submodule update --init --recursive` materializes the pinned Fayasm dependency and is now a build prerequisite: `compile.sh` and `test.sh` compile `thirds/fayasm/src/*.c` into the executable and stop with an explicit message when the submodule is missing.
 - `./compile.sh` is the canonical debug build. `./test.sh` performs the stricter warnings-enabled build, creates an isolated `HOME`, sets `BSH_MODULE_PATH`, bounds every suite, and requires an explicit result line.
 - `./bsh` starts native BSH interactively; `./bsh <path.bsh>` runs a BSH script. Startup executes a user `$HOME/.bshrc` preferentially, so use an isolated environment when testing repository startup behavior. `.sh`, `-c`, `-s`, and `--bash` route to Bash without BSH startup. `--bsh-stdin` is the prompt-free native input mode used by adapters, not a Bash mode.
 - `python3 groupFramework.py` mutates ignored `allFramework.txt`; it is a debug inspection aid, not a build step.
+- `BSH_COMPILE=off|auto|force` selects the execution path before startup, `BSH_COMPILE_DEBUG=1` explains each compilation decision, and `BSH_HEAP_BYTES` sets the initial heap size. `bytecode status` and `bytecode info <function>` report what actually happened.
 - Linting, formatting, static analysis, benchmarks, packaging, release, and deployment workflows are not defined. The current warnings-enabled suite build is clean on the verified macOS toolchain.
 
 Debugging: [`.vscode/launch.json`](.vscode/launch.json) provides a generic GDB launcher. There is no verified release process or versioning policy; do not infer one from source header comments.
@@ -519,6 +624,9 @@ Debugging: [`.vscode/launch.json`](.vscode/launch.json) provides a generic GDB l
 - Functions, scopes, and loops → [`tests/core_functions.bsh`](tests/core_functions.bsh) and [`tests/core_control.bsh`](tests/core_control.bsh).
 - Numeric operators → the core and cDiesis suites; native ABI compilation/calls still need a focused automated suite.
 - Basic strings and array indexing → [`tests/core_variables.bsh`](tests/core_variables.bsh) plus the cDiesis stdlib suite; splitting-specific behavior remains demonstration-only.
+- Heap, pointers, vectors and heap strings → [`tests/mem_heap.bsh`](tests/mem_heap.bsh).
+- Heap string and list libraries, and the compilation tier each reaches → [`tests/strlib_list.bsh`](tests/strlib_list.bsh).
+- Interpreted-versus-compiled agreement across every supported construct → [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh). Fayasm's own harness is not run by [`test.sh`](test.sh).
 - Object flatten/stringify round trips → no focused fixture or test.
 - Module path resolution is exercised by suite imports; external command capture, dynamic loading failures, extreme nesting limits, and global cleanup still lack focused tests.
 - Language-framework lifecycle, cDiesis compilation/execution, stdlib/examples, and cross-language calls → [`tests/cdiesis_lifecycle.bsh`](tests/cdiesis_lifecycle.bsh), [`tests/cdiesis_runtime.bsh`](tests/cdiesis_runtime.bsh), [`tests/cdiesis_stdlib.bsh`](tests/cdiesis_stdlib.bsh), and [`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh).
@@ -546,7 +654,7 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 
 - Repository source, research documentation, historical snapshots, framework modules, and examples are present under the ownership described above.
 - The C source contains implementations for the documented core dispatch and extensibility mechanisms; this is a source-presence claim, not a working-release claim.
-- Fayasm is pinned as a submodule dependency; no B[e]SH integration is shipped.
+- Fayasm is compiled into the executable and executes compiled BSH function bodies. The heap/pointer model, the `mem` and `bytecode` built-ins, and the heap string and list libraries are implemented and covered by focused suites.
 
 ### Experimental / Scaffold
 
@@ -557,7 +665,12 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 
 ### Known Gaps
 
-- Compiler portability beyond the verified warnings-clean macOS toolchain remains untested.
+- Compiler portability beyond the verified warnings-clean macOS toolchain remains untested, and the build now also compiles the pinned Fayasm sources.
+- The bytecode path duplicates the interpreter's condition and dispatch decisions in C. Only the differential suite keeps them in step.
+- The general tier is at parity with the interpreter on framework workloads; the measured cost is host-call frequency into BSH operator handlers. Only the integer kernel tier is faster.
+- Cache invalidation is wholesale. There is no deterministic cache key, no disk cache, and no mapping from a Fayasm trap back to a BSH source line.
+- Heap blocks are never reclaimed automatically; `mem free` and `list_free_deep` are manual, and a pointer held across `besh_mem_shutdown` is not detected.
+- `besh.v1` is implemented but not frozen: there are no ABI conformance tests independent of the BSH compiler, and no compatibility promise.
 - Runtime native compilation is opt-in and not covered by the current suite; startup intentionally uses built-in primitives.
 - Prefix/postfix registrations for identical operator strings overwrite each other.
 - Native string and filesystem libraries are absent; number/string operations have a verified `prim` fallback, while the optional filesystem framework remains untested.
@@ -567,7 +680,7 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 
 ### Planned
 
-- Complete the remaining Phase 0 measurement and dependency-validation work, introduce stable BSH IR, define a narrow host ABI, and compile supported functions/frameworks to in-memory WebAssembly executed by Fayasm. Follow the phased gates in [`ROADMAP.md`](ROADMAP.md); none of the Fayasm path is implemented yet.
+- Group related framework functions into single modules with direct `call` between them, derive a deterministic cache key from the IR, add disk caching, profile and reduce host-call frequency so the general tier beats the interpreter, and map traps back to source lines. Follow the phased gates in [`ROADMAP.md`](ROADMAP.md); Phases 0-3 are implemented, Phase 4 is partial and Phase 5 has not started.
 
 ## Task Start and Handoff Checklist
 

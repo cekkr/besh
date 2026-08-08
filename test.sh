@@ -40,9 +40,38 @@ done
 
 # --- Build ---------------------------------------------------------------
 
+FAYASM_SRC="$REPO_DIR/thirds/fayasm/src"
+
 if [ "$DO_BUILD" -eq 1 ]; then
     printf '== build\n'
-    if ! cc -Wall -Wextra -fno-common -g bsh.c -o "$BSH_BIN" 2> /tmp/bsh_build_errors.txt; then
+    if [ ! -f "$FAYASM_SRC/fa_runtime.c" ]; then
+        printf '   BUILD FAILED: %s is missing; run "git submodule update --init --recursive"\n' "$FAYASM_SRC"
+        exit 1
+    fi
+    # Warnings are only meaningful for this project's own sources; the pinned
+    # dependency is compiled without -Wall/-Wextra so its diagnostics cannot be
+    # mistaken for B[e]SH regressions.
+    : > /tmp/bsh_build_errors.txt
+    rm -rf "$REPO_DIR/.build-fayasm"
+    mkdir -p "$REPO_DIR/.build-fayasm"
+    fayasm_objects=""
+    fayasm_ok=1
+    for source in "$FAYASM_SRC"/*.c; do
+        object="$REPO_DIR/.build-fayasm/$(basename "$source" .c).o"
+        if ! cc -fno-common -g -I"$FAYASM_SRC" -c "$source" -o "$object" 2>> /tmp/bsh_build_errors.txt; then
+            fayasm_ok=0
+        fi
+        fayasm_objects="$fayasm_objects $object"
+    done
+    if [ "$fayasm_ok" -ne 1 ]; then
+        printf '   BUILD FAILED (fayasm)\n'
+        cat /tmp/bsh_build_errors.txt
+        exit 1
+    fi
+    # shellcheck disable=SC2086
+    if ! cc -Wall -Wextra -fno-common -g -I"$REPO_DIR" -I"$FAYASM_SRC" \
+            bsh.c besh_mem.c besh_wasm.c besh_jit.c $fayasm_objects \
+            -o "$BSH_BIN" 2> /tmp/bsh_build_errors.txt; then
         printf '   BUILD FAILED\n'
         cat /tmp/bsh_build_errors.txt
         exit 1

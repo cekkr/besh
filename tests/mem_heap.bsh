@@ -1,0 +1,141 @@
+# The `mem` builtin: pointers, raw blocks, vectors and heap strings.
+#
+# These are the primitives the compiled path shares with the interpreter - the
+# same bytes are the WebAssembly linear memory - so they are checked here
+# independently of whether anything is compiled.
+import tests.lib.assert
+
+assert_start "mem: heap, pointers and vectors"
+
+# --- raw blocks -----------------------------------------------------------
+
+mem alloc 64 block
+assert_ne "$block" "0" "alloc returns a non-null pointer"
+
+mem size "$block" block_size
+if $block_size >= 64 {
+    assert_pass "alloc reserves at least the requested size"
+} else {
+    assert_fail "alloc reserves at least the requested size" "got $block_size"
+}
+
+mem valid "$block" 64 in_range
+assert_eq "$in_range" "1" "the whole block is inside the heap"
+
+# Address 0 is never a valid allocation.
+mem valid 0 1 null_ok
+assert_eq "$null_ok" "0" "address 0 is never valid"
+
+# --- byte and word access -------------------------------------------------
+
+mem poke "$block" 65
+mem peek "$block" byte_back
+assert_eq "$byte_back" "65" "poke/peek round-trips a byte"
+
+mem poke32 "$block" 305419896
+mem peek32 "$block" word_back
+assert_eq "$word_back" "305419896" "poke32/peek32 round-trips a word"
+
+prim iadd "$block" 8 second_word
+mem poke16 "$second_word" 4660
+mem peek16 "$second_word" half_back
+assert_eq "$half_back" "4660" "poke16/peek16 round-trips a half word"
+
+mem fill "$block" 0 16
+mem peek32 "$block" cleared
+assert_eq "$cleared" "0" "fill clears the bytes it covers"
+
+# --- copying --------------------------------------------------------------
+
+mem alloc 64 other
+mem poke32 "$block" 123456
+mem copy "$other" "$block" 4
+mem peek32 "$other" copied
+assert_eq "$copied" "123456" "copy moves bytes between blocks"
+
+# Out-of-range access is refused instead of reaching outside the heap.
+mem heapsize heap_bytes
+mem valid "$heap_bytes" 1 past_end
+assert_eq "$past_end" "0" "an address at the end of the heap is rejected"
+
+# --- vectors --------------------------------------------------------------
+
+mem vec 4 3 4 numbers
+assert_ne "$numbers" "0" "vec allocates an integer vector"
+
+mem esz "$numbers" numbers_esz
+assert_eq "$numbers_esz" "4" "element size is recorded"
+mem kind "$numbers" numbers_kind
+assert_eq "$numbers_kind" "3" "kind is recorded"
+mem len "$numbers" numbers_len
+assert_eq "$numbers_len" "0" "a fresh vector is empty"
+
+mem push "$numbers" 10 numbers
+mem push "$numbers" 20 numbers
+mem push "$numbers" 30 numbers
+mem len "$numbers" numbers_len
+assert_eq "$numbers_len" "3" "push grows the length"
+
+mem at "$numbers" 1 second
+assert_eq "$second" "20" "at reads an element"
+
+mem put "$numbers" 1 99
+mem at "$numbers" 1 second
+assert_eq "$second" "99" "put writes an element"
+
+# Growing past the initial capacity keeps the contents.
+$i = 0
+while $i < 20 {
+    mem push "$numbers" "$i" numbers
+    prim iadd "$i" 1 i
+}
+mem len "$numbers" numbers_len
+assert_eq "$numbers_len" "23" "push keeps growing past the initial capacity"
+mem at "$numbers" 0 first
+assert_eq "$first" "10" "growth preserves earlier elements"
+
+# --- heap strings ---------------------------------------------------------
+
+mem str "hello heap" text
+assert_ne "$text" "0" "str allocates a heap string"
+mem len "$text" text_len
+assert_eq "$text_len" "10" "a heap string knows its length"
+mem kind "$text" text_kind
+assert_eq "$text_kind" "1" "a heap string is tagged as one"
+
+mem cstr "$text" text_back
+assert_eq "$text_back" "hello heap" "cstr recovers the original value"
+
+mem str " and more" tail
+mem concat "$text" "$tail" joined
+mem cstr "$joined" joined_back
+assert_eq "$joined_back" "hello heap and more" "concat joins two heap strings"
+
+# The vector header sits immediately before the bytes, so `data` is where the
+# characters actually start.
+mem data "$text" text_data
+prim isub "$text_data" "$text" header_size
+assert_eq "$header_size" "16" "elements start after the 16-byte vector header"
+
+mem peek "$text_data" first_byte
+assert_eq "$first_byte" "104" "the first byte is 'h'"
+
+# --- freeing --------------------------------------------------------------
+
+mem free "$block"
+mem free "$other"
+mem free "$numbers"
+mem free "$text"
+mem free "$tail"
+mem free "$joined"
+
+# Freeing everything must leave the heap reusable rather than exhausted, and
+# must not have made it grow.
+mem heapsize heap_after
+assert_eq "$heap_after" "$heap_bytes" "freeing does not grow the heap"
+
+mem alloc 64 reused
+assert_ne "$reused" "0" "the heap is still usable after freeing"
+mem free "$reused"
+
+assert_summary

@@ -1,0 +1,317 @@
+# Differential test: every supported construct must produce the same result
+# interpreted and compiled.
+#
+# Each case function exercises one area and returns a single string that
+# encodes everything it computed and everything it changed. The driver at the
+# bottom runs each case with `bytecode mode off` and again with
+# `bytecode mode auto` and compares. The driver itself lives at file scope,
+# which is never compiled, so switching modes is safe there.
+import tests.lib.assert
+
+assert_start "bytecode: interpreted and compiled agree"
+
+# --- literals, variables, interpolation ----------------------------------
+
+function case_values () {
+    $plain = "abc"
+    $number = 42
+    $interpolated = "x=$plain y=$number"
+    $braced = "${plain}!"
+    $missing = "$no_such_variable_at_all"
+    $empty = ""
+    return "$plain|$number|$interpolated|$braced|[$missing]|[$empty]"
+}
+
+# --- operators (these run through the BSH handlers in core_operators.bsh) --
+
+function case_operators () {
+    $a = 7
+    $b = 3
+    $sum = $a + $b
+    $difference = $a - $b
+    $product = $a * $b
+    $quotient = $a / $b
+    $joined = "left" + "right"
+    return "$sum|$difference|$product|$quotient|$joined"
+}
+
+# --- conditions -----------------------------------------------------------
+#
+# `if` and `while` read their conditions differently from each other and from
+# the expression parser, so both the comparison form and the bare-value form
+# are checked, including the values that count as false.
+
+function case_conditions () {
+    $out = ""
+    $n = 5
+    if $n > 3 {
+        $out = "${out}gt,"
+    } else {
+        $out = "${out}NOTgt,"
+    }
+    if $n == 5 {
+        $out = "${out}eq,"
+    }
+    if $n != 5 {
+        $out = "${out}BAD,"
+    }
+    $flag = 1
+    if $flag {
+        $out = "${out}truthy,"
+    }
+    $zero = 0
+    if $zero {
+        $out = "${out}BAD,"
+    } else {
+        $out = "${out}zero-is-false,"
+    }
+    $blank = ""
+    if $blank {
+        $out = "${out}BAD,"
+    } else {
+        $out = "${out}empty-is-false,"
+    }
+    $word = "false"
+    if $word {
+        $out = "${out}BAD,"
+    } else {
+        $out = "${out}false-is-false,"
+    }
+    $text = "something"
+    if $text {
+        $out = "${out}text-is-true"
+    }
+    return "$out"
+}
+
+# --- loops ----------------------------------------------------------------
+
+function case_loops () {
+    $total = 0
+    $i = 0
+    while $i < 5 {
+        $total = $total + $i
+        $i = $i + 1
+    }
+
+    $count = 0
+    $outer = 0
+    while $outer < 3 {
+        $inner = 0
+        while $inner < 3 {
+            $count = $count + 1
+            $inner = $inner + 1
+        }
+        $outer = $outer + 1
+    }
+
+    $never = "untouched"
+    while "1" == "2" {
+        $never = "reached"
+    }
+
+    $guard = 1
+    $ticks = 0
+    while $guard {
+        prim iadd "$ticks" 1 ticks
+        prim ilt "$ticks" 4 guard
+    }
+
+    return "$total|$count|$never|$ticks"
+}
+
+# --- calls, arguments, recursion, return ---------------------------------
+
+function helper_double (value) {
+    prim imul "$value" 2 doubled
+    return $doubled
+}
+
+function helper_factorial (n) {
+    if $n <= 1 {
+        return 1
+    }
+    prim isub "$n" 1 less
+    helper_factorial "$less"
+    prim imul "$n" "$LAST_RETURN_VALUE" result
+    return $result
+}
+
+function helper_no_return () {
+    $ignored = 1
+}
+
+function case_calls () {
+    helper_double 21
+    $doubled = "$LAST_RETURN_VALUE"
+    helper_factorial 6
+    $factorial = "$LAST_RETURN_VALUE"
+    helper_no_return
+    return "$doubled|$factorial"
+}
+
+# --- early return ---------------------------------------------------------
+
+function helper_early (n) {
+    if $n > 0 {
+        return "positive"
+    }
+    return "not positive"
+}
+
+function case_return () {
+    helper_early 1
+    $first = "$LAST_RETURN_VALUE"
+    helper_early 0
+    $second = "$LAST_RETURN_VALUE"
+    return "$first|$second"
+}
+
+# --- scoping and indirection ---------------------------------------------
+
+$GLOBAL_MARKER = "global"
+
+function helper_writes_out (target) {
+    $($target) = "written"
+}
+
+function case_scope () {
+    $local_only = "local"
+    helper_writes_out "case_scope_slot"
+    $seen_global = "$GLOBAL_MARKER"
+    $name = "case_scope_dynamic"
+    $($name) = "indirect"
+    $read_back = "$($name)"
+    return "$local_only|$seen_global|$case_scope_slot|$read_back"
+}
+
+# --- name-mangled arrays --------------------------------------------------
+
+function case_arrays () {
+    $slots[0] = "first"
+    $slots[1] = "second"
+    $index = 1
+    $picked = "$slots[$index]"
+    $slots[$index] = "replaced"
+    return "$slots[0]|$picked|$slots[1]"
+}
+
+# --- prim and mem primitives ---------------------------------------------
+
+function case_primitives () {
+    prim add 2 3 sum
+    prim concat "a" "b" joined
+    prim iadd 2000000000 2000000000 wrapped
+    prim idiv 7 2 divided
+    prim imod 7 2 remainder
+    prim ishl 1 10 shifted
+
+    mem alloc 32 block
+    mem poke32 "$block" 12345
+    mem peek32 "$block" read_back
+    mem str "heap" text
+    mem cstr "$text" text_back
+    mem len "$text" text_len
+    mem free "$block"
+    mem free "$text"
+
+    return "$sum|$joined|$wrapped|$divided|$remainder|$shifted|$read_back|$text_back|$text_len"
+}
+
+# --- builtins that the compiler hands back to the interpreter ------------
+#
+# `writefile`, `readfile`, `eval`, `libloaded` and `update_cwd` keep their
+# token-level semantics, so compiled code routes them through `process_line`.
+# What matters is that they still run, and in the right order.
+
+function case_raw_builtins () {
+    $path = "/tmp/bsh_bytecode_differential.txt"
+    writefile "$path" "line one"
+    readfile "$path" contents
+
+    eval "prim concat set-by- eval eval_target"
+
+    libloaded no_such_library loaded
+    update_cwd
+
+    return "$contents|$eval_target|$loaded"
+}
+
+# --- external commands ----------------------------------------------------
+
+function case_external () {
+    process captured echo hello from a child
+    return "$captured"
+}
+
+# --- statements the compiler does not model individually -----------------
+#
+# Anything the compiler has no IR node for is emitted as a `raw` import that
+# hands the original line back to `process_line`. The results, and the order
+# they happen in, must be indistinguishable from interpreting the whole body.
+
+function case_unmodelled () {
+    $order = ""
+    import tests.lib.assert
+    $order = "${order}import,"
+    $stamp = "/tmp/bsh_bytecode_unmodelled.txt"
+    writefile "$stamp" "raw statement ran"
+    readfile "$stamp" stamped
+    $order = "${order}io,"
+    $order = "${order}done"
+    return "$order|$stamped"
+}
+
+# --- driver ---------------------------------------------------------------
+#
+# File-scope statements are never compiled, so changing modes here is safe.
+
+$CASES = "case_values case_operators case_conditions case_loops case_calls case_return case_scope case_arrays case_primitives case_raw_builtins case_external case_unmodelled"
+
+prim fieldcount "$CASES" case_count
+$case_index = 0
+while $case_index < $case_count {
+    prim field "$CASES" "$case_index" case_name
+
+    bytecode mode off
+    eval "$case_name"
+    $interpreted_result = "$LAST_RETURN_VALUE"
+
+    bytecode mode auto
+    eval "$case_name"
+    $compiled_result = "$LAST_RETURN_VALUE"
+
+    assert_eq "$compiled_result" "$interpreted_result" "$case_name agrees in both modes"
+    assert_not_empty "$interpreted_result" "$case_name produced a result"
+
+    prim iadd "$case_index" 1 case_index
+}
+
+# --- the tier each case reached ------------------------------------------
+#
+# Agreement is worth little if nothing was compiled, so check that the cases
+# really did take the bytecode path.
+
+bytecode mode auto
+bytecode info case_loops tier
+assert_eq "$tier" "general" "case_loops is compiled, not interpreted"
+bytecode info case_conditions tier
+assert_eq "$tier" "general" "case_conditions is compiled, not interpreted"
+bytecode info case_unmodelled tier
+assert_eq "$tier" "general" "unmodelled statements still compile, through the raw import"
+
+# --- redefinition invalidates the cached module --------------------------
+
+function redefinable () {
+    return "first"
+}
+redefinable
+assert_eq "$LAST_RETURN_VALUE" "first" "original definition runs"
+
+function redefinable () {
+    return "second"
+}
+redefinable
+assert_eq "$LAST_RETURN_VALUE" "second" "redefinition replaces the compiled module"
+
+assert_summary

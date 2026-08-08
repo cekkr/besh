@@ -1,0 +1,234 @@
+# list.bsh - dynamic lists in the B[e]SH heap.
+#
+# A list is a vector (see `mem.bsh`) with element size 4 and kind
+# MEM_KIND_LIST, so an element is a 32-bit slot: a heap-string address, another
+# list, or a plain integer. Indexing is one load, which is what separates this
+# from the `<base>_ARRAYIDX_<index>` variables the core uses - those are a hash
+# lookup and a string copy per access, and they cannot be resized or passed
+# around by reference.
+#
+# Conventions match strlib.bsh: a list is an integer address, 0 is the null
+# list, and results come back through `return` so callers read
+# `$LAST_RETURN_VALUE`. Growing a list may move it, so `list_push` returns the
+# (possibly new) address and the caller must keep it:
+#
+#     list_push "$xs" "$value"
+#     $xs = $LAST_RETURN_VALUE
+#
+# The accessors are kernel tier; the ones that allocate are not, because
+# allocation is a host call by nature.
+
+import mem
+import strlib
+
+echo "Loading List Library (list.bsh)..."
+
+# --- construction ---------------------------------------------------------
+
+defunc list_new (cap) {
+    mem vec 4 2 "$cap" __ls_p
+    return $__ls_p
+}
+
+# A list of raw integers rather than pointers; only the kind tag differs.
+defunc list_new_int (cap) {
+    mem vec 4 3 "$cap" __ls_p
+    return $__ls_p
+}
+
+defunc list_free (p) {
+    mem free "$p"
+    return 0
+}
+
+# Frees every element as a heap block, then the list itself. Only valid for a
+# list whose elements are owned pointers.
+defunc list_free_deep (p) {
+    list_len "$p"
+    $__ls_n = $LAST_RETURN_VALUE
+    $__ls_i = 0
+    while $__ls_i < $__ls_n {
+        list_get "$p" "$__ls_i"
+        mem free "$LAST_RETURN_VALUE"
+        prim iadd "$__ls_i" 1 __ls_i
+    }
+    mem free "$p"
+    return 0
+}
+
+# --- access (kernel) ------------------------------------------------------
+
+defunc list_len (p) {
+    mem peek32 "$p" n
+    return $n
+}
+
+defunc list_capacity (p) {
+    prim iadd "$p" 4 a
+    mem peek32 "$a" n
+    return $n
+}
+
+# Element at `i`, or 0 when `i` is out of range.
+defunc list_get (p i) {
+    mem peek32 "$p" n
+    $v = 0
+    prim ilt "$i" "$n" ok
+    prim ige "$i" 0 lo
+    prim iand "$ok" "$lo" ok
+    if $ok {
+        prim ishl "$i" 2 off
+        prim iadd "$p" 16 a
+        prim iadd "$a" "$off" a
+        mem peek32 "$a" v
+    }
+    return $v
+}
+
+# Writes `v` at `i`. Returns 1 when the index was in range.
+defunc list_set (p i v) {
+    mem peek32 "$p" n
+    $ok = 0
+    prim ilt "$i" "$n" ok
+    prim ige "$i" 0 lo
+    prim iand "$ok" "$lo" ok
+    if $ok {
+        prim ishl "$i" 2 off
+        prim iadd "$p" 16 a
+        prim iadd "$a" "$off" a
+        mem poke32 "$a" "$v"
+    }
+    return $ok
+}
+
+# Index of the first slot equal to `v`, or -1. Kernel.
+defunc list_index_of (p v) {
+    mem peek32 "$p" n
+    prim iadd "$p" 16 base
+    prim isub 0 1 found
+    $i = 0
+    $go = 1
+    prim ige "$i" "$n" stop
+    prim inot "$stop" go
+    while $go {
+        prim ishl "$i" 2 off
+        prim iadd "$base" "$off" a
+        mem peek32 "$a" cur
+        prim ieq "$cur" "$v" hit
+        if $hit {
+            $found = $i
+            $go = 0
+        }
+        prim iadd "$i" 1 i
+        prim ige "$i" "$n" stop
+        if $stop {
+            $go = 0
+        }
+    }
+    return $found
+}
+
+# Sum of the slots, treating them as integers. Kernel.
+defunc list_sum (p) {
+    mem peek32 "$p" n
+    prim iadd "$p" 16 base
+    $total = 0
+    $i = 0
+    $go = 1
+    prim ige "$i" "$n" stop
+    prim inot "$stop" go
+    while $go {
+        prim ishl "$i" 2 off
+        prim iadd "$base" "$off" a
+        mem peek32 "$a" cur
+        prim iadd "$total" "$cur" total
+        prim iadd "$i" 1 i
+        prim ige "$i" "$n" stop
+        prim inot "$stop" go
+    }
+    return $total
+}
+
+# --- growth ---------------------------------------------------------------
+
+# Appends `v`, returning the list address, which may have moved.
+defunc list_push (p v) {
+    mem push "$p" "$v" __ls_out
+    return $__ls_out
+}
+
+# Drops the last element and returns it; the list keeps its capacity.
+defunc list_pop (p) {
+    list_len "$p"
+    $__ls_n = $LAST_RETURN_VALUE
+    $__ls_v = 0
+    if $__ls_n > 0 {
+        prim isub "$__ls_n" 1 __ls_last
+        list_get "$p" "$__ls_last"
+        $__ls_v = $LAST_RETURN_VALUE
+        mem setlen "$p" "$__ls_last"
+    }
+    return $__ls_v
+}
+
+# --- lists of heap strings ------------------------------------------------
+
+# Splits `p` on the single byte `sep`, returning a list of fresh heap strings.
+# Free it with list_free_deep.
+defunc str_split_byte (p sep) {
+    str_len "$p"
+    $__ls_n = $LAST_RETURN_VALUE
+    list_new 8
+    $__ls_out = $LAST_RETURN_VALUE
+    $__ls_start = 0
+    $__ls_i = 0
+    while $__ls_i <= $__ls_n {
+        $__ls_cut = 0
+        if $__ls_i == $__ls_n {
+            $__ls_cut = 1
+        }
+        if $__ls_i < $__ls_n {
+            str_byte "$p" "$__ls_i"
+            if $LAST_RETURN_VALUE == $sep {
+                $__ls_cut = 1
+            }
+        }
+        if $__ls_cut {
+            prim isub "$__ls_i" "$__ls_start" __ls_count
+            str_slice "$p" "$__ls_start" "$__ls_count"
+            list_push "$__ls_out" "$LAST_RETURN_VALUE"
+            $__ls_out = $LAST_RETURN_VALUE
+            prim iadd "$__ls_i" 1 __ls_start
+        }
+        prim iadd "$__ls_i" 1 __ls_i
+    }
+    return $__ls_out
+}
+
+# Joins a list of heap strings with the single byte `sep`.
+defunc str_join_byte (xs sep) {
+    list_len "$xs"
+    $__ls_n = $LAST_RETURN_VALUE
+    str_alloc 0
+    $__ls_acc = $LAST_RETURN_VALUE
+    $__ls_i = 0
+    while $__ls_i < $__ls_n {
+        if $__ls_i > 0 {
+            mem push "$__ls_acc" "$sep" __ls_acc
+        }
+        list_get "$xs" "$__ls_i"
+        $__ls_part = $LAST_RETURN_VALUE
+        str_len "$__ls_part"
+        $__ls_plen = $LAST_RETURN_VALUE
+        $__ls_j = 0
+        while $__ls_j < $__ls_plen {
+            str_byte "$__ls_part" "$__ls_j"
+            mem push "$__ls_acc" "$LAST_RETURN_VALUE" __ls_acc
+            prim iadd "$__ls_j" 1 __ls_j
+        }
+        prim iadd "$__ls_i" 1 __ls_i
+    }
+    return $__ls_acc
+}
+
+echo "List Library loaded (list_new/list_get/list_push, str_split_byte/str_join_byte)."

@@ -224,6 +224,57 @@ This operational model underscores B[e]SH's philosophy: provide a simple, stable
 empower users to build complexity and domain-specific features on top, either through its
 scripting capabilities or by interfacing with external tools and libraries.
 
+## Bytecode Execution
+
+A shell that assembles its own language at runtime pays for it: every call to a
+BSH function re-reads and re-parses the stored source lines. B[e]SH can instead
+parse a function body once, lower it to a WebAssembly module, and run that
+module with the [fayasm](thirds/fayasm/) runtime linked into the same process.
+
+The interpreter stays the reference implementation. Anything the compiler
+cannot model is handed straight back to it, one statement at a time, so every
+B[e]SH command and every piece of syntax keeps working inside a compiled
+function. `bytecode mode off` disables the whole path; `bytecode status` and
+`bytecode info <function>` report what actually happened.
+
+```sh
+bytecode info str_find        # str_find: kernel (810 module bytes, 22 promoted locals)
+bytecode status               # mode=auto calls=... kernels=... fallbacks=...
+```
+
+Two shapes come out of the same intermediate representation. Code that works on
+machine integers - loop counters, indices, bytes - compiles to WebAssembly with
+no call back into the shell at all. Everything else keeps its values in shell
+variables and reaches them through a small versioned host interface, with
+control flow still lowered to real WebAssembly branches.
+
+## Pointers, and a String Library That Is Not External Commands
+
+Shell values are strings, which is the right default and the wrong
+representation for anything that scans text. Reaching for `sed` or `cut` was a
+reasonable answer when the alternative was a fork per character; it is not a
+reasonable answer for a shell that can compile its own functions.
+
+So B[e]SH has a heap. `mem` hands out real addresses, and the same bytes are
+the WebAssembly linear memory, which means a pointer means the same thing in a
+script, in the C core, and inside emitted bytecode:
+
+```sh
+mem alloc 64 buffer
+mem poke32 "$buffer" 12345
+mem peek32 "$buffer" value
+mem free "$buffer"
+```
+
+On top of that sit `framework/strlib.bsh` and `framework/list.bsh`: heap
+strings and dynamic lists, written as ordinary BSH functions, whose scanning
+loops compile to bytecode. Searching, comparing, hashing, case folding,
+splitting and joining are library code in this repository - no external
+process, and no C extension to build.
+
+The contract for all of this, including what qualifies for which tier and how
+to keep library code on the fast one, is in [`guides/bytecode.md`](guides/bytecode.md).
+
 ## The example.bsh Script
 
 To illustrate the capabilities and the intended usage patterns of B[e]SH, this repository

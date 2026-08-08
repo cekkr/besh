@@ -1,0 +1,83 @@
+# mem.bsh - names for the B[e]SH heap layout.
+#
+# The `mem` builtin in the C core gives BSH real addresses: `mem alloc`,
+# `mem peek`/`mem poke`, and a vector header shared by strings and lists. This
+# module only puts names on the constants that layout implies, so that
+# strlib.bsh and list.bsh do not repeat magic numbers.
+#
+# Everything here is a plain integer. A pointer is the byte offset of a payload
+# inside the heap, and 0 means null.
+#
+# Layout of a vector (see besh_mem.h):
+#
+#     +0   u32 len    elements in use
+#     +4   u32 cap    elements the payload can hold
+#     +8   u32 esz    element size in bytes
+#     +12  u32 kind   MEM_KIND_*
+#     +16       elements
+#
+# Loads and stores against those offsets compile to single WebAssembly
+# instructions, so code written against them runs as bytecode rather than as
+# interpreted statements. Keep helper bodies in the subset the compiler lowers
+# natively - integer `prim i*` operations, `mem peek*`/`mem poke*`, assignments
+# between locals, `if`/`while` on a local, and `return` - and check with
+# `bytecode info <function>` that the tier is still "kernel".
+
+echo "Loading Memory Framework (mem.bsh)..."
+
+$MEM_VEC_HDR = 16
+
+$MEM_OFF_LEN = 0
+$MEM_OFF_CAP = 4
+$MEM_OFF_ESZ = 8
+$MEM_OFF_KIND = 12
+
+$MEM_KIND_RAW = 0
+$MEM_KIND_STR = 1
+$MEM_KIND_LIST = 2
+$MEM_KIND_I32 = 3
+$MEM_KIND_F64 = 4
+
+$MEM_NULL = 0
+
+# Address of element 0 of a vector. Kernel tier.
+defunc mem_data (p) {
+    prim iadd "$p" 16 a
+    return $a
+}
+
+# Element count of a vector. Kernel tier.
+defunc mem_count (p) {
+    mem peek32 "$p" n
+    return $n
+}
+
+# Capacity of a vector. Kernel tier.
+defunc mem_capacity (p) {
+    prim iadd "$p" 4 a
+    mem peek32 "$a" n
+    return $n
+}
+
+# Element size of a vector. Kernel tier.
+defunc mem_elemsize (p) {
+    prim iadd "$p" 8 a
+    mem peek32 "$a" n
+    return $n
+}
+
+# Kind tag of a vector. Kernel tier.
+defunc mem_kind (p) {
+    prim iadd "$p" 12 a
+    mem peek32 "$a" n
+    return $n
+}
+
+# Overwrites the length word without touching the elements. Kernel tier.
+# The caller is responsible for staying within capacity.
+defunc mem_set_count (p n) {
+    mem poke32 "$p" "$n"
+    return $n
+}
+
+echo "Memory Framework loaded ('mem alloc/peek/poke/vec', MEM_* constants)."
