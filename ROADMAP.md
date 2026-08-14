@@ -79,11 +79,28 @@ progress against a Fayasm exit gate.
 
 ## Phase 0 — Restore and Measure the Interpreter Baseline
 
-**Status: Done.** The interpreter builds warnings-clean, [`test.sh`](test.sh)
-runs the semantic suites with an isolated `HOME`, and interpreted/compiled
-timings for a kernel loop, the string library and the cDiesis standard library
-are recorded in [`guides/bytecode.md`](guides/bytecode.md). A repeatable
-benchmark harness, as opposed to those single measurements, is still missing.
+**Status: Done, exit gate met.** The interpreter builds warnings-clean,
+[`test.sh`](test.sh) runs the semantic suites with an isolated `HOME`, and
+[`bench.sh`](bench.sh) is the repeatable benchmark harness this phase was
+missing: it builds its own optimised binary, runs the fixtures in
+[`bench/`](bench/) under both `BSH_COMPILE=off` and `BSH_COMPILE=auto`, reports
+the best and median of N runs net of a measured startup baseline, and rejects a
+fixture whose checksum moves between runs or between modes. Numbers are in
+[`guides/bytecode.md`](guides/bytecode.md).
+
+The first trustworthy baseline immediately corrected two claims that the earlier
+single measurements had supported:
+
+- **The general tier is ~1.6× slower than the interpreter, not at parity.** Every
+  operand still crosses the host boundary, so a compiled body pays the
+  interpreter's dispatch cost plus the boundary cost. This is the measurement
+  that should drive Phase 5 ordering: reducing host-call frequency comes before
+  module packaging.
+- **Kernel-tier compilation only pays when the loop is inside the compiled
+  function.** `bench/calls.bsh` calls a kernel-tier function 60k times and loses
+  0.63×, because per-entry cost exceeds the one `prim iadd` in the body;
+  `bench/strlib_scan.bsh` calls kernels just as often and wins 2.93×, because
+  each call scans 68 bytes first.
 
 1. Fix the blocking C compilation errors and the argument-buffer warnings documented in [`AGENTS.md`](AGENTS.md).
 2. Add a non-interactive test harness that can run BSH fixtures with an isolated `HOME` and explicit `BSH_MODULE_PATH`.
@@ -95,7 +112,7 @@ benchmark harness, as opposed to those single measurements, is still missing.
 4. Record baseline timings for startup, repeated function calls, loop-heavy functions, and operator-heavy framework code. Measure end-to-end time and dispatcher/parse time separately when possible.
 5. Initialize and validate the pinned Fayasm checkout independently with its own documented build/test workflow. Do not make its build artifacts part of B[e]SH source control.
 
-**Exit gate:** the interpreter builds, the selected semantic fixtures pass reliably, and benchmark commands are repeatable.
+**Exit gate:** the interpreter builds, the selected semantic fixtures pass reliably, and benchmark commands are repeatable. **Met.** Startup is measured separately and subtracted from every other fixture, which is the "end-to-end versus dispatcher time" separation item 4 asks for at the granularity currently available; a per-phase profile inside one process is not implemented.
 
 ## Phase 1 — Define a Stable BSH Intermediate Representation
 
@@ -207,9 +224,15 @@ name and the unboxed-integer kernel tier described in
 guard-and-deoptimise path: a promoted local whose value would not behave as a
 machine integer aborts the compiled body before it runs and hands the work back
 to the interpreter. No deterministic cache key, no disk cache, no hotness
-threshold, and no host-call frequency profiling exist yet. Host-call frequency
-is the measured bottleneck for framework code, which currently runs at parity
-with the interpreter.
+threshold, and no host-call frequency profiling exist yet.
+
+[`bench.sh`](bench.sh) now gives this phase its ordering. Host-call frequency is
+not merely the bottleneck for framework code — it makes the general tier a
+**1.6× loss** against the interpreter, so item 6 below is the first thing worth
+doing, ahead of caching and specialization. The same measurement shows a second,
+narrower target: per-call entry cost into a compiled body, which is what makes a
+kernel-tier function lose when it is called in a hot loop rather than containing
+one.
 
 1. Cache emitted modules by a deterministic key containing:
    - canonical IR/source hash;

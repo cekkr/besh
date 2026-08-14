@@ -147,6 +147,11 @@ ExecutionState current_exec_state = STATE_NORMAL;
 char bsh_last_return_value[INPUT_BUFFER_SIZE];
 bool bsh_return_value_is_set = false;
 bool bsh_exit_requested = false;
+// True only while a line typed at the interactive prompt is being executed.
+// A bare expression echoes its result there and nowhere else - not in a script,
+// not in an imported module, and not inside a function body reached from the
+// prompt, all of which are code rather than a question the user just asked.
+bool bsh_at_interactive_prompt = false;
 int bsh_pending_body_jump = -1;
 long bsh_current_line_start_fpos = -1L;
 BlockFrame block_stack[MAX_NESTING_DEPTH];
@@ -226,6 +231,88 @@ void initialize_operators_core_structural() {
 }
 
 
+// True when a double-quoted string is still open at the end of `text`, so the
+// statement continues on the next physical line. A backslash escapes the next
+// character, and an unquoted '#' starts a comment that cannot open a string.
+static bool line_leaves_string_open(const char* text) {
+    bool in_string = false;
+    for (const char* p = text; *p; ++p) {
+        if (in_string) {
+            if (*p == '\\' && *(p + 1)) { p++; continue; }
+            if (*p == '"') in_string = false;
+            continue;
+        }
+        if (*p == '"') { in_string = true; continue; }
+        if (*p == '#') break;
+    }
+    return in_string;
+}
+
+// Read one *logical* line: physical lines joined for as long as a string
+// literal stays open, so a value can span lines.
+//
+//     $text = "first
+//     second"
+//
+// The newline between them is kept inside the value, which is the whole point.
+// Everything downstream already treats a quoted region as opaque - the
+// tokenizer, the statement splitter and the brace counter all skip strings - so
+// a joined line needs no further special handling.
+//
+// `continuation_prompt` is printed before each additional read when non-NULL,
+// which is what makes the construct usable at the interactive prompt.
+// Returns false only when nothing at all could be read.
+bool besh_read_logical_line(FILE* input, char* buffer, size_t buffer_size,
+                            const char* continuation_prompt) {
+    if (!input || !buffer || buffer_size == 0) return false;
+    buffer[0] = '\0';
+    if (!fgets(buffer, (int)buffer_size, input)) return false;
+
+    while (line_leaves_string_open(buffer)) {
+        size_t used = strlen(buffer);
+        if (used + 2 >= buffer_size) {
+            fprintf(stderr,
+                    "bsh: string literal spanning lines exceeds the %zu byte line limit; "
+                    "read the text from a file instead.\n", buffer_size);
+            break;
+        }
+        // fgets stops at the newline, so an unterminated string always ends the
+        // buffer without one at EOF; add it back so the value keeps the break.
+        if (used == 0 || buffer[used - 1] != '\n') {
+            buffer[used] = '\n';
+            buffer[used + 1] = '\0';
+            used++;
+        }
+        if (continuation_prompt) {
+            printf("%s", continuation_prompt);
+            fflush(stdout);
+        }
+        if (!fgets(buffer + used, (int)(buffer_size - used), input)) {
+            fprintf(stderr, "bsh: unterminated string literal at end of input.\n");
+            break;
+        }
+    }
+    return true;
+}
+
+// Expand one token that a built-in reads as a positional argument.
+//
+// A quoted argument keeps its quotes in the token text, so it has to be
+// unescaped before expansion or the quotes end up inside the value - which is
+// how `libloaded "$alias" out` used to look up a library literally named
+// `"demolib"`. Every handler that reads arguments by position should use this
+// rather than expanding tokens[i].text directly, so that quoting an argument
+// never changes its meaning.
+void expand_token_argument(const Token* tok, char* out, size_t out_size) {
+    if (tok->type == TOKEN_STRING) {
+        char unescaped[INPUT_BUFFER_SIZE];
+        unescape_string(tok->text, unescaped, sizeof(unescaped));
+        expand_variables_in_string_advanced(unescaped, out, out_size);
+    } else {
+        expand_variables_in_string_advanced(tok->text, out, out_size);
+    }
+}
+
 // New signature for adding richer operator definitions
 void add_operator_definition(const char* op_str, TokenType token_type, OperatorType op_type_prop,
                              int precedence, OperatorAssociativity assoc, const char* bsh_handler_name_str) {
@@ -234,13 +321,14 @@ void add_operator_definition(const char* op_str, TokenType token_type, OperatorT
         return;
     }
 
-    // Check if operator already exists, update if so (optional, or disallow)
+    // A definition is identified by its symbol *and* its grammatical form, so
+    // that prefix and postfix "++" (or any other same-symbol pair) can coexist.
+    // Only a registration matching both replaces an existing entry.
     OperatorDefinition *current = operator_list_head;
     while(current) {
-        if (strcmp(current->op_str, op_str) == 0) {
-            fprintf(stderr, "Warning: Operator '%s' already defined. Re-defining.\n", op_str);
+        if (strcmp(current->op_str, op_str) == 0 && current->op_type_prop == op_type_prop) {
+            fprintf(stderr, "Warning: Operator '%s' already defined for this form. Re-defining.\n", op_str);
             current->token_type = token_type;
-            current->op_type_prop = op_type_prop;
             current->precedence = precedence;
             current->associativity = assoc;
             strncpy(current->bsh_handler_name, bsh_handler_name_str, MAX_VAR_NAME_LEN -1);
@@ -268,7 +356,11 @@ void add_operator_definition(const char* op_str, TokenType token_type, OperatorT
     operator_list_head = new_op;
 }
 
-// Helper to get an operator's full definition
+// Helper to get an operator's full definition. A symbol may carry more than one
+// grammatical form, so this returns the first registration for the symbol and is
+// only appropriate where the form does not matter (diagnostics, "is this a
+// registered symbol at all"). Position-sensitive callers must use the typed
+// lookups below.
 OperatorDefinition* get_operator_definition(const char* op_str) {
     OperatorDefinition *current = operator_list_head;
     while (current) {
@@ -276,6 +368,44 @@ OperatorDefinition* get_operator_definition(const char* op_str) {
             return current;
         }
         current = current->next;
+    }
+    return NULL;
+}
+
+// The definition of `op_str` registered for exactly one grammatical form.
+OperatorDefinition* get_operator_definition_typed(const char* op_str, OperatorType op_type_prop) {
+    OperatorDefinition *current = operator_list_head;
+    while (current) {
+        if (current->op_type_prop == op_type_prop && strcmp(current->op_str, op_str) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+// True for the unary operators whose handler receives the operand's *variable
+// name* and mutates it in place, rather than receiving an already-evaluated
+// value. The expression parser special-cases these, so the compiler must refuse
+// them and let the interpreter run the statement; keeping the test here means
+// the two paths cannot disagree about which symbols are involved.
+bool besh_unary_op_takes_variable_name(const char* op_str) {
+    return strcmp(op_str, "++") == 0 || strcmp(op_str, "--") == 0;
+}
+
+// The definition to apply when the symbol appears *after* a complete operand:
+// binary infix first, then postfix, then a ternary opener. This is the lookup
+// the precedence-climbing loop needs; `parse_operand` uses the prefix form.
+OperatorDefinition* get_operator_definition_after_operand(const char* op_str) {
+    static const OperatorType order[] = {
+        OP_TYPE_BINARY_INFIX,
+        OP_TYPE_UNARY_POSTFIX,
+        OP_TYPE_TERNARY_PRIMARY,
+        OP_TYPE_TERNARY_SECONDARY
+    };
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+        OperatorDefinition* def = get_operator_definition_typed(op_str, order[i]);
+        if (def) return def;
     }
     return NULL;
 }
@@ -719,7 +849,12 @@ void handle_defoperator_statement(Token *tokens, int num_tokens) {
         bsh_handler_name[MAX_VAR_NAME_LEN - 1] = '\0';
     }
     
-    if (strlen(bsh_handler_name) == 0) {
+    // A delimiter has no semantics of its own - the parser consumes it as part
+    // of a larger form - so it is the one kind of registration allowed to name
+    // no handler. It still has to be registered, because the tokenizer only
+    // emits an operator token for a symbol that is in the registry.
+    if (strlen(bsh_handler_name) == 0 &&
+        op_type_prop != OP_TYPE_TERNARY_SECONDARY && op_type_prop != OP_TYPE_NONE) {
          fprintf(stderr, "defoperator: BSH handler name cannot be empty for operator '%s'.\n", op_symbol); return;
     }
 
@@ -924,11 +1059,11 @@ bool parse_operand(ExprParseContext* ctx, char* operand_result_buffer, size_t op
         }
         ctx->current_token_idx++; // Consume ')'
     } else if (current_token.type == TOKEN_OPERATOR) {
-        OperatorDefinition* op_def = get_operator_definition(current_token.text);
-        if (op_def && op_def->op_type_prop == OP_TYPE_UNARY_PREFIX) {
-            // Check if the operator string in op_def is "++" or "--".
-            //todo: dynamic operator
-            if (strcmp(op_def->op_str, "++") == 0 || strcmp(op_def->op_str, "--") == 0) {
+        OperatorDefinition* op_def = get_operator_definition_typed(current_token.text, OP_TYPE_UNARY_PREFIX);
+        if (op_def) {
+            // Operators whose handler mutates a named variable rather than
+            // consuming a value.
+            if (besh_unary_op_takes_variable_name(op_def->op_str)) {
                 // If it is "++" or "--":
 
                 ctx->current_token_idx++; // Increment the current token index. Comment: "Consume the ++ or -- operator"
@@ -1054,8 +1189,8 @@ bool parse_expression_recursive(ExprParseContext* ctx, int min_precedence) {
         OperatorDefinition* op_def = NULL;
 
         if (lookahead_op_token.type == TOKEN_OPERATOR) {
-            op_def = get_operator_definition(lookahead_op_token.text);
-        } else if (lookahead_op_token.type == TOKEN_RPAREN || lookahead_op_token.type == TOKEN_EOF || 
+            op_def = get_operator_definition_after_operand(lookahead_op_token.text);
+        } else if (lookahead_op_token.type == TOKEN_RPAREN || lookahead_op_token.type == TOKEN_EOF ||
                    lookahead_op_token.type == TOKEN_SEMICOLON /*or other expression terminators*/) {
             break; // End of current expression part
         } else { // Not an operator we can handle here, or unexpected token
@@ -1064,6 +1199,10 @@ bool parse_expression_recursive(ExprParseContext* ctx, int min_precedence) {
             strncpy(ctx->result_buffer, "EXPR_PARSE_ERROR_UNEXPECTED_TOKEN_AFTER_OPD", ctx->result_buffer_size-1);
             ctx->recursion_depth--; return false;
         }
+
+        // ':' only closes the true-branch of a ternary; the '?' branch below
+        // consumes it. Here it is a delimiter, never an operator to apply.
+        if (op_def && op_def->op_type_prop == OP_TYPE_TERNARY_SECONDARY) break;
 
         if (!op_def || op_def->precedence < min_precedence) {
             break; // Operator has lower precedence than current minimum, or not an infix/postfix operator we handle in this loop
@@ -1102,8 +1241,8 @@ bool parse_expression_recursive(ExprParseContext* ctx, int min_precedence) {
         } else if (op_def->op_type_prop == OP_TYPE_UNARY_POSTFIX) {
             // This block handles unary postfix operators.
 
-            // Check if the operator string is "++" or "--".
-            if (strcmp(op_def->op_str, "++") == 0 || strcmp(op_def->op_str, "--") == 0) {
+            // Operators whose handler mutates a named variable in place.
+            if (besh_unary_op_takes_variable_name(op_def->op_str)) {
                 // For postfix operators, the "operand" is what was just parsed into lhs_value.
                 // However, if lhs_value is the RESULT of an expression (e.g., (a+b)++), it's not a modifiable variable.
                 // We need to know if the *original* token that produced lhs_value was a variable.
@@ -2002,8 +2141,8 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                                                         "prefix",               // Context
                                                         temp_bsh_result_var,
                                                         result_c_buffer, sizeof(result_c_buffer))) {
-                                if (strlen(result_c_buffer) > 0 && strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0) {
-                                    printf("%s\n", result_c_buffer); // Print result of standalone prefix op
+                                if (bsh_at_interactive_prompt && strlen(result_c_buffer) > 0 && strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0) {
+                                    printf("%s\n", result_c_buffer); // Echo only at the prompt
                                 }
                                 set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
                             } else {
@@ -2047,8 +2186,8 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                                                         "postfix",              // Context
                                                         temp_bsh_result_var,
                                                         result_c_buffer, sizeof(result_c_buffer))) {
-                                if (strlen(result_c_buffer) > 0 && strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0) {
-                                    printf("%s\n", result_c_buffer); // Print result of standalone postfix op
+                                if (bsh_at_interactive_prompt && strlen(result_c_buffer) > 0 && strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0) {
+                                    printf("%s\n", result_c_buffer); // Echo only at the prompt
                                 }
                                 set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
                             } else {
@@ -2083,10 +2222,10 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                                                         op1_expanded, op2_expanded, operator_str, 
                                                         temp_bsh_result_var,
                                                         result_c_buffer, sizeof(result_c_buffer))) {
-                                if (strlen(result_c_buffer) > 0 &&
+                                if (bsh_at_interactive_prompt && strlen(result_c_buffer) > 0 &&
                                     strncmp(result_c_buffer, "OP_HANDLER_NO_RESULT_VAR", 26) != 0
                                     /* && other error checks ... */ ) {
-                                    printf("%s\n", result_c_buffer); 
+                                    printf("%s\n", result_c_buffer); // Echo only at the prompt
                                 }
                                 set_variable_scoped("LAST_OP_RESULT", result_c_buffer, false);
                             } else {
@@ -2108,7 +2247,12 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
                                 strncmp(expression_result_buffer, "UNKNOWN_PREFIX_OP_ERROR", strlen("UNKNOWN_PREFIX_OP_ERROR")) !=0 &&
                                 strncmp(expression_result_buffer, "UNARY_PREFIX_OP_ERROR", strlen("UNARY_PREFIX_OP_ERROR")) !=0 &&
                                 // ... etc. for other error strings from invoke_bsh_dynamic_op_handler or its BSH callees
-                                true /* add more positive checks if needed, or fewer error checks */
+                                // Echo the value only for a line typed at the
+                                // prompt. In a script the same statement is a
+                                // side effect - '$i++' should increment, not
+                                // print - and the value is still readable in
+                                // LAST_OP_RESULT either way.
+                                bsh_at_interactive_prompt
                                 ) {
                                 printf("%s\n", expression_result_buffer);
                             }
@@ -2164,10 +2308,10 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
     else {
         char expression_result_buffer[INPUT_BUFFER_SIZE];
         if (evaluate_expression_from_tokens(tokens, num_tokens, expression_result_buffer, sizeof(expression_result_buffer))) {
-            if (strlen(expression_result_buffer) > 0 && /* ... more positive checks or fewer error checks ... */
+            if (bsh_at_interactive_prompt && strlen(expression_result_buffer) > 0 && /* ... more positive checks or fewer error checks ... */
                  strncmp(expression_result_buffer, "EXPR_PARSE_ERROR", strlen("EXPR_PARSE_ERROR")) != 0 &&
                  strncmp(expression_result_buffer, "BSH_HANDLER_NOT_FOUND", strlen("BSH_HANDLER_NOT_FOUND")) !=0 ) {
-                printf("%s\n", expression_result_buffer);
+                printf("%s\n", expression_result_buffer); // Echo only at the prompt
             }
             set_variable_scoped("LAST_OP_RESULT", expression_result_buffer, false);
         } else {
@@ -2516,7 +2660,7 @@ static int shell_main(int argc, char *argv[]) {
     if (argc > 1 && strcmp(argv[1], "--bsh-stdin") == 0) {
         char line_buffer[INPUT_BUFFER_SIZE];
         int line_no = 0;
-        while (fgets(line_buffer, sizeof(line_buffer), stdin)) {
+        while (besh_read_logical_line(stdin, line_buffer, sizeof(line_buffer), NULL)) {
             line_no++;
             process_line(line_buffer, stdin, line_no, STATE_NORMAL);
             if (current_exec_state == STATE_RETURN_REQUESTED && bsh_exit_requested) break;
@@ -2563,12 +2707,14 @@ static int shell_main(int argc, char *argv[]) {
             snprintf(prompt_buffer, sizeof(prompt_buffer), "%s%s> ", current_prompt_val, state_indicator); //
             printf("%s", prompt_buffer); //
 
-            if (!fgets(line_buffer, sizeof(line_buffer), stdin)) { //
+            if (!besh_read_logical_line(stdin, line_buffer, sizeof(line_buffer), "\"> ")) { //
                 printf("\n");  //
                 break; //
             }
             line_counter_interactive++; //
+            bsh_at_interactive_prompt = true;
             process_line(line_buffer, stdin, line_counter_interactive, STATE_NORMAL); //
+            bsh_at_interactive_prompt = false;
 
             if (bsh_return_value_is_set && current_exec_state == STATE_RETURN_REQUESTED) {
                 // Handle 'exit' from interactive prompt
@@ -2892,22 +3038,9 @@ void handle_loadlib_statement(Token *tokens, int num_tokens) {
     if (num_tokens != 3) { fprintf(stderr, "Syntax: loadlib <path_or_$var> <alias_or_$var>\n"); return; }
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     char lib_path[MAX_FULL_PATH_LEN], alias[MAX_VAR_NAME_LEN];
-    
-    if (tokens[1].type == TOKEN_STRING) {
-        char unescaped[INPUT_BUFFER_SIZE];
-        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
-        expand_variables_in_string_advanced(unescaped, lib_path, sizeof(lib_path));
-    } else { 
-        expand_variables_in_string_advanced(tokens[1].text, lib_path, sizeof(lib_path));
-    }
-    
-    if (tokens[2].type == TOKEN_STRING) {
-        char unescaped[INPUT_BUFFER_SIZE];
-        unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
-        expand_variables_in_string_advanced(unescaped, alias, sizeof(alias));
-    } else { 
-        expand_variables_in_string_advanced(tokens[2].text, alias, sizeof(alias));
-    }
+    expand_token_argument(&tokens[1], lib_path, sizeof(lib_path));
+    expand_token_argument(&tokens[2], alias, sizeof(alias));
+    trim_whitespace(lib_path); trim_whitespace(alias);
 
     if (strlen(lib_path) == 0 || strlen(alias) == 0) { fprintf(stderr, "loadlib error: Path or alias is empty.\n"); return; }
     DynamicLib* current_lib = loaded_libs; while(current_lib) { if (strcmp(current_lib->alias, alias) == 0) { fprintf(stderr, "Error: Lib alias '%s' in use.\n", alias); return; } current_lib = current_lib->next; }
@@ -2924,21 +3057,9 @@ void handle_calllib_statement(Token *tokens, int num_tokens) {
     if (current_exec_state == STATE_BLOCK_SKIP) return;
     char alias[MAX_VAR_NAME_LEN], func_name[MAX_VAR_NAME_LEN];
 
-    if (tokens[1].type == TOKEN_STRING) {
-        char unescaped[INPUT_BUFFER_SIZE];
-        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
-        expand_variables_in_string_advanced(unescaped, alias, sizeof(alias));
-    } else { 
-        expand_variables_in_string_advanced(tokens[1].text, alias, sizeof(alias));
-    }
-
-    if (tokens[2].type == TOKEN_STRING) {
-        char unescaped[INPUT_BUFFER_SIZE];
-        unescape_string(tokens[2].text, unescaped, sizeof(unescaped));
-        expand_variables_in_string_advanced(unescaped, func_name, sizeof(func_name));
-    } else { 
-        expand_variables_in_string_advanced(tokens[2].text, func_name, sizeof(func_name));
-    }
+    expand_token_argument(&tokens[1], alias, sizeof(alias));
+    expand_token_argument(&tokens[2], func_name, sizeof(func_name));
+    trim_whitespace(alias); trim_whitespace(func_name);
 
     if (strlen(alias) == 0 || strlen(func_name) == 0) { fprintf(stderr, "calllib error: Alias or func name empty.\n"); return; }
     DynamicLib* lib_entry = loaded_libs; void* lib_handle = NULL;
@@ -3617,14 +3738,8 @@ void handle_writefile_statement(Token *tokens, int num_tokens) {
 
     char path[MAX_FULL_PATH_LEN];
     char content_var[MAX_VAR_NAME_LEN];
-    if (tokens[1].type == TOKEN_STRING) {
-        char unescaped[MAX_FULL_PATH_LEN];
-        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
-        expand_variables_in_string_advanced(unescaped, path, sizeof(path));
-    } else {
-        expand_variables_in_string_advanced(tokens[1].text, path, sizeof(path));
-    }
-    expand_variables_in_string_advanced(tokens[2].text, content_var, sizeof(content_var));
+    expand_token_argument(&tokens[1], path, sizeof(path));
+    expand_token_argument(&tokens[2], content_var, sizeof(content_var));
     trim_whitespace(path); trim_whitespace(content_var);
 
     char* content = get_variable_scoped(content_var);
@@ -3645,14 +3760,8 @@ void handle_readfile_statement(Token *tokens, int num_tokens) {
 
     char path[MAX_FULL_PATH_LEN];
     char result_var[MAX_VAR_NAME_LEN];
-    if (tokens[1].type == TOKEN_STRING) {
-        char unescaped[MAX_FULL_PATH_LEN];
-        unescape_string(tokens[1].text, unescaped, sizeof(unescaped));
-        expand_variables_in_string_advanced(unescaped, path, sizeof(path));
-    } else {
-        expand_variables_in_string_advanced(tokens[1].text, path, sizeof(path));
-    }
-    expand_variables_in_string_advanced(tokens[2].text, result_var, sizeof(result_var));
+    expand_token_argument(&tokens[1], path, sizeof(path));
+    expand_token_argument(&tokens[2], result_var, sizeof(result_var));
     trim_whitespace(path); trim_whitespace(result_var);
 
     FILE* in = fopen(path, "r");
@@ -3778,8 +3887,8 @@ void handle_libloaded_statement(Token *tokens, int num_tokens) {
     if (num_tokens < 3) { fprintf(stderr, "Syntax: libloaded <alias> <result_var_name>\n"); return; }
 
     char alias[MAX_VAR_NAME_LEN], result_var[MAX_VAR_NAME_LEN];
-    expand_variables_in_string_advanced(tokens[1].text, alias, sizeof(alias));
-    expand_variables_in_string_advanced(tokens[2].text, result_var, sizeof(result_var));
+    expand_token_argument(&tokens[1], alias, sizeof(alias));
+    expand_token_argument(&tokens[2], result_var, sizeof(result_var));
     trim_whitespace(alias); trim_whitespace(result_var);
 
     DynamicLib* entry = loaded_libs;
@@ -4010,11 +4119,15 @@ void execute_script(const char *filename, bool is_import_call, bool is_startup_s
     bool restore_context = (!is_import_call && !is_startup_script);
 
     long outer_line_start_fpos = bsh_current_line_start_fpos;
+    // A script - including one reached by 'import' from the prompt - is code,
+    // so its bare expressions do not echo.
+    bool outer_at_prompt = bsh_at_interactive_prompt;
+    bsh_at_interactive_prompt = false;
     while (true) {
         long this_line_start = ftell(script_file);
-        if (!fgets(line_buffer, sizeof(line_buffer), script_file)) {
-            if (feof(script_file)) break; 
-            if (ferror(script_file)) { perror("Error reading script file"); break; }
+        if (!besh_read_logical_line(script_file, line_buffer, sizeof(line_buffer), NULL)) {
+            if (ferror(script_file)) { perror("Error reading script file"); }
+            break;
         }
         line_no++;
         bsh_current_line_start_fpos = this_line_start;
@@ -4028,6 +4141,7 @@ void execute_script(const char *filename, bool is_import_call, bool is_startup_s
         }
     }
     fclose(script_file);
+    bsh_at_interactive_prompt = outer_at_prompt;
     bsh_current_line_start_fpos = outer_line_start_fpos;
 
     set_variable_indirect("BSH_SCRIPT_PATH", saved_script_path, false);
@@ -4961,6 +5075,11 @@ static void run_user_function_body(UserFunction* func, int function_scope_id) {
     int outer_pending_jump = bsh_pending_body_jump;
     bsh_pending_body_jump = -1;
 
+    // A function body is stored code, not a line the user just typed, even when
+    // the call came from the prompt: its bare expressions must not echo.
+    bool outer_at_prompt = bsh_at_interactive_prompt;
+    bsh_at_interactive_prompt = false;
+
     BeshRunStatus compiled = besh_jit_run_function(func);
     if (compiled != BESH_RUN_FALLBACK) {
         goto function_epilogue;
@@ -4981,6 +5100,7 @@ static void run_user_function_body(UserFunction* func, int function_scope_id) {
     }
 
 function_epilogue:
+    bsh_at_interactive_prompt = outer_at_prompt;
     bsh_pending_body_jump = outer_pending_jump;
 
     while(block_stack_top_bf > func_outer_block_stack_top_bf) {

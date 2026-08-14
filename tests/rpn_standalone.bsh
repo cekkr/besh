@@ -1,0 +1,87 @@
+# RPN loaded on its own, without cDiesis.
+#
+# tests/cdiesis_interop.bsh always imports cdiesis first, which used to hide a
+# real dependency: rpn.bsh reached arithmetic through cds_binary, a function
+# defined in framework/cdiesis/ops.bsh rather than in the cdiesis.strutil module
+# it actually imports. RPN is the control experiment for the framework
+# mechanism, so it has to stand up with no other language loaded.
+import tests.lib.assert
+import rpn
+
+assert_start "rpn: standalone"
+
+lang_load "rpn" loaded
+assert_eq "$loaded" "1" "RPN loads without cDiesis"
+
+lang_state "rpn" state
+assert_eq "$state" "loaded" "lang_state reports it loaded"
+
+# --- Arithmetic, which RPN delegates rather than implements ----------------
+
+$SRC = "3 4 + ."
+lang_eval "rpn" SRC sum
+assert_eq "$sum" "7" "addition"
+
+$SRC = "3 4 + 2 * ."
+lang_eval "rpn" SRC mixed
+assert_eq "$mixed" "14" "postfix order needs no precedence rules"
+
+$SRC = "20 5 - ."
+lang_eval "rpn" SRC diff
+assert_eq "$diff" "15" "subtraction takes the operands in stack order"
+
+$SRC = "20 4 / ."
+lang_eval "rpn" SRC quotient
+assert_eq "$quotient" "5" "division"
+
+$SRC = "17 5 % ."
+lang_eval "rpn" SRC rem
+assert_eq "$rem" "2" "modulo"
+
+# The same handlers the shell uses, so comparisons agree with BSH's.
+$SRC = "5 3 > ."
+lang_eval "rpn" SRC gt
+assert_eq "$gt" "1" "comparison returns the shell's own truth value"
+
+$SRC = "5 5 == ."
+lang_eval "rpn" SRC eq
+assert_eq "$eq" "1" "equality"
+
+# --- Stack words -------------------------------------------------------------
+
+$SRC = "7 dup * ."
+lang_eval "rpn" SRC squared
+assert_eq "$squared" "49" "dup duplicates the top of the stack"
+
+$SRC = "1 2 swap - ."
+lang_eval "rpn" SRC swapped
+assert_eq "$swapped" "1" "swap exchanges the top two"
+
+$SRC = "9 4 drop ."
+lang_eval "rpn" SRC dropped
+assert_eq "$dropped" "9" "drop discards the top"
+
+# --- Word definition ---------------------------------------------------------
+
+$DEFS = ": square dup * ;"
+lang_eval "rpn" DEFS defined
+$SRC = "6 square ."
+lang_eval "rpn" SRC from_word
+assert_eq "$from_word" "36" "a word defined in one eval survives into the next"
+
+lang_arg_reset
+lang_arg_push "8"
+lang_call "rpn" "square" called
+assert_eq "$called" "64" "BSH calls an RPN word through lang_call"
+
+# --- Unload ------------------------------------------------------------------
+
+lang_unload "rpn" unloaded
+assert_eq "$unloaded" "1" "RPN unloads"
+
+lang_arg_reset
+lang_arg_push "8"
+lang_call "rpn" "square" after_unload
+assert_empty "$after_unload" "calls into unloaded RPN are refused"
+
+assert_summary

@@ -403,7 +403,7 @@ static int host_binop(fa_Runtime* rt, const fa_RuntimeHostCall* call, void* ud) 
     snprintf(lhs, sizeof(lhs), "%s", handle_text(a_h, a_scratch, sizeof(a_scratch)));
     snprintf(rhs, sizeof(rhs), "%s", handle_text(b_h, b_scratch, sizeof(b_scratch)));
 
-    OperatorDefinition* def = get_operator_definition(op);
+    OperatorDefinition* def = get_operator_definition_typed(op, OP_TYPE_BINARY_INFIX);
     if (!def || def->bsh_handler_name[0] == '\0') {
         return host_ret(call, handle_temp("NO_HANDLER_ERROR"));
     }
@@ -429,7 +429,8 @@ static int host_unop(fa_Runtime* rt, const fa_RuntimeHostCall* call, void* ud) {
     char operand[INPUT_BUFFER_SIZE];
     snprintf(operand, sizeof(operand), "%s", handle_text(a_h, a_scratch, sizeof(a_scratch)));
 
-    OperatorDefinition* def = get_operator_definition(op);
+    OperatorDefinition* def = get_operator_definition_typed(
+        op, prefix ? OP_TYPE_UNARY_PREFIX : OP_TYPE_UNARY_POSTFIX);
     if (!def || def->bsh_handler_name[0] == '\0') {
         return host_ret(call, handle_temp("NO_HANDLER_ERROR"));
     }
@@ -861,8 +862,11 @@ static IRExpr* compile_primary(CompiledUnit* unit, Token* tokens, int start, int
     }
 
     if (tokens[start].type == TOKEN_OPERATOR) {
-        OperatorDefinition* def = get_operator_definition(tokens[start].text);
-        if (!def || def->op_type_prop != OP_TYPE_UNARY_PREFIX) return NULL;
+        OperatorDefinition* def = get_operator_definition_typed(tokens[start].text, OP_TYPE_UNARY_PREFIX);
+        if (!def) return NULL;
+        /* `++`/`--` hand their handler a variable *name* to mutate; the emitter
+         * only has values, so leave the statement to the interpreter. */
+        if (besh_unary_op_takes_variable_name(def->op_str)) return NULL;
         int inner_used = 0;
         IRExpr* operand = compile_expr_range(unit, tokens, start + 1, end, def->precedence,
                                              &inner_used, native_ok);
@@ -915,11 +919,13 @@ static IRExpr* compile_expr_range(CompiledUnit* unit, Token* tokens, int start, 
     int pos = start + used;
 
     while (pos <= end && tokens[pos].type == TOKEN_OPERATOR) {
-        OperatorDefinition* def = get_operator_definition(tokens[pos].text);
+        OperatorDefinition* def = get_operator_definition_after_operand(tokens[pos].text);
         if (!def) break;
 
         if (def->op_type_prop == OP_TYPE_UNARY_POSTFIX) {
             if (def->precedence < min_precedence) break;
+            /* Same as prefix: a name-mutating operator cannot be lowered. */
+            if (besh_unary_op_takes_variable_name(def->op_str)) { expr_free(left); return NULL; }
             IRExpr* e = expr_new(IE_UNOP);
             if (!e) { expr_free(left); return NULL; }
             e->handle = unit_const(unit, def->op_str);

@@ -1,0 +1,23 @@
+# Operator-heavy framework code: every '+', '<' and '==' here is resolved
+# through the runtime registry and evaluated by a BSH handler function in
+# framework/core_operators.bsh, which in turn calls into number.bsh.
+#
+# This is the workload the general tier has to beat. It currently does not: the
+# compiled path reaches the same handlers through the 'binop' host import,
+# exactly as often as the interpreter does.
+
+defunc bench_ops (n) {
+    $i = 0
+    $total = 0
+    while $i < $n {
+        $total = $total + $i
+        if $total > 1000 {
+            $total = $total - 1000
+        }
+        $i = $i + 1
+    }
+    return $total
+}
+
+bench_ops 4000
+echo "BENCH-OK operators $LAST_RETURN_VALUE"

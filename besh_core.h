@@ -185,6 +185,7 @@ extern bool bsh_return_value_is_set;
 // current function body. Both raise STATE_RETURN_REQUESTED, so this flag is
 // what tells them apart.
 extern bool bsh_exit_requested;
+extern bool bsh_at_interactive_prompt;
 // Set by a '}' that closes a 'while' whose body came from a stored function
 // body rather than a seekable file: the body executor jumps back to this
 // 0-based body line instead of seeking.
@@ -238,6 +239,9 @@ void cleanup_shell(void);
 void initialize_operators_core_structural(void);
 void add_operator_definition(const char* op_str, TokenType token_type, OperatorType op_type_prop, int precedence, OperatorAssociativity assoc, const char* bsh_handler);
 OperatorDefinition* get_operator_definition(const char* op_str);
+OperatorDefinition* get_operator_definition_typed(const char* op_str, OperatorType op_type_prop);
+OperatorDefinition* get_operator_definition_after_operand(const char* op_str);
+bool besh_unary_op_takes_variable_name(const char* op_str);
 int match_operator_text(const char *input, const char **op_text);
 void add_keyword_alias(const char* original, const char* alias_name);
 const char* resolve_keyword_alias(const char* alias_name);
@@ -256,6 +260,7 @@ void cleanup_variables_for_scope(int scope_id);
 char* get_variable_scoped(const char *name_raw);
 void set_variable_scoped(const char *name_raw, const char *value_to_set, bool is_array_elem);
 void expand_variables_in_string_advanced(const char *input_str, char *expanded_str, size_t expanded_str_size);
+bool besh_read_logical_line(FILE* input, char* buffer, size_t buffer_size, const char* continuation_prompt);
 char* get_array_element_scoped(const char* array_base_name, const char* index_str_raw);
 void set_array_element_scoped(const char* array_base_name, const char* index_str_raw, const char* value);
 

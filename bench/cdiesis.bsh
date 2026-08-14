@@ -1,0 +1,38 @@
+# A whole language implemented in BSH: compile a small cDiesis unit, then call
+# into it repeatedly. Objects, virtual dispatch, fields and arithmetic all
+# bottom out in the same primitive set and the same operator handlers.
+#
+# Compilation happens once; the loop measures the executor, which is the part
+# that would benefit from framework functions being compiled as units (Phase 4).
+import cdiesis
+$(CDS_STDLIB_ENABLED) = "0"
+lang_load "cdiesis" loaded
+
+$BENCH_SRC = ""
+$BENCH_SRC = "$BENCH_SRC class Shape {"
+$BENCH_SRC = "$BENCH_SRC   public int Size;"
+$BENCH_SRC = "$BENCH_SRC   public Shape(int size) { this.Size = size; }"
+$BENCH_SRC = "$BENCH_SRC   public virtual int Area() { return this.Size * this.Size; }"
+$BENCH_SRC = "$BENCH_SRC }"
+$BENCH_SRC = "$BENCH_SRC class Box : Shape {"
+$BENCH_SRC = "$BENCH_SRC   public Box(int size) { this.Size = size; }"
+$BENCH_SRC = "$BENCH_SRC   public override int Area() { return this.Size * this.Size * 6; }"
+$BENCH_SRC = "$BENCH_SRC }"
+$BENCH_SRC = "$BENCH_SRC class Bench {"
+$BENCH_SRC = "$BENCH_SRC   public static int Run(int rounds) {"
+$BENCH_SRC = "$BENCH_SRC     Shape item = new Box(3);"
+$BENCH_SRC = "$BENCH_SRC     int total = 0;"
+$BENCH_SRC = "$BENCH_SRC     int i = 0;"
+$BENCH_SRC = "$BENCH_SRC     while (i < rounds) { total = total + item.Area(); i = i + 1; }"
+$BENCH_SRC = "$BENCH_SRC     return total;"
+$BENCH_SRC = "$BENCH_SRC   }"
+$BENCH_SRC = "$BENCH_SRC }"
+
+cds_compile "bench" BENCH_SRC compiled
+
+lang_arg_reset
+lang_arg_push "150"
+lang_call "cdiesis" "Bench.Run" result
+
+lang_unload "cdiesis" done
+echo "BENCH-OK cdiesis $result"

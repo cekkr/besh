@@ -224,18 +224,45 @@ The pattern is:
 - do allocation in a separate function, so the scanning loop stays a kernel;
 - assert the tier in a test, because losing it is silent.
 
-Measured on this checkout (macOS, `cc`, single run):
+Reproduce with [`bench.sh`](../bench.sh), which builds an optimised binary of
+its own, runs each fixture in [`bench/`](../bench/) under `BSH_COMPILE=off` and
+`BSH_COMPILE=auto`, and reports the best of N runs net of startup. It also
+compares the checksum each fixture prints across the two modes, so a timing run
+doubles as a differential check.
 
-| workload | interpreter | bytecode |
-| --- | --- | --- |
-| 200k-iteration integer loop (`prim i*`, kernel tier) | 1.38 s | 0.69 s |
-| 4k × (`str_find_from` + `str_hash`) over a 70-byte string | 10.33 s | 4.11 s |
-| [`tests/cdiesis_stdlib.bsh`](../tests/cdiesis_stdlib.bsh) (general tier) | 24.19 s | 24.48 s |
+```bash
+./bench.sh
+```
 
-The general tier is currently at parity, not faster: cDiesis framework code
-spends its time inside BSH operator handlers reached through `binop`, which the
-compiler calls exactly as often as the interpreter does. Compiling those
-handlers themselves, and reducing host-call frequency, is Phase 4/5 work.
+Measured on this checkout (macOS, `cc -O2`, best of 7, times net of the 0.025 s
+startup baseline):
+
+| fixture | what it exercises | interpreter | bytecode | ratio |
+| --- | --- | --- | --- | --- |
+| [`kernel_loop`](../bench/kernel_loop.bsh) | 200k-iteration integer loop, kernel tier | 0.541 s | 0.240 s | **2.25× faster** |
+| [`strlib_scan`](../bench/strlib_scan.bsh) | 1k × (`str_find_from` + `str_hash`) over 68 bytes | 1.860 s | 0.634 s | **2.93× faster** |
+| [`calls`](../bench/calls.bsh) | 60k calls of a one-statement kernel function | 0.289 s | 0.462 s | 0.63× — *slower* |
+| [`operators`](../bench/operators.bsh) | 4k iterations of `+`, `<`, `>` through BSH handlers | 0.580 s | 0.915 s | 0.63× — *slower* |
+| [`cdiesis`](../bench/cdiesis.bsh) | 150 virtual-dispatch calls in a cDiesis unit | 1.211 s | 1.865 s | 0.63× — *slower* |
+
+Two things follow, and neither was visible from the single-run figures this
+table replaces.
+
+**The general tier is slower than the interpreter, not at parity.** It costs a
+repeatable ~1.6× on operator-heavy code. Every operand still lives in a shell
+variable and is reached through a host import, so the compiled body pays the
+interpreter's dispatch cost *plus* the cost of crossing the host boundary for
+each value. Compiling the handlers themselves and cutting host-call frequency is
+Phase 4/5 work; until then `auto` is a loss on anything that is not integer work
+against the heap.
+
+**Reaching the kernel tier is not by itself enough — the loop has to be inside
+the compiled function.** `bench/calls.bsh` calls a function that *does* compile
+to a kernel, 60k times, and loses: entering the compiled path once per call
+costs more than the single `prim iadd` in the body saves. `strlib_scan` calls
+kernels just as often and wins 2.93×, because each of those calls scans a
+68-byte string before returning. The win comes from the work done per entry, not
+from the tier on its own.
 
 ## Debugging
 

@@ -1,0 +1,74 @@
+# Native extensions: runtime C compilation with def_c_lib, then loadlib/calllib.
+#
+# This suite needs a working 'cc' on PATH. test.sh already needs one to build the
+# shell itself, so requiring it here adds no new dependency.
+import tests.lib.assert
+import c_compiler
+
+assert_start "native: runtime C compilation and calllib"
+
+# --- Source held in a variable ---------------------------------------------
+#
+# BSH is line oriented, so a C body written inline is one string with '\n'
+# escapes. For anything longer, keep the C in a file and read it (below).
+
+$INLINE_C = "#include <stdio.h>\n#include <stdlib.h>\nint add_them(int argc, char* argv[], char* out, int n) {\n    long a = (argc > 0) ? strtol(argv[0], 0, 10) : 0;\n    long b = (argc > 1) ? strtol(argv[1], 0, 10) : 0;\n    snprintf(out, n, \"%ld\", a + b);\n    return 0;\n}\n"
+
+def_c_lib inline_demo INLINE_C
+assert_eq "$inline_demo_COMPILE_STATUS" "success" "inline C source compiles"
+assert_eq "$inline_demo_LOAD_STATUS" "success" "the compiled library loads"
+assert_not_empty "$inline_demo_PATH" "the shared object path is reported"
+
+calllib inline_demo add_them "20" "22"
+assert_eq "$LAST_LIB_CALL_STATUS" "0" "a successful call reports status 0"
+assert_eq "$LAST_LIB_CALL_OUTPUT" "42" "the library's output comes back in a variable"
+
+# --- Source held in a file --------------------------------------------------
+
+readfile "tests/fixtures/native_demo.c" DEMO_C
+assert_eq "$LAST_FILE_STATUS" "0" "the fixture C file is readable"
+assert_not_empty "$DEMO_C" "readfile populated the source variable"
+
+def_c_lib demo_lib DEMO_C
+assert_eq "$demo_lib_COMPILE_STATUS" "success" "C source read from a file compiles"
+assert_eq "$demo_lib_LOAD_STATUS" "success" "the file-backed library loads"
+
+libloaded demo_lib is_loaded
+assert_eq "$is_loaded" "1" "libloaded sees the alias"
+
+# The alias may equally arrive quoted or through a variable.
+$alias_var = "demo_lib"
+libloaded "$alias_var" is_loaded_indirect
+assert_eq "$is_loaded_indirect" "1" "libloaded accepts a quoted alias argument"
+
+libloaded never_loaded_alias missing
+assert_eq "$missing" "0" "libloaded reports an unknown alias as 0"
+
+# --- Calling into it ---------------------------------------------------------
+
+calllib demo_lib demo_twice "21"
+assert_eq "$LAST_LIB_CALL_OUTPUT" "42" "single argument reaches argv[0]"
+
+calllib demo_lib demo_join "a" "b" "c"
+assert_eq "$LAST_LIB_CALL_OUTPUT" "a-b-c" "argument boundaries are preserved"
+
+calllib demo_lib demo_join "one two" "three"
+assert_eq "$LAST_LIB_CALL_OUTPUT" "one two-three" "an argument containing a space stays one argument"
+
+calllib demo_lib demo_fail
+assert_eq "$LAST_LIB_CALL_STATUS" "3" "a non-zero return reaches LAST_LIB_CALL_STATUS"
+assert_eq "$LAST_LIB_CALL_OUTPUT" "deliberate failure" "output is still captured on failure"
+
+# --- Failure reporting --------------------------------------------------------
+
+$BROKEN_C = "this is not C at all;\n"
+def_c_lib broken_demo BROKEN_C
+assert_eq "$broken_demo_COMPILE_STATUS" "failure" "a compile error is reported as failure"
+assert_eq "$broken_demo_LOAD_STATUS" "failure" "nothing is loaded after a compile error"
+assert_not_empty "$broken_demo_COMPILE_OUTPUT" "compiler diagnostics are captured"
+
+$EMPTY_C = ""
+def_c_lib empty_demo EMPTY_C
+assert_eq "$empty_demo_COMPILE_STATUS" "failure" "empty source is refused"
+
+assert_summary

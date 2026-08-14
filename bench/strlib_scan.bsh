@@ -1,0 +1,30 @@
+# Heap-string scanning: str_find_from and str_hash over the same buffer, both
+# kernel-tier functions doing one byte load per iteration.
+#
+# Unlike bench/kernel_loop.bsh this is library code rather than a hand-written
+# loop, so it measures what the tier is worth to something a user would write.
+import list
+
+$BENCH_ROUNDS = 1000
+$BENCH_TEXT = "the quick brown fox jumps over the lazy dog while the band played on"
+
+str_make "$BENCH_TEXT"
+$s = "$LAST_RETURN_VALUE"
+str_make "played"
+$needle = "$LAST_RETURN_VALUE"
+
+$i = 0
+$checksum = 0
+prim ilt "$i" "$BENCH_ROUNDS" go
+while $go {
+    str_find_from "$s" "$needle" 0
+    prim iadd "$checksum" "$LAST_RETURN_VALUE" checksum
+    str_hash "$s"
+    prim ixor "$checksum" "$LAST_RETURN_VALUE" checksum
+    prim iadd "$i" 1 i
+    prim ilt "$i" "$BENCH_ROUNDS" go
+}
+
+str_free "$needle"
+str_free "$s"
+echo "BENCH-OK strlib_scan $checksum"

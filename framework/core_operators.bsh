@@ -45,8 +45,10 @@ defoperator "!" TYPE UNARY_PREFIX PRECEDENCE 60 ASSOC N HANDLER "bsh_op_logical_
 
 # Ternary Conditional Operator (precedence 5, right-associative for nesting)
 defoperator "?" TYPE TERNARY_PRIMARY PRECEDENCE 5 ASSOC R HANDLER "bsh_op_ternary_handler"
-# The ':' is implicitly handled by the C parser when it encounters '?' defined as TERNARY_PRIMARY.
-# No separate defoperator for ':' as part of the ternary is needed if C handles the structure.
+# ':' carries no handler - the C parser consumes it as the delimiter of the '?'
+# form. It is registered anyway because the tokenizer only emits an operator
+# token for a symbol that appears in the registry.
+defoperator ":" TYPE TERNARY_SECONDARY PRECEDENCE 5 ASSOC R HANDLER ""
 
 # Dot operator for decimal construction or potential property access (very high precedence)
 # If used for property access like $obj.prop, its handler would manage that.
@@ -158,9 +160,10 @@ function bsh_op_logical_or (op_sym lhs rhs result_var) {
 # The C parser provided passes evaluated strings for true/false branches for now.
 # For lazy eval, C would need to pass token lists.
 function bsh_op_ternary_handler (op_sym cond_val true_val false_val result_var) {
-    echo "BSH Ternary Handler: Cond='$cond_val', TrueV='$true_val', FalseV='$false_val' -> $result_var"
-    # Truthiness check for cond_val
-    if "$cond_val" == "1" || "$cond_val" == "true" || ("$cond_val" != "0" && "$cond_val" != "false" && "$cond_val" != "") {
+    # Both branches arrive already evaluated: BSH has no way to hand a handler an
+    # unevaluated operand, so '?' selects a value, it does not skip work.
+    prim truthy "$cond_val" __op_ternary_cond
+    if $__op_ternary_cond == "1" {
         $($result_var) = "$true_val"
     } else {
         $($result_var) = "$false_val"
@@ -172,45 +175,24 @@ function bsh_op_ternary_handler (op_sym cond_val true_val false_val result_var) 
 # 1. Decimal construction: "10" . "5" -> "10.5"
 # 2. Property access: $myobj . "propertyname" -> value of myobj_propertyname
 # The C parser will pass the LHS and RHS as evaluated strings.
+# '.' joins its two operands with a literal dot, which covers both uses it was
+# registered for: `10 . 5` reads back as the number 10.5, and `"a" . "b"` builds
+# the dotted name "a.b". The one special case is an empty left operand followed
+# by an integer, written `0.<rhs>` so that `. 5` is the number 0.5 rather than
+# the unparseable ".5".
+#
+# This handler never resolves object properties. By the time it runs, the C
+# parser has already replaced `$obj` with its *value*, so the object's name is
+# gone; flattened property expansion (`$cfg_host`) is the working path.
 function bsh_op_dot_handler (op_sym lhs rhs result_var) {
-    echo "BSH Dot Handler: LHS='$lhs', RHS='$rhs' -> $result_var"
-
-    # Attempt to see if it looks like decimal construction
-    get_type "$lhs" lhs_type_var
-    get_type "$rhs" rhs_type_var
-
-    # Heuristic: if RHS is purely digits and LHS is empty or digits, treat as decimal.
-    # This is simplistic. A more robust way might involve checking if LHS is a known object type.
-    $is_lhs_numeric_like = "0"
-    if "$lhs_type_var" == "INTEGER" || "$lhs_type_var" == "FLOAT" || "$lhs" == "" {
-        $is_lhs_numeric_like = "1"
-    }
-    $is_rhs_integer = "0"
-    if "$rhs_type_var" == "INTEGER" { $is_rhs_integer = "1" }
-
-    if "$is_lhs_numeric_like" == "1" && "$is_rhs_integer" == "1" && !($lhs == "" && $rhs == "") {
-        # Decimal construction like 10.5 or .5
-        if "$lhs" == "" {
+    if $lhs == "" {
+        get_type "$rhs" __op_dot_rhs_type
+        if $__op_dot_rhs_type == "INTEGER" {
             $($result_var) = "0.$rhs"
-        } else {
-            $($result_var) = "$lhs.$rhs"
+            return
         }
-        echo "Dot Handler: Decimal construct -> $($result_var)"
-    } else {
-        # Assume property access: lhs is base var name (string), rhs is property name (string)
-        # This assumes that if $myobj.prop is typed, $myobj is evaluated to its *name* string "myobj"
-        # if it's not a literal. The C parser needs to handle this.
-        # If $myobj evaluates to its value, this won't work for property access easily.
-        # For simplicity, let's assume 'lhs' is the base object's name if it's for property access.
-        # This part is tricky without knowing exactly how C evaluates $obj for $obj.prop.
-        # If C always fully evaluates $obj, then dot for property access is harder.
-        # Let's assume for now this handler is primarily for decimal construction.
-        # Property access via dot is usually handled directly in C's expand_variables_in_string_advanced.
-        # If dot is a generic operator, its BSH handler would need careful design for property access.
-        echo "Dot Handler: Not interpreting as decimal construction. LHS type: $lhs_type_var, RHS type: $rhs_type_var."
-        echo "             Property access via '.' operator in BSH needs careful C-side support for LHS evaluation."
-        $($result_var) = "$lhs.$rhs" # Fallback: literal concatenation
     }
+    $($result_var) = "$lhs.$rhs"
 }
 
 echo "Core Operators Framework: Specific BSH handlers defined."

@@ -1,0 +1,24 @@
+# Repeated user-function calls: scope entry/exit and argument binding, with as
+# little work as possible inside the body.
+#
+# This is the cost the compiled path has to beat before anything else matters,
+# because every framework operator goes through a call like this one.
+
+defunc bench_step (value) {
+    prim iadd "$value" 1 __bench_next
+    return $__bench_next
+}
+
+$BENCH_CALLS = 60000
+
+$i = 0
+$acc = 0
+prim ilt "$i" "$BENCH_CALLS" go
+while $go {
+    bench_step "$acc"
+    $acc = "$LAST_RETURN_VALUE"
+    prim iadd "$i" 1 i
+    prim ilt "$i" "$BENCH_CALLS" go
+}
+
+echo "BENCH-OK calls $acc"

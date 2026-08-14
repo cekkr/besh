@@ -2,8 +2,8 @@
 #
 # Defines, compiles and loads C source held in a BSH variable as a shared
 # library, using three shell primitives: 'writefile' to place the source on
-# disk, external command execution to run the compiler, and 'loadlib' to bring
-# the result into the process.
+# disk, 'process' to run the compiler with preserved argument boundaries, and
+# 'loadlib' to bring the result into the process.
 #
 # The C ABI a compiled library must follow is fixed by bsh.c:
 #   int func_name(int argc, char* argv[], char* output_buffer, int buffer_size)
@@ -18,6 +18,15 @@ echo "Loading C Compiler Framework (c_compiler.bsh)..."
 $BSH_C_COMPILE_TEMP_DIR = "/tmp/bsh_compile_cache"
 $BSH_C_COMPILER = "cc"
 
+# Sets "<alias>_COMPILE_STATUS" and friends. The name of the variable to write
+# is built first and assigned through '$(...)', because '$($alias)_SUFFIX' reads
+# as "the value of the variable named by $alias, then the literal text _SUFFIX"
+# — which is not the variable this wants to touch.
+function _c_lib_set_status (lib_alias field value) {
+    $__c_lib_status_var = "${lib_alias}_${field}"
+    $($__c_lib_status_var) = "$value"
+}
+
 # --- Main Function: Define, Compile, and Load C Library ---
 # def_c_lib <alias> <c_code_var_name> [cflags_var_name] [ldflags_var_name]
 #
@@ -25,14 +34,16 @@ $BSH_C_COMPILER = "cc"
 #   $X_COMPILE_STATUS   "success" | "failure"
 #   $X_LOAD_STATUS      "success" | "failure"
 #   $X_PATH             path of the produced shared object
+#   $X_COMPILE_OUTPUT   compiler diagnostics (stdout and stderr merged)
 function def_c_lib (lib_alias c_code_var_name compiler_flags_var linker_flags_var) {
-    echo "def_c_lib: building '$lib_alias'..."
+    _c_lib_set_status "$lib_alias" "COMPILE_STATUS" "failure"
+    _c_lib_set_status "$lib_alias" "LOAD_STATUS" "failure"
+    _c_lib_set_status "$lib_alias" "COMPILE_OUTPUT" ""
+    _c_lib_set_status "$lib_alias" "PATH" ""
 
     $c_source_code = $($c_code_var_name)
     if $c_source_code == "" {
         echo "def_c_lib: C source variable '$c_code_var_name' is empty."
-        $($lib_alias)_COMPILE_STATUS = "failure"
-        $($lib_alias)_LOAD_STATUS = "failure"
         return
     }
 
@@ -44,11 +55,13 @@ function def_c_lib (lib_alias c_code_var_name compiler_flags_var linker_flags_va
     writefile "$source_file_path" $c_code_var_name
     if $LAST_FILE_STATUS != "0" {
         echo "def_c_lib: could not write '$source_file_path'."
-        $($lib_alias)_COMPILE_STATUS = "failure"
-        $($lib_alias)_LOAD_STATUS = "failure"
         return
     }
 
+    # 'process' is used rather than a bare command line because the program name
+    # comes from a variable: a line starting with '$BSH_C_COMPILER' is parsed as
+    # an expression, not dispatched as a command. 'process' also preserves every
+    # argument boundary and captures the compiler's diagnostics.
     $cflags = ""
     if $compiler_flags_var != "" {
         $cflags = $($compiler_flags_var)
@@ -58,27 +71,36 @@ function def_c_lib (lib_alias c_code_var_name compiler_flags_var linker_flags_va
         $ldflags = $($linker_flags_var)
     }
 
-    # Paths are passed as quoted strings so the tokenizer keeps them whole.
-    $BSH_C_COMPILER "-shared" "-fPIC" "-o" "$output_lib_path" "$source_file_path" $cflags $ldflags
+    if $cflags == "" {
+        if $ldflags == "" {
+            process __c_lib_out "$BSH_C_COMPILER" "-shared" "-fPIC" "-o" "$output_lib_path" "$source_file_path"
+        } else {
+            process __c_lib_out "$BSH_C_COMPILER" "-shared" "-fPIC" "-o" "$output_lib_path" "$source_file_path" "$ldflags"
+        }
+    } else {
+        if $ldflags == "" {
+            process __c_lib_out "$BSH_C_COMPILER" "-shared" "-fPIC" "-o" "$output_lib_path" "$source_file_path" "$cflags"
+        } else {
+            process __c_lib_out "$BSH_C_COMPILER" "-shared" "-fPIC" "-o" "$output_lib_path" "$source_file_path" "$cflags" "$ldflags"
+        }
+    }
+    _c_lib_set_status "$lib_alias" "COMPILE_OUTPUT" "$__c_lib_out"
 
     if $LAST_COMMAND_STATUS != "0" {
         echo "def_c_lib: compilation of '$lib_alias' failed (status $LAST_COMMAND_STATUS)."
-        $($lib_alias)_COMPILE_STATUS = "failure"
-        $($lib_alias)_LOAD_STATUS = "failure"
+        echo "$__c_lib_out"
         return
     }
 
-    $($lib_alias)_COMPILE_STATUS = "success"
-    $($lib_alias)_PATH = "$output_lib_path"
+    _c_lib_set_status "$lib_alias" "COMPILE_STATUS" "success"
+    _c_lib_set_status "$lib_alias" "PATH" "$output_lib_path"
 
     loadlib "$output_lib_path" "$lib_alias"
 
     libloaded "$lib_alias" __def_c_lib_loaded
     if $__def_c_lib_loaded == "1" {
-        $($lib_alias)_LOAD_STATUS = "success"
-        echo "def_c_lib: '$lib_alias' compiled and loaded from $output_lib_path"
+        _c_lib_set_status "$lib_alias" "LOAD_STATUS" "success"
     } else {
-        $($lib_alias)_LOAD_STATUS = "failure"
         echo "def_c_lib: '$lib_alias' compiled but failed to load."
     }
 }

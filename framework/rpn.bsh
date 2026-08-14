@@ -243,6 +243,29 @@ function rpn_exec_token (token) {
     rpn_push "$token"
 }
 
+# RPN implements no arithmetic of its own. Like cDiesis it delegates to the BSH
+# operator handlers in framework/core_operators.bsh, so all three languages get
+# the same answer for the same operands - but it reaches them directly rather
+# than through cds_binary, because RPN is the control experiment and must not
+# depend on cDiesis being loaded.
+function rpn_apply_binary (op lhs rhs result_var) {
+    if $op == "+" { bsh_op_add_or_concat "+" "$lhs" "$rhs" $result_var; return }
+    if $op == "-" { bsh_op_subtract "-" "$lhs" "$rhs" $result_var; return }
+    if $op == "*" { bsh_op_multiply "*" "$lhs" "$rhs" $result_var; return }
+    if $op == "/" { bsh_op_divide "/" "$lhs" "$rhs" $result_var; return }
+    if $op == "%" { bsh_op_modulo "%" "$lhs" "$rhs" $result_var; return }
+    if $op == "==" { bsh_op_equals "==" "$lhs" "$rhs" $result_var; return }
+    if $op == "!=" { bsh_op_not_equals "!=" "$lhs" "$rhs" $result_var; return }
+    if $op == "<" { bsh_op_less_than "<" "$lhs" "$rhs" $result_var; return }
+    if $op == ">" { bsh_op_greater_than ">" "$lhs" "$rhs" $result_var; return }
+    if $op == "<=" { bsh_op_less_equals "<=" "$lhs" "$rhs" $result_var; return }
+    if $op == ">=" { bsh_op_greater_equals ">=" "$lhs" "$rhs" $result_var; return }
+    if $op == "&&" { bsh_op_logical_and "&&" "$lhs" "$rhs" $result_var; return }
+    if $op == "||" { bsh_op_logical_or "||" "$lhs" "$rhs" $result_var; return }
+    $(RPN_ERROR) = "unsupported binary operator '$op'"
+    $($result_var) = ""
+}
+
 function rpn_binary (op) {
     # Reserve result holders in this frame: a callee writes its result
     # into the innermost scope that already defines the name.
@@ -251,7 +274,7 @@ function rpn_binary (op) {
     $result = ""
     rpn_pop rhs
     rpn_pop lhs
-    cds_binary "$op" "$lhs" "$rhs" result
+    rpn_apply_binary "$op" "$lhs" "$rhs" result
     rpn_push "$result"
 }
 

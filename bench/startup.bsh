@@ -1,0 +1,7 @@
+# Startup only: the cost of reaching the first user statement.
+#
+# The shell has already run .bshrc by the time this line executes, so the whole
+# measurement is process start plus framework import plus operator registration.
+# Every other fixture's time includes this one; bench.sh subtracts it to report
+# a net figure.
+echo "BENCH-OK startup 0"

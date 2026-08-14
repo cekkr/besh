@@ -1,0 +1,23 @@
+# A loop-heavy function that qualifies for the kernel tier: integer literals,
+# promoted locals, 'prim i*' on native operands, a flag condition, and 'return'.
+#
+# This is the best case for the compiled path - no host call at all inside the
+# loop - so it is the upper bound on what compilation currently buys.
+
+defunc bench_addup (n) {
+    $i = 0
+    $sum = 0
+    prim ilt "$i" "$n" go
+    while $go {
+        prim iadd "$sum" "$i" sum
+        prim iadd "$i" 1 i
+        prim ilt "$i" "$n" go
+    }
+    return $sum
+}
+
+# The sum of 0..199999 does not fit in 32 bits, so the reported checksum is the
+# wrapped value. That is deliberate: both tiers must wrap identically, so a
+# changed checksum here means the tiers have diverged, not that the loop is wrong.
+bench_addup 200000
+echo "BENCH-OK kernel_loop $LAST_RETURN_VALUE"

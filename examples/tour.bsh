@@ -1,0 +1,210 @@
+# examples/tour.bsh - Everything in the base language, in one runnable file.
+#
+#   ./bsh examples/tour.bsh
+#
+# Every line here executes. Nothing in this file is aspirational; if a construct
+# is not shown, assume it is not supported.
+
+echo "== values"
+
+# Every value is a string. Interpolation happens inside double quotes.
+$name = "world"
+$greeting = "hello $name"
+echo "$greeting"                       # hello world
+
+# ${...} ends the name explicitly, so a literal suffix can follow it.
+echo "${name}ly"                       # worldly
+
+# An unset variable expands to nothing at all.
+echo "[$never_set]"                    # []
+
+# A string literal may span lines. The newline is part of the value, and braces
+# or semicolons inside it are data rather than structure.
+$block = "first line
+second line"
+echo "[$block]"
+
+# $(...) is indirection: the inner text expands to the NAME of a variable.
+$slot_a = "written directly"
+$which = "slot_a"
+echo "$($which)"                       # written directly
+$($which) = "written indirectly"
+echo "$slot_a"                         # written indirectly
+
+echo "== arrays"
+
+# Arrays are name mangling: $items[0] is stored as items_ARRAYIDX_0.
+$items[0] = "first"
+$items[1] = "second"
+$idx = 1
+echo "$items[$idx]"                    # second
+$items["key"] = "keyed"                # string indices work too
+echo "$items[\"key\"]"                 # keyed
+
+echo "== arithmetic and operators"
+
+# None of these operators exist in the C core. .bshrc registers them all with
+# 'defoperator' before this script runs.
+$n = 3 * 4 + 2
+echo "3 * 4 + 2 = $n"                  # 14
+
+$grouped = (3 + 4) * 2
+echo "(3 + 4) * 2 = $grouped"          # 14
+
+# '+' picks addition or concatenation from the operand types.
+$sum = 20 + 22
+$joined = "a" + "b"
+echo "20 + 22 = $sum, \"a\" + \"b\" = $joined"
+
+# Increment and decrement exist in both forms.
+$count = 5
+$after_prefix = ++$count
+echo "++count yields $after_prefix, count is now $count"     # 6, 6
+$post = $count++
+echo "count++ yields $post, count is now $count"             # 6, 7
+
+# Ternary. Both branches are evaluated before the handler runs: '?' selects a
+# value, it does not skip work.
+$label = $count > 5 ? "big" : "small"
+echo "count is $label"                 # big
+
+# A statement that is only an expression runs for its side effect. At the
+# interactive prompt it also echoes its value; in a script it does not, and the
+# value is in $LAST_OP_RESULT either way.
+$count++
+echo "count is now $count, LAST_OP_RESULT is $LAST_OP_RESULT"
+
+echo "== control flow"
+
+if $sum == 42 {
+    echo "if/else works"
+} else {
+    echo "unreachable"
+}
+
+$i = 0
+$total = 0
+while $i < 5 {
+    $total = $total + $i
+    $i = $i + 1
+}
+echo "0..4 sums to $total"             # 10
+
+# Inline blocks; ';' separates statements.
+if "a" == "a" { $x = "1"; $y = "2" }
+echo "inline block set $x and $y"
+
+echo "== functions"
+
+# 'function' is an alias for 'defunc', registered by .bshrc.
+# Parameters and plain assignments are local to the call.
+function double (value result_var) {
+    $doubled = $value + $value
+    $($result_var) = "$doubled"
+}
+$out = ""
+double "21" out
+echo "double 21 -> $out"               # 42
+
+# The other convention: answer with 'return', read $LAST_RETURN_VALUE.
+function add (a b) {
+    prim iadd "$a" "$b" sum
+    return $sum
+}
+add 20 22
+echo "add 20 22 -> $LAST_RETURN_VALUE" # 42
+
+# Recursion works; each call gets its own scope.
+function fact (n) {
+    if $n <= 1 {
+        return 1
+    }
+    prim isub "$n" 1 less
+    fact "$less"
+    prim imul "$n" "$LAST_RETURN_VALUE" result
+    return $result
+}
+fact 6
+echo "6! = $LAST_RETURN_VALUE"         # 720
+
+echo "== defining new grammar"
+
+# A new operator, defined and used in the same script.
+function bsh_op_repeat (op_sym text times result_var) {
+    $acc = ""
+    $r = 0
+    while $r < $times {
+        $acc = "$acc$text"
+        $r = $r + 1
+    }
+    $($result_var) = "$acc"
+}
+defoperator "x*" TYPE BINARY_INFIX PRECEDENCE 45 ASSOC L HANDLER "bsh_op_repeat"
+$bar = "ab" x* 3
+echo "\"ab\" x* 3 -> $bar"             # ababab
+
+echo "== primitives"
+
+# 'prim' is what the core provides with no framework loaded at all.
+prim iadd 20 22 p_sum
+prim indexof "hello world" "world" p_at
+prim len "hello" p_len
+echo "iadd=$p_sum indexof=$p_at len=$p_len"
+
+echo "== the heap"
+
+# 'mem' hands out real addresses into the same buffer the bytecode path uses.
+mem alloc 64 buffer
+mem poke32 "$buffer" 12345
+mem peek32 "$buffer" value
+echo "poked and peeked $value"         # 12345
+mem free "$buffer"
+
+echo "== heap strings and lists"
+
+import list                            # pulls in mem.bsh and strlib.bsh
+
+str_make "Hello, World"
+$s = "$LAST_RETURN_VALUE"
+str_upper "$s"
+str_text "$s"
+echo "upper -> $LAST_RETURN_VALUE"     # HELLO, WORLD
+str_free "$s"
+
+list_new_int 4
+$xs = "$LAST_RETURN_VALUE"
+list_push "$xs" 10
+$xs = "$LAST_RETURN_VALUE"             # push may move the list - keep the result
+list_push "$xs" 32
+$xs = "$LAST_RETURN_VALUE"
+list_sum "$xs"
+echo "list sum -> $LAST_RETURN_VALUE"  # 42
+list_free "$xs"
+
+echo "== external commands"
+
+# Anything not a built-in or user function is resolved against PATH and run
+# with fork/execv. 'process' is the argv-preserving form with capture.
+process captured "echo" "one two" "three"
+echo "captured [$captured] status $LAST_COMMAND_STATUS"
+
+echo "== compilation"
+
+# Function bodies can be compiled to WebAssembly and run in-process. This one
+# qualifies for the kernel tier: integer locals, 'prim i*', a flag condition.
+defunc addup (n) {
+    $i = 0
+    $acc = 0
+    prim ilt "$i" "$n" go
+    while $go {
+        prim iadd "$acc" "$i" acc
+        prim iadd "$i" 1 i
+        prim ilt "$i" "$n" go
+    }
+    return $acc
+}
+bytecode info addup
+addup 1000
+echo "addup 1000 -> $LAST_RETURN_VALUE" # 499500
+
+echo "== done"

@@ -262,11 +262,71 @@ function case_unmodelled () {
     return "$order|$stamped"
 }
 
+# --- string literals that span lines --------------------------------------
+#
+# A logical line is joined before it is ever tokenised, so the compiler sees one
+# statement whether or not the value contained newlines. The embedded newline
+# has to survive assignment, interpolation, being passed to a function and being
+# returned, identically in both modes.
+
+function case_multiline_take (text) {
+    return "got:$text"
+}
+
+function case_multiline () {
+    $body = "first
+second"
+    $name = "world"
+    $interpolated = "hello $name
+and goodbye"
+    # Braces and semicolons inside the literal are data, not structure: if the
+    # statement splitter or the brace counter looked inside strings, the body
+    # would be cut in the wrong place and this would not even parse.
+    $tricky = "open { brace
+semi ; colon
+close } brace"
+    case_multiline_take "$body"
+    $passed = "$LAST_RETURN_VALUE"
+    prim len "$body" body_len
+    return "$body|$interpolated|$tricky|$passed|$body_len"
+}
+
+# --- bare expression statements -------------------------------------------
+#
+# A statement that is only an expression runs for its side effect and, outside
+# the interactive prompt, prints nothing. It must still publish LAST_OP_RESULT
+# and still mutate the variable, in both modes.
+
+function case_bare_expressions () {
+    $i = 5
+    $i++
+    $after_postfix = "$i"
+    $recorded = "$LAST_OP_RESULT"
+    ++$i
+    $after_prefix = "$i"
+    $i--
+    $after_decrement = "$i"
+    3 + 4
+    $arith = "$LAST_OP_RESULT"
+    return "$after_postfix|$recorded|$after_prefix|$after_decrement|$arith"
+}
+
+# --- the ternary ------------------------------------------------------------
+
+function case_ternary () {
+    $n = 7
+    $simple = $n > 5 ? "big" : "small"
+    $inverted = $n < 5 ? "big" : "small"
+    $empty_condition = "" ? "yes" : "no"
+    $nested = $n >= 90 ? "A" : $n >= 5 ? "pass" : "fail"
+    return "$simple|$inverted|$empty_condition|$nested"
+}
+
 # --- driver ---------------------------------------------------------------
 #
 # File-scope statements are never compiled, so changing modes here is safe.
 
-$CASES = "case_values case_operators case_conditions case_loops case_calls case_return case_scope case_arrays case_primitives case_raw_builtins case_external case_unmodelled"
+$CASES = "case_values case_operators case_conditions case_loops case_calls case_return case_scope case_arrays case_primitives case_raw_builtins case_external case_unmodelled case_multiline case_bare_expressions case_ternary"
 
 prim fieldcount "$CASES" case_count
 $case_index = 0
@@ -299,6 +359,18 @@ bytecode info case_conditions tier
 assert_eq "$tier" "general" "case_conditions is compiled, not interpreted"
 bytecode info case_unmodelled tier
 assert_eq "$tier" "general" "unmodelled statements still compile, through the raw import"
+bytecode info case_multiline tier
+assert_eq "$tier" "general" "a body containing a multi-line string still compiles"
+bytecode info case_bare_expressions tier
+assert_eq "$tier" "general" "a body containing bare expression statements still compiles"
+bytecode info case_ternary tier
+assert_eq "$tier" "general" "a body using the ternary still compiles"
+
+# Printed for the record: nothing above should have been handed back whole, so
+# this line is expected to read "fallbacks=0 refused=0". Every case is a
+# compiled module, with at most individual statements routed through the raw
+# import.
+bytecode status
 
 # --- redefinition invalidates the cached module --------------------------
 

@@ -1,0 +1,166 @@
+# The runtime operator table: every grammatical form registered by
+# framework/core_operators.bsh, plus registration of a new operator at runtime.
+#
+# The point of this suite is that none of these symbols exist in the C core.
+# They are all registered by a startup script through 'defoperator', so a break
+# in the registry looks like a break in the language.
+import tests.lib.assert
+
+assert_start "core: operators"
+
+# --- Arithmetic, precedence and associativity ----------------------------
+
+$n = 3 * 4 + 2
+assert_eq "$n" "14" "'*' binds tighter than '+'"
+
+$n = 2 + 3 * 4
+assert_eq "$n" "14" "precedence holds on either side"
+
+$n = 20 - 4 - 3
+assert_eq "$n" "13" "'-' is left associative"
+
+$n = (2 + 3) * 4
+assert_eq "$n" "20" "parentheses override precedence"
+
+$n = 17 % 5
+assert_eq "$n" "2" "modulo"
+
+$n = 20 / 4
+assert_eq "$n" "5" "division"
+
+# --- '+' chooses concatenation or addition from the operand types --------
+
+$sum = 20 + 22
+assert_eq "$sum" "42" "'+' adds two numbers"
+
+$joined = "a" + "b"
+assert_eq "$joined" "ab" "'+' concatenates when an operand is not numeric"
+
+$mixed = "id-" + 7
+assert_eq "$mixed" "id-7" "a non-numeric operand decides the whole expression"
+
+# --- Comparison ----------------------------------------------------------
+
+$r = 5 > 3
+assert_eq "$r" "1" "greater than"
+$r = 5 < 3
+assert_eq "$r" "0" "less than"
+$r = 5 >= 5
+assert_eq "$r" "1" "greater or equal"
+$r = 4 <= 5
+assert_eq "$r" "1" "less or equal"
+$r = 5 == 5
+assert_eq "$r" "1" "equals"
+$r = 5 != 5
+assert_eq "$r" "0" "not equals"
+
+# --- Logical -------------------------------------------------------------
+
+$r = "1" && "1"
+assert_eq "$r" "1" "and of two true values"
+$r = "1" && "0"
+assert_eq "$r" "0" "and with a false operand"
+$r = "0" || "1"
+assert_eq "$r" "1" "or recovers from a false left operand"
+$r = "0" || "0"
+assert_eq "$r" "0" "or of two false values"
+$r = !"0"
+assert_eq "$r" "1" "prefix '!' negates"
+$r = !"1"
+assert_eq "$r" "0" "prefix '!' on a true value"
+
+# '&&' binds looser than the comparisons it joins.
+$r = 3 < 5 && 5 < 7
+assert_eq "$r" "1" "comparisons group before '&&'"
+
+# --- Prefix and postfix ++ / -- --------------------------------------------
+#
+# Both forms are registered for the same symbol. They used to overwrite each
+# other in the registry, which silently left only the postfix form working.
+
+$a = 5
+$r = ++$a
+assert_eq "$r" "6" "prefix '++' yields the incremented value"
+assert_eq "$a" "6" "prefix '++' mutates the variable"
+
+$b = 5
+$r = $b++
+assert_eq "$r" "5" "postfix '++' yields the value before the increment"
+assert_eq "$b" "6" "postfix '++' mutates the variable"
+
+$c = 5
+$r = --$c
+assert_eq "$r" "4" "prefix '--' yields the decremented value"
+assert_eq "$c" "4" "prefix '--' mutates the variable"
+
+$d = 5
+$r = $d--
+assert_eq "$r" "5" "postfix '--' yields the value before the decrement"
+assert_eq "$d" "4" "postfix '--' mutates the variable"
+
+# --- Ternary ---------------------------------------------------------------
+#
+# Both branches arrive already evaluated; '?' selects a value, it does not skip
+# work. ':' is registered as a delimiter with no handler.
+
+$t = "1" ? "yes" : "no"
+assert_eq "$t" "yes" "ternary takes the true branch"
+
+$t = "0" ? "yes" : "no"
+assert_eq "$t" "no" "ternary takes the false branch"
+
+$t = 5 > 3 ? "bigger" : "smaller"
+assert_eq "$t" "bigger" "a comparison drives the ternary"
+
+$t = "" ? "yes" : "no"
+assert_eq "$t" "no" "an empty condition is false"
+
+# Right associativity lets ternaries nest in the false branch.
+$grade = 55
+$t = $grade >= 90 ? "A" : $grade >= 50 ? "pass" : "fail"
+assert_eq "$t" "pass" "nested ternary in the false branch"
+
+# --- Dot -------------------------------------------------------------------
+
+$d = 10 . 5
+assert_eq "$d" "10.5" "'.' builds a decimal"
+
+$d = "alpha" . "beta"
+assert_eq "$d" "alpha.beta" "'.' joins two words with a dot"
+
+# --- defoperator at runtime -------------------------------------------------
+#
+# The whole point of the registry: a script can add grammar to the language
+# after startup, and the new symbol is usable on the very next line.
+
+function bsh_op_power (op_sym base exponent result_var) {
+    $__pow_acc = 1
+    $__pow_i = 0
+    while $__pow_i < $exponent {
+        prim imul "$__pow_acc" "$base" __pow_acc
+        prim iadd "$__pow_i" 1 __pow_i
+    }
+    $($result_var) = "$__pow_acc"
+}
+
+defoperator "**" TYPE BINARY_INFIX PRECEDENCE 55 ASSOC R HANDLER "bsh_op_power"
+
+$p = 2 ** 8
+assert_eq "$p" "256" "an operator registered at runtime evaluates"
+
+$p = 2 * 3 ** 2
+assert_eq "$p" "18" "the new operator outranks '*' as registered"
+
+# Right associativity: 2 ** (3 ** 2) = 2 ** 9, not (2 ** 3) ** 2 = 64.
+$p = 2 ** 3 ** 2
+assert_eq "$p" "512" "the new operator is right associative as registered"
+
+# Redefining the same symbol and form replaces the handler.
+function bsh_op_power_stub (op_sym base exponent result_var) {
+    $($result_var) = "replaced"
+}
+defoperator "**" TYPE BINARY_INFIX PRECEDENCE 55 ASSOC R HANDLER "bsh_op_power_stub"
+$p = 2 ** 8
+assert_eq "$p" "replaced" "redefining a symbol and form replaces the handler"
+
+assert_summary

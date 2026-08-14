@@ -57,7 +57,10 @@ When these disagree, inspect the affected control path and run the narrowest saf
 - **Current/historical boundary:** Root C/BSH files own the implementation. Everything under [`gold/`](gold/) is historical and excluded from normal builds and parity expectations. Never copy a status claim, dependency, design decision, or behavior from an archived snapshot without verifying it against current C/BSH code.
 - **Startup order creates the language:** [`main`](bsh.c) calls `initialize_shell`, then executes `$HOME/.bshrc` when present or the repository [`.bshrc`](.bshrc) as a fallback. Most operators do not exist before startup scripts call `defoperator`; parser/tokenizer changes must be checked both before and after startup registration.
 - **Operator definition and handler signatures are coupled:** `handle_defoperator_statement`/`add_operator_definition` record symbol, grammatical type, precedence, associativity, and BSH handler. `invoke_bsh_operator_handler` requires exactly `operand_count + 2` parameters: operator symbol, operands, and result-holder variable name. Keep registrations in [`framework/core_operators.bsh`](framework/core_operators.bsh) aligned with handler definitions and downstream number/string functions.
-- **Duplicate operator symbols currently overwrite by symbol:** `add_operator_definition` matches only `op_str`, not operator type. Registering both prefix and postfix `++` or `--` redefines one entry rather than storing two forms. Do not assume the four registrations in `core_operators.bsh` coexist; fix or test the registry before relying on both forms.
+- **Operator definitions are keyed by symbol *and* grammatical form:** `add_operator_definition` matches `op_str` together with `op_type_prop`, so prefix and postfix `++`/`--` coexist as separate entries. Position-sensitive callers must therefore use `get_operator_definition_typed` (one form) or `get_operator_definition_after_operand` (infix, then postfix, then ternary opener); plain `get_operator_definition` returns the first registration for a symbol and is only correct where the form does not matter. `besh_unary_op_takes_variable_name` is the single place that says which unary operators receive a variable *name* to mutate — the expression parser special-cases them and the compiler refuses them, so both paths read the same predicate. A `TERNARY_SECONDARY` (or `OP_TYPE_NONE`) registration is allowed to name no handler, because the parser consumes it as a delimiter; `:` is registered that way so the tokenizer emits a token for it at all.
+- **Input is read as logical lines, not physical ones:** `besh_read_logical_line` joins physical lines for as long as a double-quoted string is open, so a literal can span lines and the newline is part of the value. Every reader must use it — `execute_script`, the `--bsh-stdin` adapter and the interactive loop all do — because a caller that uses raw `fgets` would cut a statement in half. Downstream code needs no change: `advanced_tokenize_line`, `besh_split_line_into_statements`, `besh_line_needs_statement_split` and `count_unquoted_brace_delta` already treat a quoted region as opaque. `while`-loop replay still works because `ftell` is taken before the logical line is read.
+- **A bare expression echoes only at the prompt:** `bsh_at_interactive_prompt` is true solely while a line typed interactively is executing. `execute_script` and `run_user_function_body` save, clear and restore it, so an imported module and a function body called from the prompt stay silent. There are four echo sites in `process_line` (standalone prefix, standalone postfix, standalone binary, general expression) and all four must be gated together; `LAST_OP_RESULT` is set regardless of mode.
+- **Quoted arguments must be unescaped before expansion:** a `TOKEN_STRING` argument keeps its quotes in `tok->text`. `expand_token_argument` is the one helper that handles both cases, and positional built-in arguments go through it — expanding `tokens[i].text` directly makes `libloaded "$alias" out` look up a library literally named `"demolib"`.
 - **Scopes are stack-owned:** `enter_scope`, `leave_scope`, `get_variable_scoped`, and `set_variable_scoped` define lexical lookup. Function calls create a scope and must clean it on return. New paths must not write around these functions or leak local variables into global scope.
 - **Array and object storage is name-mangled:** arrays use `<base>_ARRAYIDX_<expanded-index>`; object properties use underscore-separated names and `<base>_BSH_STRUCT_TYPE` metadata. Change the mangling only with assignment, expansion, property helpers, stringification, and round-trip checks updated together.
 - **The BSH object format is not general JSON:** `object:`/`json:` assignment currently enters the same handwritten parser, which accepts bracketed quoted key/value pairs and nested brackets. Do not claim full JSON support or silently feed untrusted general JSON into it.
@@ -157,10 +160,10 @@ Repository fallback startup script. It sets `PS1`, aliases `function` to `defunc
 
 Registers arithmetic, comparison, increment/decrement, ternary, and dot operators and defines their BSH handlers.
 
-- **Key functions and subparts:** `defoperator` registrations carry precedence/associativity; `bsh_op_add_or_concat` selects string or number behavior; arithmetic/comparison handlers delegate to `number.bsh`; increment handlers expect a variable name; ternary and dot handlers contain provisional semantics.
+- **Key functions and subparts:** `defoperator` registrations carry precedence/associativity; `bsh_op_add_or_concat` selects string or number behavior; arithmetic/comparison handlers delegate to `number.bsh`; increment handlers expect a variable name; `:` is registered as a handler-less `TERNARY_SECONDARY` delimiter so the tokenizer emits it; `bsh_op_ternary_handler` selects with `prim truthy`; `bsh_op_dot_handler` joins with a literal dot and only special-cases an empty left operand.
 - **Depends on:** [`framework/type.bsh`](framework/type.bsh), [`framework/number.bsh`](framework/number.bsh), and [`framework/string.bsh`](framework/string.bsh).
-- **Tests:** arithmetic and comparisons are exercised throughout the core and cDiesis suites; prefix/postfix collision still lacks a focused assertion.
-- **Common mistakes:** Handler arity must match the C dispatcher. Prefix and postfix registration of the same symbol currently collide in C. The `[cite: 124]` text is stray prose, not syntax or evidence.
+- **Tests:** [`tests/core_operators.bsh`](tests/core_operators.bsh) asserts every registered form — precedence, associativity, both `++`/`--` forms, the ternary including nesting, and `defoperator` at runtime.
+- **Common mistakes:** Handler arity must match the C dispatcher. Do not print from a handler: every use of the operator would emit that line. The `[cite: 124]` text is stray prose, not syntax or evidence.
 
 ### [`framework/mem.bsh`](framework/mem.bsh)
 
@@ -192,10 +195,11 @@ Dynamic lists over the same vector representation: one load per index, resizable
 
 Compiles C source held in a BSH variable into a shared library and loads it.
 
-- **Key function:** `def_c_lib` derives `/tmp/bsh_compile_cache/<alias>.c` and `.so`, writes source with `writefile`, invokes `cc`, records status variables, then calls `loadlib`.
+- **Key functions:** `def_c_lib` derives `/tmp/bsh_compile_cache/<alias>.c` and `.so`, writes source with `writefile`, invokes the compiler through the argv-preserving `process` primitive, records status variables, then calls `loadlib`. `_c_lib_set_status` builds the target name before assigning through `$(...)`.
+- **Sets, for alias X:** `X_COMPILE_STATUS`, `X_LOAD_STATUS`, `X_PATH`, `X_COMPILE_OUTPUT` (compiler diagnostics, captured on success and failure).
 - **Depends on:** an external C compiler, writable `/tmp`, and the native ABI in [`bsh.c`](bsh.c).
-- **Tests:** none.
-- **Common mistakes:** native compilation is opt-in and executes a trusted external compiler; a status variable is not a substitute for a focused `calllib` check.
+- **Tests:** [`tests/native_lib.bsh`](tests/native_lib.bsh), with the fixture [`tests/fixtures/native_demo.c`](tests/fixtures/native_demo.c).
+- **Common mistakes:** the compiler must be invoked through `process`, not as `$BSH_C_COMPILER ...` — a line beginning with a variable is parsed as an expression, never dispatched as a command. Status names must be built first and written through `$($built_name)`: `$($alias)_SUFFIX` reads as the value of the variable named by `$alias` followed by literal text. Native compilation is opt-in and runs a trusted external compiler; a status variable is not a substitute for a focused `calllib` check.
 
 ### [`framework/number.bsh`](framework/number.bsh)
 
@@ -275,10 +279,10 @@ The cDiesis language framework: a C#-shaped, statically typed, class-based langu
 
 A second, deliberately different loadable language (stack-based, untyped, no compiler) used as the control experiment for the framework mechanism and as the other end of cross-language calls.
 
-- **Key functions:** `rpn_on_load`/`rpn_on_unload`, `rpn_eval`, `rpn_call`, `rpn_define`, `rpn_exec_token`, `rpn_foreign_call`, stack helpers.
-- **Depends on:** [`framework/lang.bsh`](framework/lang.bsh) and [`framework/cdiesis/strutil.bsh`](framework/cdiesis/strutil.bsh) for field splitting and `cds_binary`.
-- **Tests:** [`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh) covers direct calls, callbacks, stack isolation, and independent unload.
-- **Common mistakes:** Its `@lang:symbol/N` form pops arguments in reverse order; do not assume left-to-right pushes.
+- **Key functions:** `rpn_on_load`/`rpn_on_unload`, `rpn_eval`, `rpn_call`, `rpn_define`, `rpn_exec_token`, `rpn_apply_binary`, `rpn_foreign_call`, stack helpers.
+- **Depends on:** [`framework/lang.bsh`](framework/lang.bsh) and [`framework/cdiesis/strutil.bsh`](framework/cdiesis/strutil.bsh) for field splitting. Arithmetic goes through `rpn_apply_binary`, which calls the `bsh_op_*` handlers in [`framework/core_operators.bsh`](framework/core_operators.bsh) directly — RPN must not depend on cDiesis being loaded, or it stops being a control experiment.
+- **Tests:** [`tests/rpn_standalone.bsh`](tests/rpn_standalone.bsh) runs it with no other language present; [`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh) covers direct calls, callbacks, stack isolation, and independent unload.
+- **Common mistakes:** Its `@lang:symbol/N` form pops arguments in reverse order; do not assume left-to-right pushes. `lang_eval` answers with the top of the stack, so a source string that never emits (`.`) or leaves a value returns empty. Do not reach for a `cds_*` helper outside `strutil` — that dependency is what made RPN unusable on its own.
 
 ### [`framework/bash.bsh`](framework/bash.bsh) and [`framework/bash/cdiesis.sh`](framework/bash/cdiesis.sh)
 
@@ -346,9 +350,18 @@ Canonical primary build wrapper. It compiles `bsh.c`, `besh_mem.c`, `besh_wasm.c
 
 Build and acceptance harness. It compiles the pinned Fayasm sources into ignored `.build-fayasm/` objects without project warning flags, performs a warnings-enabled build of the B[e]SH sources against them, creates an isolated `.test-home`, sets an explicit module path, bounds every `.bsh` suite with an alarm, and accepts only a zero exit with an explicit pass and no failure result; an empty filter match fails.
 
-- **Suites:** core variables/expansion, functions/scopes/recursion, control flow, the heap and `mem` primitives, the heap string and list libraries with their compilation tiers, the interpreted-versus-compiled differential, cDiesis lifecycle, compiler/runtime, standard library and shipped examples, cDiesis/RPN interop, the Bash language framework, Bash CLI routing, and Bash-to-cDiesis objects.
-- **Discovery:** top-level `tests/*.bsh` and `tests/*.sh` are suites. Bash fixtures belong below `tests/fixtures/` so the runner does not execute them as standalone suites.
+- **Suites (15):** core variables/expansion, functions/scopes/recursion, control flow, the runtime operator table, the heap and `mem` primitives, the heap string and list libraries with their compilation tiers, the interpreted-versus-compiled differential, native extensions and runtime C compilation, cDiesis lifecycle, compiler/runtime, standard library and shipped examples, cDiesis/RPN interop, standalone RPN, the Bash language framework, and Bash CLI routing plus Bash-to-cDiesis objects.
+- **Discovery:** top-level `tests/*.bsh` and `tests/*.sh` are suites. Fixtures — Bash scripts, C sources, any other input — belong below `tests/fixtures/` so the runner does not execute them as standalone suites.
 - **Common mistakes:** output before a timeout is buffered per suite; inspect the reported `/tmp/bsh_test_<name>.out` when a suite exits without a result line. Do not weaken silence or timeout into success.
+
+### [`bench.sh`](bench.sh) and [`bench/`](bench/)
+
+Benchmark harness. It builds its own `-O2` binary at ignored `.bench-bsh` rather than reusing the debug root `bsh`, runs each fixture under `BSH_COMPILE=off` and `BSH_COMPILE=auto`, and reports the best and median of N runs together with a net figure that subtracts a measured startup baseline.
+
+- **Fixtures:** [`startup`](bench/startup.bsh) (the baseline every other row is corrected against), [`calls`](bench/calls.bsh) (function-call overhead), [`kernel_loop`](bench/kernel_loop.bsh) (integer loop, kernel tier), [`strlib_scan`](bench/strlib_scan.bsh) (heap-string scanning), [`operators`](bench/operators.bsh) (BSH operator handlers), [`cdiesis`](bench/cdiesis.bsh) (a compiled cDiesis unit).
+- **Contract:** every fixture prints `BENCH-OK <name> <checksum>`. A missing line, a non-zero exit, a checksum that moves between runs, or a checksum that differs between the two modes is an error, not a fast run — so a timing pass doubles as a differential check.
+- **Results:** recorded in [`guides/bytecode.md`](guides/bytecode.md) and summarised in [`README.md`](README.md). The general tier measures ~0.63× the interpreter; the kernel tier wins only when the loop is inside the compiled function.
+- **Common mistakes:** do not quote kernel-tier numbers for framework code, and do not report a single run — the ratios only hold up across repeats. `.bench-bsh`, `.build-bench/` and `.bench-home/` are ignored artifacts.
 
 ### [`groupFramework.py`](groupFramework.py)
 
@@ -443,7 +456,7 @@ Design document for the language-framework layer: cDiesis's architecture, the 17
 The contract for the compiled path: modes and introspection commands, the kernel and general tiers and exactly what qualifies for each, the handle encoding, the full `besh.v1` import table, which built-ins are lowered and which are handed back to `process_line`, unwinding through the reserved abort word, the deoptimisation guard, cache invalidation, the heap and the `mem` built-in, how to write library code that stays on the kernel tier, and the measured timings.
 
 - **Authority:** current usage contract for `bytecode`, `mem`, `BSH_COMPILE`, `BSH_COMPILE_DEBUG` and `BSH_HEAP_BYTES`; verify with the three bytecode/heap suites.
-- **Common mistakes:** the general tier is currently at parity with the interpreter, not faster; do not quote the kernel-tier numbers for framework code.
+- **Common mistakes:** the general tier is measurably *slower* than the interpreter (~0.63x), not at parity; do not quote the kernel-tier numbers for framework code, and reproduce with [`bench.sh`](bench.sh) rather than citing a single run.
 
 ### [`guides/bash.md`](guides/bash.md)
 
@@ -498,12 +511,12 @@ MIT license for the repository. Preserve its notice in substantial copies.
 - **Constraints:** relative default path, no `~` expansion, imported code mutates the live process.
 - **Tests and gaps:** default startup depends on repository working directory.
 
-### Dynamic native extensions — Known gap
+### Dynamic native extensions — Experimental/scaffold
 
-- **Behavior:** C core can `dlopen` a library and call symbols through the fixed BSH ABI.
-- **Flow and owners:** `loadlib`/`calllib` handlers in [`bsh.c`](bsh.c); scaffolding in [`framework/c_compiler.bsh`](framework/c_compiler.bsh).
-- **Constraints:** native libraries are fully trusted; caller and callee must agree on buffers and ownership.
-- **Tests and gaps:** repository runtime compilation does not write or compile source; startup assumes a library that is never created.
+- **Behavior:** the C core can `dlopen` a library and call symbols through the fixed BSH ABI, and `def_c_lib` compiles C source held in a variable into such a library at runtime.
+- **Flow and owners:** `loadlib`/`calllib`/`libloaded` handlers in [`bsh.c`](bsh.c); [`framework/c_compiler.bsh`](framework/c_compiler.bsh) drives `writefile` → `process` → `loadlib`.
+- **Constraints:** native libraries are fully trusted; caller and callee must agree on buffers and ownership; the ABI is fixed and arbitrary C signatures are unsupported.
+- **Tests and gaps:** [`tests/native_lib.bsh`](tests/native_lib.bsh) covers inline and file-backed source, argument boundaries, status/output channels, and compile-failure reporting. Startup still does not build any native library and does not need to — `number.bsh` and `string.bsh` fall back to `prim`.
 
 ### Structured objects and name-mangled arrays — Experimental/scaffold
 
@@ -531,7 +544,7 @@ MIT license for the repository. Preserve its notice in substantial copies.
 - **Behavior:** a BSH function body is parsed once into IR, lowered to an in-memory WebAssembly module, and executed by the linked Fayasm runtime; the interpreter remains the reference and the fallback. Two tiers come out of one IR: a "kernel" tier with unboxed integer locals and no host calls, and a "general" tier where control flow is WebAssembly and values move through `besh.v1` host imports. Statements the compiler does not model are handed back to `process_line`, so every command and syntax form still works inside a compiled function.
 - **Flow and owners:** `run_user_function_body` → `besh_jit_run_function` → `unit_compile` → `besh_wasm_finish` → `wasm_module_init_from_memory` → `fa_Runtime_attachModule` → `fa_Runtime_executeJob` → `besh.v1` imports in [`besh_jit.c`](besh_jit.c).
 - **Constraints:** compiled code sees only opaque handles; the shared heap cannot move during execution; caches are invalidated wholesale by `defoperator`/`defkeyword` and per function by redefinition; a mode change from inside a running function is ignored.
-- **Tests and gaps:** [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh) compares both modes across values, operators, conditions, loops, calls, recursion, returns, scoping, indirection, arrays, primitives, raw built-ins, external commands and redefinition. Gaps: no direct call between compiled functions, no deterministic cache key, no disk cache, no source-line mapping for traps, and the general tier is at parity rather than faster.
+- **Tests and gaps:** [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh) compares both modes across values, operators, conditions, loops, calls, recursion, returns, scoping, indirection, arrays, primitives, raw built-ins, external commands and redefinition. Gaps: no direct call between compiled functions, no deterministic cache key, no disk cache, no source-line mapping for traps, and the general tier is slower than the interpreter rather than faster.
 
 ### Heap, pointers and vectors — Experimental, verified
 
@@ -550,11 +563,11 @@ MIT license for the repository. Preserve its notice in substantial copies.
 
 ### Pitfall: trusting startup success messages
 
-- **Symptom / wrong assumption:** `.bshrc` reports that `bshmath` compiled or loaded and agents infer arithmetic works.
-- **Cause and invariant:** `def_c_lib` simulates success without writing or compiling, then calls `loadlib` on a missing file. Only filesystem output, loader status, and a focused call prove success.
-- **Risk area:** [`.bshrc`](.bshrc), [`framework/c_compiler.bsh`](framework/c_compiler.bsh), `handle_loadlib_statement`.
-- **Safe pattern / regression check:** implement and verify source creation/compilation/loading as one path; then call a known ABI function and inspect `LAST_LIB_CALL_STATUS`/output.
-- **Status:** active known bug/scaffold.
+- **Symptom / wrong assumption:** a framework prints that it loaded, and agents infer the capability behind it works.
+- **Cause and invariant:** an echo at the bottom of a module proves the file parsed, nothing more. `def_c_lib` now reports real status in `<alias>_COMPILE_STATUS` / `<alias>_LOAD_STATUS`, but `.bshrc` deliberately builds no native library at all, and `is_string_lib_loaded` still always answers true.
+- **Risk area:** [`.bshrc`](.bshrc), [`framework/c_compiler.bsh`](framework/c_compiler.bsh), [`framework/string.bsh`](framework/string.bsh), `handle_loadlib_statement`.
+- **Safe pattern / regression check:** check `libloaded` and the recorded status variables, then call a known ABI function and inspect `LAST_LIB_CALL_STATUS`/output - which is what [`tests/native_lib.bsh`](tests/native_lib.bsh) does.
+- **Status:** `def_c_lib` verified; readiness probes in `string.bsh` still unreliable.
 
 ### Pitfall: unsequenced argument indexing
 
@@ -667,12 +680,13 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 
 - Compiler portability beyond the verified warnings-clean macOS toolchain remains untested, and the build now also compiles the pinned Fayasm sources.
 - The bytecode path duplicates the interpreter's condition and dispatch decisions in C. Only the differential suite keeps them in step.
-- The general tier is at parity with the interpreter on framework workloads; the measured cost is host-call frequency into BSH operator handlers. Only the integer kernel tier is faster.
+- The general tier is ~1.6x *slower* than the interpreter on framework workloads ([`bench.sh`](bench.sh)); the measured cost is host-call frequency into BSH operator handlers. Only the integer kernel tier is faster, and only when the loop sits inside the compiled function - a kernel function called in a hot loop loses to per-entry cost.
 - Cache invalidation is wholesale. There is no deterministic cache key, no disk cache, and no mapping from a Fayasm trap back to a BSH source line.
 - Heap blocks are never reclaimed automatically; `mem free` and `list_free_deep` are manual, and a pointer held across `besh_mem_shutdown` is not detected.
 - `besh.v1` is implemented but not frozen: there are no ABI conformance tests independent of the BSH compiler, and no compatibility promise.
-- Runtime native compilation is opt-in and not covered by the current suite; startup intentionally uses built-in primitives.
-- Prefix/postfix registrations for identical operator strings overwrite each other.
+- Runtime native compilation is opt-in; startup intentionally uses built-in primitives and builds no native library.
+- A logical line, multi-line string included, is still bounded by `INPUT_BUFFER_SIZE`; text larger than that must be read from a file. An unterminated literal at end of input is reported and the partial line is executed.
+- `$($name)_SUFFIX` means "the value of the variable named by `$name`, then the literal text `_SUFFIX`" — reads and writes agree, but the notation reliably misleads. Build the name first and assign through `$($built_name)`.
 - Native string and filesystem libraries are absent; number/string operations have a verified `prim` fallback, while the optional filesystem framework remains untested.
 - No CI, formatter/linter configuration, packaging, or release workflow exists.
 - The language layer cannot truly remove syntax: the C core has no `undefkeyword`, `undefoperator`, or function removal, so `lang_unload` is cooperative. Full requirement list: `CDS-REQ-0` … `CDS-REQ-8` in [`guides/cdiesis.md`](guides/cdiesis.md).
@@ -680,7 +694,7 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 
 ### Planned
 
-- Group related framework functions into single modules with direct `call` between them, derive a deterministic cache key from the IR, add disk caching, profile and reduce host-call frequency so the general tier beats the interpreter, and map traps back to source lines. Follow the phased gates in [`ROADMAP.md`](ROADMAP.md); Phases 0-3 are implemented, Phase 4 is partial and Phase 5 has not started.
+- Reduce host-call frequency and per-entry cost so the general tier stops losing to the interpreter - the benchmark harness says this comes first - then group related framework functions into single modules with direct `call` between them, derive a deterministic cache key from the IR, add disk caching, and map traps back to source lines. Follow the phased gates in [`ROADMAP.md`](ROADMAP.md); Phases 0-3 are implemented, Phase 4 is partial and Phase 5 has not started.
 
 ## Task Start and Handoff Checklist
 

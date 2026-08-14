@@ -17,7 +17,7 @@ runs them on the in-process [Fayasm](thirds/fayasm/) runtime, and a **language
 framework layer** in which a C#-shaped language (cDiesis), a stack language (RPN)
 and real Bash are loadable, callable and unloadable at runtime.
 
-**Status:** experimental throughout. The 12 suites in [`tests/`](tests/) pass on
+**Status:** experimental throughout. The 15 suites in [`tests/`](tests/) pass on
 the verified macOS toolchain; everything outside them should be read as scaffold.
 Per-subsystem status is in [Current status](#current-status).
 
@@ -26,6 +26,7 @@ Per-subsystem status is in [Current status](#current-status).
 ## Contents
 
 - [Quick start](#quick-start)
+- [A tour in one file](#a-tour-in-one-file)
 - [Command line](#command-line)
 - [The BSH language](#the-bsh-language)
 - [Built-in commands](#built-in-commands)
@@ -36,7 +37,7 @@ Per-subsystem status is in [Current status](#current-status).
 - [Language frameworks](#language-frameworks)
 - [Bash](#bash)
 - [Native extensions](#native-extensions)
-- [Testing](#testing)
+- [Testing and benchmarking](#testing-and-benchmarking)
 - [Repository layout](#repository-layout)
 - [Current status](#current-status)
 - [Research goals](#research-goals)
@@ -90,6 +91,23 @@ HOME=$PWD/.test-home BSH_MODULE_PATH=$PWD/framework ./bsh script.bsh
 
 ---
 
+## A tour in one file
+
+[`examples/tour.bsh`](examples/tour.bsh) executes every construct in the base
+language — values, indirection, arrays, the whole operator table, control flow,
+both function conventions, a new operator defined mid-script, primitives, the
+heap, heap strings and lists, external commands, and a compiled function
+reporting its tier. It runs:
+
+```bash
+./bsh examples/tour.bsh
+```
+
+Nothing in it is aspirational. If a construct is not in that file, assume it is
+not supported — the rest of this section explains what is there and why.
+
+---
+
 ## Command line
 
 ```bash
@@ -126,6 +144,23 @@ $braced = "${name}ly"              # -> "worldly"
 $missing = "$never_set"            # unset expands to nothing
 ```
 
+A string literal may span lines. The newline is part of the value, and braces or
+semicolons inside the literal are data rather than structure — physical lines are
+joined into one logical line before anything tokenizes them:
+
+```bsh
+$block = "first line
+second line"
+
+$sql = "SELECT *
+  FROM t
+ WHERE id = $id;"
+```
+
+At the prompt, an open string switches to a `"> ` continuation prompt. The line
+buffer still bounds the whole statement, so genuinely large text belongs in a
+file read with `readfile`.
+
 `$(expr)` is **indirection**: the inner text is expanded first, and the result is
 used as a variable *name*.
 
@@ -156,30 +191,67 @@ Arithmetic, comparison and logical operators are registered by
 [`framework/core_operators.bsh`](framework/core_operators.bsh) with explicit
 precedence and associativity, and implemented by named BSH handler functions:
 
-| Symbol | Form | Prec. | Handler |
-| --- | --- | --- | --- |
-| `.` | infix | 70 | `bsh_op_dot_handler` |
-| `++` `--` | prefix / postfix | 60 | `bsh_op_prefix_increment`, … |
-| `!` | prefix | 60 | `bsh_op_logical_not` |
-| `*` `/` `%` | infix | 50 | `bsh_op_multiply`, … |
-| `+` `-` | infix | 40 | `bsh_op_add_or_concat`, `bsh_op_subtract` |
-| `==` `!=` `<` `>` `<=` `>=` | infix | 30 | `bsh_op_equals`, … |
-| `&&` | infix | 20 | `bsh_op_logical_and` |
-| `\|\|` | infix | 15 | `bsh_op_logical_or` |
-| `?` | ternary | 5 | `bsh_op_ternary_handler` |
+| Symbol | Form | Prec. | Assoc. | Handler |
+| --- | --- | --- | --- | --- |
+| `.` | infix | 70 | L | `bsh_op_dot_handler` |
+| `++` `--` | prefix | 60 | N | `bsh_op_prefix_increment`, `bsh_op_prefix_decrement` |
+| `++` `--` | postfix | 60 | N | `bsh_op_postfix_increment`, `bsh_op_postfix_decrement` |
+| `!` | prefix | 60 | N | `bsh_op_logical_not` |
+| `*` `/` `%` | infix | 50 | L | `bsh_op_multiply`, `bsh_op_divide`, `bsh_op_modulo` |
+| `+` `-` | infix | 40 | L | `bsh_op_add_or_concat`, `bsh_op_subtract` |
+| `==` `!=` `<` `>` `<=` `>=` | infix | 30 | L | `bsh_op_equals`, … |
+| `&&` | infix | 20 | L | `bsh_op_logical_and` |
+| `\|\|` | infix | 15 | L | `bsh_op_logical_or` |
+| `?` | ternary | 5 | R | `bsh_op_ternary_handler` |
+| `:` | ternary delimiter | 5 | R | *(none — consumed by the parser)* |
 
 ```bsh
-$n = 3 * 4 + 2                     # 14
-$t = "a" + "b"                     # "ab" — '+' picks concat for non-numbers
+$n = 3 * 4 + 2                     # 14 — '*' binds tighter
+$n = (3 + 4) * 2                   # 14 — parentheses override
+$n = 20 - 4 - 3                    # 13 — '-' is left associative
 ```
 
 `+` is a *smart* handler: `bsh_op_add_or_concat` consults `type.bsh` and chooses
 numeric addition or string concatenation. That decision is script policy, not C.
 
-> Prefix and postfix registrations of the same symbol currently collide —
-> `add_operator_definition` matches on the symbol alone, so the four `++`/`--`
-> entries overwrite each other and startup prints a redefinition warning. Do not
-> rely on both forms.
+```bsh
+$sum = 20 + 22                     # 42
+$joined = "a" + "b"                # "ab"
+$mixed = "id-" + 7                 # "id-7" — one non-numeric operand decides
+```
+
+Increment and decrement exist in both forms, and mutate the named variable:
+
+```bsh
+$count = 5
+$a = ++$count                      # $a == 6, $count == 6
+$b = $count++                      # $b == 6, $count == 7
+```
+
+The ternary selects between two values. Both arrive **already evaluated** —
+BSH has no way to hand a handler an unevaluated operand — so `?` chooses a
+result, it does not skip work:
+
+```bsh
+$label = $count > 5 ? "big" : "small"
+$grade = 55
+$band = $grade >= 90 ? "A" : $grade >= 50 ? "pass" : "fail"   # "pass"
+```
+
+`.` joins its operands with a literal dot, which covers both jobs it was
+registered for — building a decimal and building a dotted name:
+
+```bsh
+$d = 10 . 5                        # "10.5"
+$path = "a" . "b"                  # "a.b"
+```
+
+Logical `&&` and `||` are eager for the same reason as the ternary, and bind
+looser than the comparisons they join, so `$a == $b || $c == $d` groups the way
+it reads.
+
+Every one of these symbols is registered by a script at startup and is verified
+by [`tests/core_operators.bsh`](tests/core_operators.bsh).
 
 ### Control flow
 
@@ -234,6 +306,65 @@ echo "$LAST_RETURN_VALUE"          # 42
 
 `return` is required for kernel-tier compilation; an indirect write forces the
 general tier. See [Writing for the kernel tier](#writing-for-the-kernel-tier).
+
+Recursion works, and each call gets its own scope:
+
+```bsh
+function fact (n) {
+    if $n <= 1 { return 1 }
+    prim isub "$n" 1 less
+    fact "$less"
+    prim imul "$n" "$LAST_RETURN_VALUE" result
+    return $result
+}
+fact 6
+echo "$LAST_RETURN_VALUE"          # 720
+```
+
+### Putting it together
+
+A whole small program in the base language — no framework beyond what `.bshrc`
+loads, no external process:
+
+```bsh
+function classify (value result_var) {
+    get_type "$value" kind
+    if $kind == "STRING" {
+        $($result_var) = "text"
+    } else {
+        $($result_var) = $value < 0 ? "negative" : "number"
+    }
+}
+
+$inputs[0] = "42"
+$inputs[1] = "-7"
+$inputs[2] = "hello"
+
+$i = 0
+while $i < 3 {
+    classify "$inputs[$i]" kind
+    echo "$inputs[$i] is $kind"
+    $i = $i + 1
+}
+```
+
+```
+42 is number
+-7 is negative
+hello is text
+```
+
+A line that is a bare expression runs for its side effect and stores its value in
+`$LAST_OP_RESULT`. It is **echoed only at the interactive prompt** — a script,
+an imported module, and a function body reached from the prompt are all code, not
+a question the user just asked, so `$i++` on its own line there increments `$i`
+and prints nothing.
+
+```bsh
+$i = 5
+$i++                               # in a script: silent, $i is 6
+echo "$LAST_OP_RESULT"             # 5 — the value the expression produced
+```
 
 ### Structured objects
 
@@ -415,6 +546,25 @@ through host imports.
 A function is refused outright, and interpreted, only when a statement would open
 a block the compiler does not own.
 
+### Every construct reaches the compiler
+
+There is no syntax that puts a function back on the interpreter wholesale. A
+statement the compiler has no IR node for is emitted as a `raw` import that hands
+that one line to `process_line`; everything around it stays compiled, and control
+flow around it is still real WebAssembly. So ordinary BSH — multi-line strings,
+bare expression statements, `++`/`--`, the ternary, `import`, `writefile`,
+external commands, an operator registered five lines earlier — all compiles, and
+new syntax added through `defoperator` is compiled the same day it is defined.
+
+[`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh) asserts this
+for fifteen construct groups: each case runs under `bytecode mode off` and again
+under `bytecode mode auto`, the two results must match exactly, and the tier is
+asserted so agreement cannot be satisfied by nothing having compiled. That run
+reports `fallbacks=0 refused=0`.
+
+What is *not* uniform is the payoff. Reaching the compiler is universal; being
+faster for it is not — see [Measured](#measured).
+
 ### Writing for the kernel tier
 
 ```bsh
@@ -446,16 +596,39 @@ every kernel function in the string and list libraries.
 
 ### Measured
 
-| Workload | Interpreter | Bytecode |
-| --- | --- | --- |
-| 200k-iteration integer loop (`prim i*`, kernel) | 1.38 s | 0.69 s |
-| 4k × (`str_find_from` + `str_hash`) over 70 bytes | 10.33 s | 4.11 s |
-| `tests/cdiesis_stdlib.bsh` (general tier) | 24.19 s | 24.48 s |
+[`bench.sh`](bench.sh) builds an optimised binary of its own and runs each
+fixture in [`bench/`](bench/) under both modes, reporting the best of N runs net
+of startup. It compares the checksum each fixture prints across modes, so a
+timing run is also a differential check.
 
-The general tier is currently **at parity, not faster**: cDiesis framework code
-spends its time inside BSH operator handlers reached through the `binop` import,
-which the compiler calls exactly as often as the interpreter does. Do not quote
-the kernel numbers for framework code.
+```bash
+./bench.sh
+```
+
+macOS, `cc -O2`, best of 7, net of the 0.025 s startup baseline:
+
+| Fixture | Interpreter | Bytecode | |
+| --- | --- | --- | --- |
+| `kernel_loop` — 200k-iteration integer loop | 0.541 s | 0.240 s | **2.25× faster** |
+| `strlib_scan` — 1k × (`str_find_from` + `str_hash`) over 68 bytes | 1.860 s | 0.634 s | **2.93× faster** |
+| `calls` — 60k calls of a one-statement kernel function | 0.289 s | 0.462 s | 0.63× *slower* |
+| `operators` — 4k iterations of `+`, `<`, `>` through BSH handlers | 0.580 s | 0.915 s | 0.63× *slower* |
+| `cdiesis` — 150 virtual-dispatch calls in a cDiesis unit | 1.211 s | 1.865 s | 0.63× *slower* |
+
+Two things to take from that, neither of them flattering.
+
+**The general tier is slower than the interpreter — not at parity.** It costs a
+repeatable ~1.6× on operator-heavy code. Operands still live in shell variables
+and are reached through host imports, so a compiled body pays the interpreter's
+dispatch cost *plus* the boundary crossing for each value. `auto` is a loss on
+anything that is not integer work against the heap.
+
+**Reaching the kernel tier is not enough on its own — the loop has to be inside
+the compiled function.** `calls` invokes a function that *does* compile to a
+kernel, 60k times, and loses: entering the compiled path once per call costs more
+than the single `prim iadd` in the body saves. `strlib_scan` calls kernels just
+as often and wins 2.93×, because each call scans 68 bytes before returning. The
+win comes from work done per entry, not from the tier.
 
 The full contract — handle encoding, the complete `besh.v1` import table, which
 built-ins are lowered and which are handed back, unwinding through the reserved
@@ -644,6 +817,53 @@ lang_eval "cdiesis" SRC result
 lang_unload "cdiesis" done
 ```
 
+Calling a specific method, with arguments, goes through the shared argument
+vector rather than positional BSH parameters:
+
+```bsh
+lang_arg_reset
+lang_arg_push "B[e]SH"
+lang_call "cdiesis" "Hello.Greet" answer
+echo "$answer"                     # Hello, B[e]SH!
+```
+
+Inheritance and virtual dispatch behave as the syntax suggests. An instance
+method needs a receiver, so the call that crosses the BSH boundary is a static
+one that constructs the object:
+
+```csharp
+class Shape {
+    public int Size;
+    public Shape(int size) { this.Size = size; }
+    public virtual int Area() { return this.Size * this.Size; }
+}
+class Box : Shape {
+    public Box(int size) { this.Size = size; }
+    public override int Area() { return this.Size * this.Size * 6; }
+}
+class Demo {
+    public static int BoxArea(int size) {
+        Shape item = new Box(size);
+        return item.Area();          // dispatches to Box, not Shape
+    }
+}
+```
+
+```bsh
+cds_compile "shapes" SHAPE_SRC compiled
+lang_arg_reset
+lang_arg_push "3"
+lang_call "cdiesis" "Demo.BoxArea" area
+echo "$area"                       # 54, not 9
+```
+
+To hold a live object across calls instead, use the Bash bridge below — it keeps
+`obj#<id>` handles alive in one long-running BSH process.
+
+`cds_dump_ops <Class> <Method>` prints the primitive lowering of any method —
+the seventeen opcodes are the whole runtime, so this is the honest answer to
+"what did that construct actually cost".
+
 Public surface: `cds_compile`, `cds_run`, `cds_call`, `cds_dump_ops`. Object
 references are the string handle `obj#<id>`; instance state is
 `CDS_H_<id>_F_<field>`; compiled ops are `CDS_M_<Class>_<Method>_C<i>`; literals
@@ -662,11 +882,32 @@ Design, the full opcode table and its planned WebAssembly lowering:
 
 [`framework/rpn.bsh`](framework/rpn.bsh) is a second, deliberately unlike language
 — stack-based, untyped, no compiler — used as the control experiment for the
-framework mechanism and as the other end of cross-language calls. Its
-`@lang:symbol/N` form pops arguments in reverse order.
+framework mechanism and as the other end of cross-language calls.
+
+```bsh
+import rpn
+lang_load "rpn" ok
+
+$SRC = "3 4 + 2 * ."               # '.' emits the top of the stack
+lang_eval "rpn" SRC result         # 14
+
+$DEF = ": square dup * ; 7 square ."
+lang_eval "rpn" DEF squared        # 49
+```
+
+Arithmetic is not implemented in RPN either: `rpn_apply_binary` calls the same
+`bsh_op_*` handlers as everything else, so `+` means one thing across all three
+languages.
+
+Its `@lang:symbol/N` form calls out to another loaded language, popping `N`
+arguments in reverse order — so an RPN word can be implemented in cDiesis, and a
+cDiesis method can be implemented in RPN. Two languages with nothing structurally
+in common, sharing one argument vector.
 
 [`examples/cdiesis/mixed_languages.bsh`](examples/cdiesis/mixed_languages.bsh)
-runs BSH ↔ cDiesis ↔ RPN with a mid-run unload.
+runs BSH ↔ cDiesis ↔ RPN with a mid-run unload;
+[`tests/cdiesis_interop.bsh`](tests/cdiesis_interop.bsh) asserts the calls,
+callbacks, stack isolation and independent unload.
 
 ---
 
@@ -741,33 +982,60 @@ ABI — this is not a general FFI, and arbitrary C signatures are unsupported:
 int func_name(int argc, char *argv[], char *output_buffer, int buffer_size);
 ```
 
+`argv` holds what the script passed to `calllib`, the return value becomes
+`$LAST_LIB_CALL_STATUS`, and whatever the function writes into the buffer becomes
+`$LAST_LIB_CALL_OUTPUT`:
+
+```c
+int demo_twice(int argc, char *argv[], char *out, int n) {
+    long v = (argc > 0) ? strtol(argv[0], NULL, 10) : 0;
+    snprintf(out, (size_t)n, "%ld", v * 2);
+    return 0;
+}
+```
+
 ```bsh
 loadlib "/path/to/lib.so" mylib
-calllib mylib my_function "arg0" "arg1"
-echo "$LAST_LIB_CALL_STATUS $LAST_LIB_CALL_OUTPUT"
+calllib mylib demo_twice "21"
+echo "$LAST_LIB_CALL_STATUS $LAST_LIB_CALL_OUTPUT"   # 0 42
+libloaded mylib present                              # "1" / "0"
 ```
 
 Loaded functions must honour `buffer_size`, null-terminate their output, and not
 retain the caller's pointers past the call. Native libraries are fully trusted;
 there is no sandbox.
 
-[`framework/c_compiler.bsh`](framework/c_compiler.bsh) provides `def_c_lib
-<alias> <c_code_var> [cflags_var] [ldflags_var]`, which writes C source held in a
-BSH variable to `/tmp/bsh_compile_cache/`, invokes `cc -shared -fPIC`, and calls
-`loadlib`.
+### Compiling C at runtime
 
-> **Known gap.** `def_c_lib` does not currently work end to end: its compiler
-> invocation is written as `$BSH_C_COMPILER "-shared" …`, and a command name that
-> comes from a variable is parsed as an expression rather than dispatched as an
-> external command; its `$($lib_alias)_COMPILE_STATUS = …` status writes fail to
-> parse for the same class of reason. The source file is written, nothing is
-> compiled, and the status variables stay empty. No native library is created by
-> startup, and none is required — `number.bsh` and `string.bsh` fall back to
-> `prim`.
+[`framework/c_compiler.bsh`](framework/c_compiler.bsh) provides `def_c_lib
+<alias> <c_code_var> [cflags_var] [ldflags_var]`. It writes C source held in a
+BSH variable to `/tmp/bsh_compile_cache/`, invokes `cc -shared -fPIC` through the
+argv-preserving `process` primitive, and calls `loadlib`:
+
+```bsh
+import c_compiler
+
+readfile "mylib.c" SRC
+def_c_lib mylib SRC
+
+echo "$mylib_COMPILE_STATUS $mylib_LOAD_STATUS"      # success success
+calllib mylib demo_twice "21"
+echo "$LAST_LIB_CALL_OUTPUT"                         # 42
+```
+
+For alias `X` it sets `$X_COMPILE_STATUS`, `$X_LOAD_STATUS`, `$X_PATH` and
+`$X_COMPILE_OUTPUT` (the compiler's diagnostics, on success or failure). BSH is
+line-oriented, so C written inline is one string with `\n` escapes — for anything
+longer, keep the C in a file and `readfile` it, as above.
+
+Startup deliberately does **not** call this: a plain shell session must not
+depend on a C compiler being installed, and `number.bsh` and `string.bsh` fall
+back to `prim`. [`tests/native_lib.bsh`](tests/native_lib.bsh) covers the whole
+path, including compile failure reporting.
 
 ---
 
-## Testing
+## Testing and benchmarking
 
 ```bash
 ./test.sh
@@ -788,6 +1056,8 @@ no failure. An empty filter match fails.
 | `core_variables` | Assignment, interpolation, `${}`, indirection, arrays and their mangling |
 | `core_functions` | Parameters, scopes, the result-variable convention, `return`, recursion, loops in stored bodies |
 | `core_control` | `if`/`else`, nesting, inline blocks, `;`, `while` |
+| `core_operators` | Every registered operator form, precedence, associativity, and `defoperator` at runtime |
+| `native_lib` | Runtime C compilation, `loadlib`/`calllib`/`libloaded`, argument boundaries, failure reporting |
 | `mem_heap` | The heap, blocks, vectors, every `mem` subcommand |
 | `strlib_list` | Heap strings and lists — **and the compilation tier each function reaches** |
 | `bytecode_differential` | Interpreted vs compiled agreement across values, operators, conditions, loops, calls, recursion, returns, scoping, indirection, arrays, primitives, raw built-ins, external commands, redefinition |
@@ -795,15 +1065,33 @@ no failure. An empty filter match fails.
 | `cdiesis_runtime` | Compilation, objects, virtual dispatch, control flow, boundary arguments |
 | `cdiesis_stdlib` | The `.cds` standard library plus `hello`/`shapes`/`inventory` |
 | `cdiesis_interop` | cDiesis ↔ RPN calls, callbacks, stack isolation, independent unload |
+| `rpn_standalone` | RPN loaded with no other language present — arithmetic, stack words, definitions, unload |
 | `bash_framework` | Bash lifecycle, eval, call, script status |
 | `bash_cdiesis` | Bash CLI syntax plus persistent cDiesis objects and fields |
 
-Last verified run: **12 suites, 12 passed, 0 failed** (macOS, `gcc`/Apple clang).
+Last verified run: **15 suites, 15 passed, 0 failed** (macOS, `gcc`/Apple clang).
 
 Examples under [`examples/`](examples/) are demonstrations, not assertions —
 comments saying "Expected" do not establish support. The exceptions are
-`hello.cds`, `shapes.cds`, `inventory.cds` and `counter.cds`, which the suites
-actually execute.
+[`tour.bsh`](examples/tour.bsh), whose every line executes, and `hello.cds`,
+`shapes.cds`, `inventory.cds` and `counter.cds`, which the suites run.
+
+### Benchmarks
+
+```bash
+./bench.sh                 # every fixture, both modes, best of 3
+./bench.sh --repeat 7      # less noise
+./bench.sh --mode off      # interpreter only
+./bench.sh kernel          # only fixtures matching "kernel"
+```
+
+`bench.sh` builds its own `-O2` binary rather than reusing the debug `./bsh`,
+uses an isolated `HOME` like `test.sh`, subtracts a measured startup baseline,
+and refuses to report a fixture that prints no result or whose checksum moves
+between runs or between modes. Fixtures live in [`bench/`](bench/) and cover
+startup, function-call overhead, a kernel-tier loop, heap-string scanning,
+operator-heavy framework code, and a cDiesis unit. Numbers are in
+[The bytecode path](#measured).
 
 ---
 
@@ -822,7 +1110,9 @@ framework/               BSH modules — operators, number/string/type, mem/strl
                          lang, cdiesis, rpn, bash
 guides/                  bytecode.md, cdiesis.md, bash.md, addToVSCode.md
 tests/  test.sh          the acceptance suites and their harness
-examples/                demonstrations (.bsh, .cds, .sh)
+bench/  bench.sh         the benchmark fixtures and their harness
+examples/                demonstrations (.bsh, .cds, .sh); tour.bsh is the
+                         one that runs top to bottom
 thirds/fayasm/           pinned WebAssembly runtime (git submodule)
 gold/                    archived snapshots, including a Rust port experiment —
                          historical reference only, not built or validated
@@ -844,6 +1134,8 @@ debug inspection aid; it is not a build step.
 
 - The line-oriented C core: dispatch, variables, expansion, indirection, arrays,
   functions, lexical scopes, `if`/`else`/`while`, module imports.
+- The full operator table registered at runtime: arithmetic, comparison, logical,
+  prefix *and* postfix `++`/`--`, the ternary, and `defoperator` mid-script.
 - The bytecode path on Fayasm, both tiers, with the differential suite as the
   guard. Roadmap Phases 0–3.
 - The heap, `mem`, and the `strlib`/`list` libraries with tier assertions.
@@ -851,26 +1143,30 @@ debug inspection aid; it is not a build step.
   `.cds` standard library, cDiesis ↔ RPN interop, Bash as a language, and the
   persistent Bash → cDiesis object bridge.
 - Bash CLI delegation for `.sh`, `-c`, `-s`, `--bash`.
+- Native extensions: `loadlib`/`calllib`/`libloaded` and runtime C compilation
+  through `def_c_lib`.
+- A repeatable benchmark harness with a startup baseline and cross-mode checksum
+  comparison.
 
 ### Experimental / scaffold
 
 - The entire shell is research-stage. Several peripheral built-ins are untested.
 - Structured objects: flattening runs, but dot-property expansion and `object:`
   re-stringification do not behave as documented in the source comments.
-- Runtime C compilation (`def_c_lib`) — see the gap noted above.
 - [`framework/cwd.bsh`](framework/cwd.bsh) targets a library that does not exist.
 - `is_string_lib_loaded` always reports true, so it is not a real readiness check.
 
 ### Known gaps
 
-- Prefix and postfix registrations of the same operator symbol overwrite each
-  other; `add_operator_definition` matches on the symbol alone.
 - The bytecode path duplicates the interpreter's condition and dispatch decisions
   in C. Only the differential suite keeps them in step.
-- The general tier is at parity with the interpreter, not faster. Only the integer
-  kernel tier is faster.
+- **The general tier is ~1.6× slower than the interpreter**, not at parity. Only
+  the integer kernel tier is faster, and only when the loop is inside the
+  compiled function — see [Measured](#measured).
 - Cache invalidation is wholesale — no deterministic cache key, no disk cache, no
   mapping from a Fayasm trap back to a BSH source line.
+- A logical line, including a multi-line string, is still bounded by the line
+  buffer. Text larger than that belongs in a file read with `readfile`.
 - No direct `call` between compiled functions in one module.
 - Heap blocks are never reclaimed automatically, and a pointer held across
   `besh_mem_shutdown` is not detected.
@@ -887,11 +1183,12 @@ debug inspection aid; it is not a build step.
 
 ### Planned
 
-Group related framework functions into single modules with direct `call` between
-them, derive a deterministic cache key from the IR, add disk caching, reduce
-host-call frequency so the general tier beats the interpreter, and map traps back
-to source lines. Phase gates are in [`ROADMAP.md`](ROADMAP.md); Phase 4 is partial
-and Phase 5 has not started.
+Cut host-call frequency so the general tier stops costing 1.6×, group related
+framework functions into single modules with direct `call` between them, derive a
+deterministic cache key from the IR, add disk caching, and map traps back to
+source lines. The benchmark harness now says which of those to do first: the
+general tier's per-value boundary crossing, not module packaging. Phase gates are
+in [`ROADMAP.md`](ROADMAP.md); Phase 4 is partial and Phase 5 has not started.
 
 Nothing here is sandboxed. Imported `.bsh`, external commands, loaded libraries,
 Bash subprocesses and the FIFO bridge all execute with the user's privileges, and
