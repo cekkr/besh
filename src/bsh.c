@@ -127,6 +127,7 @@
 
 #include "bsh.h"
 #include "besh_jit.h"
+#include "besh_hu.h"
 
 // === Interpreter-private core =============================================
 // bsh.c is the monolithic core: everything below is used only by this file.
@@ -739,6 +740,7 @@ void free_keyword_alias_list() {
 
 void cleanup_shell() {
     besh_jit_shutdown();
+    besh_hu_shutdown();
     free_all_variables();
     free_function_list();
     free_operator_list();
@@ -2255,6 +2257,7 @@ void process_line(char *line_raw, FILE *input_source, int current_line_no, Execu
         else if (strcmp(command_name, "process") == 0) { handle_process_statement(tokens, num_tokens); }
         else if (strcmp(command_name, "mem") == 0) { handle_mem_statement(tokens, num_tokens); }
         else if (strcmp(command_name, "bytecode") == 0) { handle_bytecode_statement(tokens, num_tokens); }
+        else if (strcmp(command_name, "hu") == 0) { handle_hu_statement(tokens, num_tokens); }
         // Add other built-ins here
         else {
             // Resolve the command against the user-function registry. Without
@@ -2734,6 +2737,8 @@ void initialize_shell() {
     // The heap and the bytecode path come up before any script runs, so that
     // `mem` and compiled functions are available to .bshrc itself.
     besh_jit_init();
+    // Same reason: a startup script may describe a language with `hu`.
+    besh_hu_init();
 
     // Initialize core structural operators if they are not dynamically defined
     initialize_operators_core_structural(); // Call the new initializer

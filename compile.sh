@@ -20,7 +20,7 @@ if [ ! -f "$FAYASM_SRC/fa_runtime.c" ]; then
 fi
 
 gcc -fno-common -g -I"$SRC_DIR" -I"$FAYASM_SRC" \
-    "$SRC_DIR/bsh.c" "$SRC_DIR/besh_mem.c" "$SRC_DIR/besh_wasm.c" "$SRC_DIR/besh_jit.c" \
+    "$SRC_DIR/bsh.c" "$SRC_DIR/besh_mem.c" "$SRC_DIR/besh_wasm.c" "$SRC_DIR/besh_jit.c" "$SRC_DIR/besh_hu.c" \
     "$FAYASM_SRC"/*.c \
     -o "$REPO_DIR/bsh"
 

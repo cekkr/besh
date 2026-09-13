@@ -17,7 +17,7 @@ runs them on the in-process [Fayasm](thirds/fayasm/) runtime, and a **language
 framework layer** in which a C#-shaped language (cDiesis), a stack language (RPN)
 and real Bash are loadable, callable and unloadable at runtime.
 
-**Status:** experimental throughout. The 15 suites in [`tests/`](tests/) pass on
+**Status:** experimental throughout. The 16 suites in [`tests/`](tests/) pass on
 the verified macOS toolchain; everything outside them should be read as scaffold.
 Per-subsystem status is in [Current status](#current-status).
 
@@ -33,6 +33,7 @@ Per-subsystem status is in [Current status](#current-status).
 - [Runtime extensibility](#runtime-extensibility)
 - [The bytecode path](#the-bytecode-path)
 - [The heap, pointers and the string library](#the-heap-pointers-and-the-string-library)
+- [The .hu language](#the-hu-language)
 - [Framework modules](#framework-modules)
 - [Language frameworks](#language-frameworks)
 - [Bash](#bash)
@@ -402,6 +403,7 @@ Everything the C core dispatches directly, in `process_line`:
 | `prim` | `prim <op> <args...> [result_var]` | The primitive operation set, below |
 | `mem` | `mem <sub> <args...> [result_var]` | The heap; sets `LAST_MEM_STATUS` |
 | `bytecode` | `bytecode <mode\|status\|info\|dump\|invalidate>` | Compiler control and introspection |
+| `hu` | `hu <sub> <args...> [result_var]` | `.hu` grammars and recognition; sets `LAST_HU_STATUS` |
 | `loadlib` | `loadlib <path.so> <alias>` | `dlopen` |
 | `calllib` | `calllib <alias> <fn> [args…]` | Fixed ABI; sets `LAST_LIB_CALL_STATUS` / `LAST_LIB_CALL_OUTPUT` |
 | `libloaded` | `libloaded <alias> <result_var>` | `"1"` / `"0"` |
@@ -715,6 +717,75 @@ A string or list is an integer address; `0` is null. Kernel functions answer
 through `return`, so callers read `$LAST_RETURN_VALUE`. Blocks are never reclaimed
 automatically — `mem free`, `list_free` and `list_free_deep` are manual, and
 `list_free_deep` assumes every element is an owned heap block.
+
+---
+
+## The .hu language
+
+Every other extensibility mechanism here changes BSH. `.hu` does the opposite: it
+describes *some other* language, and leaves BSH alone.
+
+A `.hu` script reads as English and executes exactly. `$field` names a
+nonterminal, `#constant` names a character class, `'single quotes'` are literals
+of the described language and `"double quotes"` are names. Bare UPPERCASE words
+are terms; lowercase words are prose and are thrown away — which is what buys the
+English.
+
+```
+$root IS "CPrototype"
+$root CAN HAVE ONE OR MORE $prototype
+
+A $prototype ENDS WITH ';'
+A $prototype HAS:
+1. The $returnType, that IS a #word
+2. The $name of the function, that IS an #identifier
+3. The $parameters that ARE INSIDE '(', ')'
+
+$parameters CAN HAVE ONE OR MORE $parameter SEPARATED BY ','
+```
+
+A numbered list is a sequence; a bulleted list is a set of alternatives. That
+difference is the point of having both.
+
+```bsh
+hu load "examples/hu/c_prototype.hu" g
+hu parse "$g" "int add(int a, int b);" tree
+hu node "$tree" "prototype/name" n
+hu text "$n" name                   # $name == "add"
+hu xml "$tree" doc                  # the tree as an XML document
+```
+
+Descriptions can be built and changed while the shell runs — a whole grammar with
+`hu define`, one sentence with `hu rule`, or a separate extension file with
+`hu extend`, which may also override a constant the base grammar defined.
+
+A field can name a BSH function, and `hu walk` calls it once per matching node.
+That is what makes `.hu` a way to build a language rather than only read one.
+
+```bsh
+function show_parameter (handle text) { echo "parameter: $text" }
+hu on "$g" parameter show_parameter
+hu walk "$tree"
+```
+
+The recogniser is region-based: a field owns a span of text and its rules
+subdivide it. Alternatives backtrack, extents commit, `IF HAS` prunes rather than
+decides, and nothing is ever dropped in silence — text left unexplained is a
+failure, with a diagnostic saying what was expected:
+
+```
+line 1, col 8: field $prototype expected $parameters
+```
+
+`.hu` is not a language framework. cDiesis, RPN and Bash are those: BSH code that
+reads source and executes it. `.hu` is a description, and the two compose — a
+framework could use a `.hu` grammar as its front end instead of a hand-written
+parser.
+
+What it does not do: resolve ambiguity that needs meaning, express right-assoc or
+unary operators, or handle a language that quotes with something other than `'`
+and `"`. The limits are listed, with reasons, in
+[`guides/hu.md`](guides/hu.md).
 
 ---
 
@@ -1061,6 +1132,7 @@ no failure. An empty filter match fails.
 | `mem_heap` | The heap, blocks, vectors, every `mem` subcommand |
 | `strlib_list` | Heap strings and lists — **and the compilation tier each function reaches** |
 | `bytecode_differential` | Interpreted vs compiled agreement across values, operators, conditions, loops, calls, recursion, returns, scoping, indirection, arrays, primitives, raw built-ins, external commands, redefinition |
+| `hu_language` | `.hu` descriptions, the region recogniser, runtime extension, the BSH bridge, handle safety |
 | `cdiesis_lifecycle` | `lang_*` register/load/unload/reload |
 | `cdiesis_runtime` | Compilation, objects, virtual dispatch, control flow, boundary arguments |
 | `cdiesis_stdlib` | The `.cds` standard library plus `hello`/`shapes`/`inventory` |
@@ -1069,7 +1141,7 @@ no failure. An empty filter match fails.
 | `bash_framework` | Bash lifecycle, eval, call, script status |
 | `bash_cdiesis` | Bash CLI syntax plus persistent cDiesis objects and fields |
 
-Last verified run: **15 suites, 15 passed, 0 failed** (macOS, `gcc`/Apple clang).
+Last verified run: **16 suites, 16 passed, 0 failed** (macOS, `gcc`/Apple clang).
 
 Examples under [`examples/`](examples/) are demonstrations, not assertions —
 comments saying "Expected" do not establish support. The exceptions are
@@ -1106,10 +1178,11 @@ src/                     all C sources
   besh_wasm.{h,c}        optional: a WebAssembly binary writer; knows nothing about BSH
   besh_jit.{h,c}         optional: IR, tier decision, emission, the `besh.v1` imports,
                          the Fayasm runtime pool, `bytecode`
+  besh_hu.{h,c}          optional: the `.hu` language-description language; `hu`
 .bshrc                   startup: this file defines the language
 framework/               BSH modules — operators, number/string/type, mem/strlib/list,
                          lang, cdiesis, rpn, bash
-guides/                  bytecode.md, cdiesis.md, bash.md, addToVSCode.md
+guides/                  bytecode.md, cdiesis.md, hu.md, bash.md, addToVSCode.md
 tests/  test.sh          the acceptance suites and their harness
 bench/  bench.sh         the benchmark fixtures and their harness
 examples/                demonstrations (.bsh, .cds, .sh); tour.bsh is the
@@ -1140,6 +1213,9 @@ debug inspection aid; it is not a build step.
 - The bytecode path on Fayasm, both tiers, with the differential suite as the
   guard. Roadmap Phases 0–3.
 - The heap, `mem`, and the `strlib`/`list` libraries with tier assertions.
+- The `.hu` language-description language: the sentence parser, the region
+  recogniser, runtime extension, the BSH callback bridge, and generation-checked
+  handles.
 - The language-framework layer: lifecycle, cDiesis compiler and runtime, the
   `.cds` standard library, cDiesis ↔ RPN interop, Bash as a language, and the
   persistent Bash → cDiesis object bridge.
@@ -1156,6 +1232,10 @@ debug inspection aid; it is not a build step.
   re-stringification do not behave as documented in the source comments.
 - [`framework/cwd.bsh`](framework/cwd.bsh) targets a library that does not exist.
 - `is_string_lib_loaded` always reports true, so it is not a real readiness check.
+- `.hu` recognises delimiter-structured languages. Its quote characters are fixed
+  at `'` and `"`, a field that must be followed by a sibling has to say where it
+  ends, and fields are global to a grammar. These are design limits rather than
+  defects; [`guides/hu.md`](guides/hu.md) lists them all.
 
 ### Known gaps
 

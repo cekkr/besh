@@ -1030,7 +1030,7 @@ static bool is_interpreter_builtin(const char* word) {
     static const char* const kBuiltins[] = {
         "defkeyword", "defoperator", "if", "else", "while", "defunc",
         "loadlib", "calllib", "import", "update_cwd", "eval", "exit",
-        "libloaded", "writefile", "readfile", "process", "bytecode",
+        "libloaded", "writefile", "readfile", "process", "bytecode", "hu",
         NULL
     };
     for (int i = 0; kBuiltins[i]; ++i) {

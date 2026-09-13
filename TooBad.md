@@ -44,3 +44,29 @@
   was written against the wrong reading and silently failed to record any status
   for as long as it existed. Building the name first and assigning through
   `$($built_name)` is the working idiom.
+
+- The `.hu` recogniser has no load-time validation. A field that is followed by a
+  sibling has to say where it ends, and `STARTS WITH` alone does not; a field
+  reused with two conflicting `IS` rules silently keeps the first. Both are
+  knowable from the grammar the moment it is loaded, and both currently surface
+  much later as a parse failure pointing at the input rather than at the
+  description. The fix is a validation pass in `besh_hu.c` that classifies every
+  field as anchored or not, computes each field's leading literal, and rejects an
+  ill-formed ordered sequence by naming the two `.hu` lines involved.
+
+- `.hu` hardcodes the quote characters of the language it is describing.
+  `hu_scan_step` and `hu_find_close` in `src/besh_hu.c` treat `'` and `"` as
+  opaque quoting, which is what makes separators and terminators skip over string
+  literals. A described language that quotes with anything else gets its commas
+  found inside its strings, with no way to say so in the description. The real fix
+  is a delimiter table derived from the grammar itself - the `INSIDE` pairs plus
+  the delimiters of any constant that declares them - so the scanners stop
+  assuming and start reading.
+
+- The "Karnaugh map" half of the original `.hu` design is not implemented. The
+  source document proposes compiling a description into a network of switches, so
+  recognition becomes a compressed logic circuit rather than a walk over rules.
+  What exists is the direct interpreter and the expectation tracking that would
+  have come with those switches - `hu error` says which field was entered and what
+  it wanted. The document itself says the interpreter comes first; the optimizer
+  is unbuilt, not deferred-and-designed.

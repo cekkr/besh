@@ -1,0 +1,28 @@
+/// bsh_statement.hu - The shape of a BSH statement, as the C core dispatches it.
+///
+/// Two things this description shows that c_prototype.hu does not: a bulleted
+/// list, whose items are alternatives rather than an ordered sequence, and a
+/// constant the script defines for itself.
+
+$root IS "BshStatement"
+$root CAN HAVE ONE OR MORE $statement
+
+/// A constant the script defines for itself. Nothing built in covers it, and
+/// naming it here means the rule below reads as what it is rather than as a
+/// bare character.
+#assign IS '='
+
+A $statement ENDS WITH #newLine
+A $statement CAN BE:
+- An $assignment IF HAS '='
+- A $call
+
+An $assignment HAS:
+1. The $target that ENDS WITH #assign
+2. The $value
+
+A $call HAS:
+1. The $command, that IS a #word
+2. The $arguments
+
+$arguments CAN HAVE ONE OR MORE $argument SEPARATED BY #space

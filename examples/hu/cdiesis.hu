@@ -1,0 +1,33 @@
+/// cdiesis.hu - A subset of cDiesis declaration syntax, described rather than coded.
+///
+/// cDiesis is this repository's own C#-shaped language. Its lexer and parser are
+/// written by hand in BSH, under framework/cdiesis/. This file describes the
+/// same shape as a .hu grammar instead, which is the point of the exercise: the
+/// description is data, and it is a great deal shorter than the parser.
+///
+/// It covers declarations only. Statement bodies are left as opaque text,
+/// because a body is where the interesting ambiguity lives and .hu does not
+/// claim to resolve it.
+///
+/// Two things here are deliberate and worth copying. Each keyword gets its own
+/// field - $namespaceWord, $usingWord - because a field is global to the
+/// grammar, so one $keyword field could not be 'namespace' in one place and
+/// 'using' in another. And each keyword IS an exact literal rather than
+/// STARTS WITH one, because a field needs to say where it ends to be followed
+/// by a sibling.
+
+$root IS "CDiesis"
+$root CAN HAVE ONE OR MORE $declaration
+
+A $declaration ENDS WITH ';'
+A $declaration CAN BE:
+- A $namespace IF HAS 'namespace'
+- A $using IF HAS 'using'
+
+A $namespace HAS:
+1. The $namespaceWord, that IS 'namespace'
+2. The $namespaceName, that IS a #word
+
+A $using HAS:
+1. The $usingWord, that IS 'using'
+2. The $usingName, that IS a #word

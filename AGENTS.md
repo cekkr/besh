@@ -1,13 +1,13 @@
 # B[e]SH — AI Agent Reference
 
-This is the fast-access operational reference for the Basic [extensible] Shell (B[e]SH), an early research shell for experimenting with a small C execution core and language behavior assembled at runtime from BSH scripts. All C sources live in [`src/`](src/): the monolithic core is [`src/bsh.c`](src/bsh.c), and the `besh_*` files beside it hold optional features only — the bytecode path in [`src/besh_mem.c`](src/besh_mem.c), [`src/besh_wasm.c`](src/besh_wasm.c) and [`src/besh_jit.c`](src/besh_jit.c). The project is those, together with [`.bshrc`](.bshrc) and [`framework/`](framework/). The pinned [`thirds/fayasm/`](thirds/fayasm/) WebAssembly runtime is compiled into the executable. It is not intended to replace a production Unix shell. **[`gold/bsh-rs/`](gold/bsh-rs/) is an archived experimental Rust port, not part of the project implementation; ignore it during normal discovery, changes, builds, and validation.**
+This is the fast-access operational reference for the Basic [extensible] Shell (B[e]SH), an early research shell for experimenting with a small C execution core and language behavior assembled at runtime from BSH scripts. All C sources live in [`src/`](src/): the monolithic core is [`src/bsh.c`](src/bsh.c), and the `besh_*` files beside it hold optional features only — the bytecode path in [`src/besh_mem.c`](src/besh_mem.c), [`src/besh_wasm.c`](src/besh_wasm.c) and [`src/besh_jit.c`](src/besh_jit.c), and the `.hu` language-description layer in [`src/besh_hu.c`](src/besh_hu.c). The project is those, together with [`.bshrc`](.bshrc) and [`framework/`](framework/). The pinned [`thirds/fayasm/`](thirds/fayasm/) WebAssembly runtime is compiled into the executable. It is not intended to replace a production Unix shell. **[`gold/bsh-rs/`](gold/bsh-rs/) is an archived experimental Rust port, not part of the project implementation; ignore it during normal discovery, changes, builds, and validation.**
 
 ## Read This First
 
 Use this source-of-truth order when facts conflict:
 
 1. [`LICENSE`](LICENSE) — legal terms for all repository content.
-2. Executable behavior and interfaces in [`src/bsh.c`](src/bsh.c), [`src/bsh.h`](src/bsh.h), [`src/besh_mem.c`](src/besh_mem.c), [`src/besh_wasm.c`](src/besh_wasm.c), [`src/besh_jit.c`](src/besh_jit.c), [`.bshrc`](.bshrc), and [`framework/`](framework/), plus a successful [`test.sh`](test.sh) run or focused execution check.
+2. Executable behavior and interfaces in [`src/bsh.c`](src/bsh.c), [`src/bsh.h`](src/bsh.h), [`src/besh_mem.c`](src/besh_mem.c), [`src/besh_wasm.c`](src/besh_wasm.c), [`src/besh_jit.c`](src/besh_jit.c), [`src/besh_hu.c`](src/besh_hu.c), [`.bshrc`](.bshrc), and [`framework/`](framework/), plus a successful [`test.sh`](test.sh) run or focused execution check.
 3. [`compile.sh`](compile.sh) and other root build/tool configuration — exact declared workflows for the project implementation.
 4. [`README.md`](README.md) — project intent, vocabulary, and research goals; implementation claims in it must be checked against current source.
 5. [`ROADMAP.md`](ROADMAP.md) — planned B[e]SH work and the Fayasm integration sequence; roadmap entries do not prove implementation.
@@ -116,10 +116,10 @@ Owns the primary shell executable: data structures, tokenizer, runtime operator 
 
 ### [`src/bsh.h`](src/bsh.h)
 
-The core's interface to the optional modules, and nothing more: the constants, tokenizer/operator/function types and the handful of `extern` globals and functions that [`src/besh_mem.c`](src/besh_mem.c), [`src/besh_wasm.c`](src/besh_wasm.c) and [`src/besh_jit.c`](src/besh_jit.c) actually reach. Everything the core uses only for itself — scopes, blocks, path lists, dynamic libraries, the expression-parser context, the `handle_*` prototypes — is declared inside [`src/bsh.c`](src/bsh.c), not here.
+The core's interface to the optional modules, and nothing more: the constants, tokenizer/operator/function types and the handful of `extern` globals and functions that [`src/besh_mem.c`](src/besh_mem.c), [`src/besh_wasm.c`](src/besh_wasm.c), [`src/besh_jit.c`](src/besh_jit.c) and [`src/besh_hu.c`](src/besh_hu.c) actually reach. Everything the core uses only for itself — scopes, blocks, path lists, dynamic libraries, the expression-parser context, the `handle_*` prototypes — is declared inside [`src/bsh.c`](src/bsh.c), not here.
 
 - **Ownership:** [`src/bsh.c`](src/bsh.c) defines every global declared `extern` here; the header defines none.
-- **Direction:** dependencies point one way. An optional module includes `bsh.h`; the core includes no `besh_*.h` except [`src/besh_jit.h`](src/besh_jit.h), for the bytecode hooks it calls.
+- **Direction:** dependencies point one way. An optional module includes `bsh.h`; the core includes no `besh_*.h` except [`src/besh_jit.h`](src/besh_jit.h) and [`src/besh_hu.h`](src/besh_hu.h), for the hooks it calls.
 - **Common mistakes:** the header is a budget, not a dumping ground — before adding a declaration, check that an optional module needs it, otherwise it belongs in `src/bsh.c`. `INPUT_BUFFER_SIZE` is defined here and `BESH_ARG_SIZE` in [`src/besh_mem.h`](src/besh_mem.h) is derived from it, so the `mem` argument vector cannot drift from the shell's own buffers — change one and you have changed both.
 
 ### [`src/besh_mem.h`](src/besh_mem.h) and [`src/besh_mem.c`](src/besh_mem.c)
@@ -147,6 +147,16 @@ Optional feature. The compiled path: IR, statement and expression compilation, t
 - **Contracts:** full specification in [`guides/bytecode.md`](guides/bytecode.md) — handle encoding, import table, the reserved abort word, the kernel guard, tier rules, invalidation.
 - **Tests:** [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh) and the tier assertions in [`tests/strlib_list.bsh`](tests/strlib_list.bsh).
 - **Common mistakes:** every unit keeps its own Fayasm runtime pool so re-entrant and recursive calls never share a job; a module currently executing must not be freed, which is why invalidation is refused during execution. `BSH_COMPILE_DEBUG=1` explains why a function did not reach the tier you expected.
+
+### [`src/besh_hu.h`](src/besh_hu.h) and [`src/besh_hu.c`](src/besh_hu.c)
+
+Optional feature. The `.hu` language-description language: a lexer for its sentences, the sentence parser that turns them into rules, the region recogniser that matches text against a grammar, generation-checked tree handles, and the `hu` built-in. A `.hu` script describes *some other* language; it never changes BSH's own syntax, registers no keyword and no operator.
+
+- **Key functions:** `besh_hu_init`/`besh_hu_shutdown`, `hu_lex`, `hu_match_term`, `hu_apply_clause`/`hu_apply_sentence`/`hu_parse_source`, `hu_plan`, `hu_match`/`hu_match_inner`/`hu_child_extent`, `hu_const_match`, `hu_literal_at`/`hu_find_top`/`hu_find_close`/`hu_split`, `hu_handle_parse`, `besh_hu_command`, `besh_hu_produces_value`, `handle_hu_statement`.
+- **Contracts:** full specification in [`guides/hu.md`](guides/hu.md) — the term and alias tables, quote-style meaning, list semantics, the recogniser's rules, handles, and the design limits. Four of those contracts are load-bearing and easy to break: alternatives backtrack while extents commit; `IF HAS` prunes but never decides; nothing is dropped in silence (an ordered sequence must consume its region and a leaf must match all of its own); a failure keeps the *deepest* expectation, which is what makes `hu error` useful.
+- **Argument handling:** `define` and `rule` take their description argument verbatim — a quoted literal there is unescaped but **not** variable-expanded, because `$field` in a grammar means a field. The `raw_arg` column of `g_subs` is the single place that says so, and the subcommand is therefore expanded before its own arguments.
+- **Tests:** [`tests/hu_language.bsh`](tests/hu_language.bsh).
+- **Common mistakes:** Do not describe `.hu` as a language framework — [`framework/lang.bsh`](framework/lang.bsh) clients execute source, `.hu` describes it. Fields are global to a grammar, so one field cannot carry two conflicting `IS` rules; `hu_plan` takes the first. A field that must be followed by a sibling needs an extent rule (`IS`, `INSIDE`, `ENDS WITH`); `STARTS WITH` alone gives none, and today that surfaces as a parse failure rather than a load error. Trees are freed by hand — `hu free` — and a handle held past it is refused by generation, not by luck.
 
 ### [`.bshrc`](.bshrc)
 
@@ -308,6 +318,12 @@ Demonstration units and drivers for the language-framework work: [`hello.cds`](e
 - **Execution:** both `bash examples/bash/cdiesis_objects.sh` and `./bsh examples/bash/cdiesis_objects.sh` use genuine Bash syntax.
 - **Common mistakes:** call `cdiesis_close` (normally from an `EXIT` trap); handles belong to one bridge session and cannot be reused after it closes.
 
+### [`examples/hu/`](examples/hu/)
+
+Descriptions and a driver for the `.hu` feature: [`c_prototype.hu`](examples/hu/c_prototype.hu) (the worked example — a C function prototype, the form [`framework/c_compiler.bsh`](framework/c_compiler.bsh) emits), [`bsh_statement.hu`](examples/hu/bsh_statement.hu) (bulleted alternatives, `IF HAS` guards, a script-defined constant), [`cdiesis.hu`](examples/hu/cdiesis.hu) (cDiesis declarations described rather than coded), [`cdiesis_generics.hu`](examples/hu/cdiesis_generics.hu) (an extension script that adds a construct and overrides a constant), and [`run_hu.bsh`](examples/hu/run_hu.bsh) (the driver: load, recognise, render, navigate, call BSH per node, fail usefully, extend at runtime).
+
+- **Common mistakes:** the grammars describe real syntax from this repository on purpose; do not replace them with toy examples. `cdiesis.hu` gives each keyword its own field and uses `IS 'literal'` rather than `STARTS WITH` — both are deliberate, and the file says why.
+
 ### [`examples/basicExample.bsh`](examples/basicExample.bsh)
 
 Demonstrates script-defined loops, mutation helpers, a conceptual C-style loop, and direct `while`.
@@ -459,6 +475,13 @@ The contract for the compiled path: modes and introspection commands, the kernel
 - **Authority:** current usage contract for `bytecode`, `mem`, `BSH_COMPILE`, `BSH_COMPILE_DEBUG` and `BSH_HEAP_BYTES`; verify with the three bytecode/heap suites.
 - **Common mistakes:** the general tier is measurably *slower* than the interpreter (~0.63x), not at parity; do not quote the kernel-tier numbers for framework code, and reproduce with [`bench.sh`](bench.sh) rather than citing a single run.
 
+### [`guides/hu.md`](guides/hu.md)
+
+The `.hu` contract: what a description is, the lexical rules, the term and alias tables (with every invented term marked as invented), the constants, what the region recogniser does, the whole `hu` built-in surface, the handle format, and the design limits with their reasons.
+
+- **Called by / depends on:** describes [`src/besh_hu.c`](src/besh_hu.c); backed by [`tests/hu_language.bsh`](tests/hu_language.bsh).
+- **Common mistakes:** the **Limits** section is design, not a defect list; do not "fix" an entry there without changing the recogniser and the guide together.
+
 ### [`guides/bash.md`](guides/bash.md)
 
 Documents the boundary between native BSH and real Bash execution, direct CLI routing, the Bash language-framework API, captured-process limits, and the stateful Bash-to-cDiesis object bridge.
@@ -554,6 +577,13 @@ MIT license for the repository. Preserve its notice in substantial copies.
 - **Constraints:** address 0 is null and the first heap word is the compiled path's abort flag; the heap grows on demand but never while compiled code runs; every accessor is bounds checked.
 - **Tests and gaps:** [`tests/mem_heap.bsh`](tests/mem_heap.bsh) and [`tests/strlib_list.bsh`](tests/strlib_list.bsh). Gaps: no defragmentation, no ownership tracking — a leaked block is leaked until exit — and `mem` has no guard against a pointer from a previous `besh_mem_shutdown`.
 
+### Language description with `.hu` — Experimental, verified
+
+- A `.hu` script describes the syntax of another language and the recogniser matches text against it, producing a tree. It never changes BSH's own syntax; a grammar is data the shell reads, not syntax the shell gains.
+- Implemented and covered: the sentence parser (terms, aliases, prose discard, ordered vs bulleted lists, clause attachment), the region recogniser with backtracking alternatives, runtime extension by file or single sentence, constant override in an extension, the BSH callback bridge, and generation-checked handles.
+- Not implemented: the source document's "Karnaugh map" optimizer, and any load-time validation of a grammar. See [`TooBad.md`](TooBad.md).
+- Contract: [`guides/hu.md`](guides/hu.md). Tests: [`tests/hu_language.bsh`](tests/hu_language.bsh).
+
 ### Pitfall: assuming a compiled function is a faster interpreted function
 
 - **Symptom / wrong assumption:** a change to `handle_if_statement_advanced`, `handle_while_statement_advanced`, `prim_dispatch` or the built-in dispatch chain is made in [`src/bsh.c`](src/bsh.c) alone, and the suite still passes because the affected function happened to fall back.
@@ -590,9 +620,10 @@ MIT license for the repository. Preserve its notice in substantial copies.
 
 - Executable entry points `./bsh` and `./bsh <script.bsh>` → `main` in [`src/bsh.c`](src/bsh.c); `./bsh <script.sh>`, `./bsh -c`, `./bsh -s`, and `./bsh --bash ...` → `delegate_to_bash`.
 - Assignment `$name = expression` and `$array[index] = value` → `process_line` / `handle_assignment_advanced`.
-- Built-ins `echo`, `defkeyword`, `defoperator`, `if`, `else`, `while`, `defunc`, `loadlib`, `calllib`, `import`, `update_cwd`, `eval`, `prim`, `libloaded`, `writefile`, `readfile`, `process`, `exit`, `mem`, and `bytecode` → dispatch table expressed by the conditional chain in `process_line`.
+- Built-ins `echo`, `defkeyword`, `defoperator`, `if`, `else`, `while`, `defunc`, `loadlib`, `calllib`, `import`, `update_cwd`, `eval`, `prim`, `libloaded`, `writefile`, `readfile`, `process`, `exit`, `mem`, `bytecode`, and `hu` → dispatch table expressed by the conditional chain in `process_line`.
 - Heap, pointers, vectors and heap strings → `mem` / `besh_mem_command` in [`src/besh_mem.c`](src/besh_mem.c).
 - Compilation mode, introspection and cache control → `bytecode` / `handle_bytecode_statement` in [`src/besh_jit.c`](src/besh_jit.c); contract in [`guides/bytecode.md`](guides/bytecode.md).
+- `.hu` grammars, recognition, tree navigation and the field→BSH-function bridge → `hu` / `handle_hu_statement` in [`src/besh_hu.c`](src/besh_hu.c); contract in [`guides/hu.md`](guides/hu.md).
 - Compiled execution of a function body → `besh_jit_run_function`, called from `run_user_function_body` in [`src/bsh.c`](src/bsh.c).
 - Heap string and list libraries → [`framework/strlib.bsh`](framework/strlib.bsh) and [`framework/list.bsh`](framework/list.bsh) over [`framework/mem.bsh`](framework/mem.bsh).
 - Alias `function` → `defkeyword defunc function` in [`.bshrc`](.bshrc).
@@ -640,6 +671,7 @@ Debugging: [`.vscode/launch.json`](.vscode/launch.json) provides a generic GDB l
 - Basic strings and array indexing → [`tests/core_variables.bsh`](tests/core_variables.bsh) plus the cDiesis stdlib suite; splitting-specific behavior remains demonstration-only.
 - Heap, pointers, vectors and heap strings → [`tests/mem_heap.bsh`](tests/mem_heap.bsh).
 - Heap string and list libraries, and the compilation tier each reaches → [`tests/strlib_list.bsh`](tests/strlib_list.bsh).
+- `.hu` descriptions, the region recogniser, runtime extension, the BSH bridge and handle safety → [`tests/hu_language.bsh`](tests/hu_language.bsh).
 - Interpreted-versus-compiled agreement across every supported construct → [`tests/bytecode_differential.bsh`](tests/bytecode_differential.bsh). Fayasm's own harness is not run by [`test.sh`](test.sh).
 - Object flatten/stringify round trips → no focused fixture or test.
 - Module path resolution is exercised by suite imports; external command capture, dynamic loading failures, extreme nesting limits, and global cleanup still lack focused tests.
@@ -669,12 +701,14 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 - Repository source, research documentation, historical snapshots, framework modules, and examples are present under the ownership described above.
 - The C source contains implementations for the documented core dispatch and extensibility mechanisms; this is a source-presence claim, not a working-release claim.
 - Fayasm is compiled into the executable and executes compiled BSH function bodies. The heap/pointer model, the `mem` and `bytecode` built-ins, and the heap string and list libraries are implemented and covered by focused suites.
+- The `.hu` language-description language and its `hu` built-in are implemented and covered by [`tests/hu_language.bsh`](tests/hu_language.bsh).
 
 ### Experimental / Scaffold
 
 - The entire primary shell is research-stage.
 - Script-defined operators, framework math/string/type support, runtime C compilation, structured objects, arrays, loop/function behavior, and optional filesystem extensions require focused validation.
 - The language-framework layer ([`framework/lang.bsh`](framework/lang.bsh), cDiesis, RPN, and Bash) is an experimental implementation with focused lifecycle, runtime, stdlib/example, interop, Bash subprocess, and Bash/cDiesis bridge coverage.
+- `.hu` is an experimental implementation of a described-language recogniser. It is not a language framework and does not execute anything by itself.
 - [`gold/bsh-rs/`](gold/bsh-rs/) is archived and excluded from current project scope.
 
 ### Known Gaps
@@ -691,6 +725,7 @@ When fixing behavior, add an automated test harness if practical. Until one exis
 - Native string and filesystem libraries are absent; number/string operations have a verified `prim` fallback, while the optional filesystem framework remains untested.
 - No CI, formatter/linter configuration, packaging, or release workflow exists.
 - The language layer cannot truly remove syntax: the C core has no `undefkeyword`, `undefoperator`, or function removal, so `lang_unload` is cooperative. Full requirement list: `CDS-REQ-0` … `CDS-REQ-8` in [`guides/cdiesis.md`](guides/cdiesis.md).
+- `.hu` validates nothing at load time, hardcodes `'` and `"` as the described language's quotes, and has no "Karnaugh map" optimizer. Its expressiveness limits — global fields, no greedy-to-last, no right-associative or prefix-overlapping operators, no semantic ambiguity resolution — are listed with reasons in [`guides/hu.md`](guides/hu.md).
 - Native BSH is not Bash-compatible. Bash support depends on an installed `bash`; framework calls are isolated subprocesses, capture merges stderr/stdout and is limited to one BSH value, and automatic CLI routing uses the `.sh` suffix rather than shebang inspection.
 
 ### Planned

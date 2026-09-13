@@ -9,11 +9,12 @@
  *     besh_mem.c   the linear heap and the `mem` builtin
  *     besh_wasm.c  the WebAssembly binary writer
  *     besh_jit.c   the compiled (bytecode) execution path
+ *     besh_hu.c    the `.hu` language-description language and the `hu` builtin
  *
  * Dependencies point one way only. bsh.c never includes a besh_*.h except to
- * call the small set of hooks in besh_jit.h; the besh_*.c files include this
- * header to see the core. Anything an optional module does not need belongs in
- * bsh.c, not here.
+ * call the small set of hooks in besh_jit.h and besh_hu.h; the besh_*.c files
+ * include this header to see the core. Anything an optional module does not
+ * need belongs in bsh.c, not here.
  *
  * bsh.c owns the *definitions* of every global declared `extern` below.
  */

@@ -1,0 +1,110 @@
+# run_hu.bsh - Driver: describe a language in .hu, recognise text with it,
+# extend the description at runtime, then let the description drive BSH code.
+#
+# STATUS: demonstration script. Automated coverage lives in tests/hu_language.bsh.
+#
+# Run (once the core builds):
+#   BSH_MODULE_PATH=./framework ./bsh examples/hu/run_hu.bsh
+
+echo "=== .hu driver ==="
+
+# --- Load a description ---------------------------------------------------
+
+hu load "examples/hu/c_prototype.hu" g
+if $LAST_HU_STATUS != "0" {
+    echo "could not load the grammar; stopping"
+    exit 1
+}
+echo "grammar: $g"                          # expected: CPrototype
+
+hu fields "$g" fields
+echo "fields: $fields"
+
+echo ""
+echo "--- What the sentences became ---"
+# A .hu sentence is not stored as prose. This is the rule table it produced.
+hu rules "$g" root
+hu rules "$g" prototype
+hu rules "$g" parameters
+
+# --- Recognise ------------------------------------------------------------
+
+echo ""
+echo "--- Recognising 'int add(int a, int b);' ---"
+hu parse "$g" "int add(int a, int b);" tree
+hu tree "$tree"
+
+echo ""
+echo "--- The same tree as XML ---"
+# The original design document asks for an XML-shaped document; this is it.
+hu xml "$tree" doc
+echo "$doc"
+
+# --- Navigate -------------------------------------------------------------
+
+echo ""
+echo "--- Reading parts out ---"
+hu node "$tree" "prototype/name" name_node
+hu text "$name_node" fn_name
+echo "function name: $fn_name"              # expected: add
+
+hu node "$tree" "prototype/parameters" params
+hu count "$params" n
+echo "parameter count: $n"                  # expected: 2
+
+# --- Let the description drive BSH ---------------------------------------
+
+echo ""
+echo "--- A field calling a BSH function ---"
+# This is what makes .hu more than a reader: a field can name a BSH function,
+# and `hu walk` calls it once per matching node.
+
+function show_parameter (handle text) {
+    hu node "$handle" "type" t
+    hu text "$t" type_name
+    hu node "$handle" "argument" a
+    hu text "$a" arg_name
+    echo "  parameter '$arg_name' has type '$type_name'"
+}
+
+hu on "$g" parameter show_parameter
+hu walk "$tree"
+
+# --- A failure says what it wanted ---------------------------------------
+
+echo ""
+echo "--- A parse that cannot succeed ---"
+hu parse "$g" "int add(int a;" broken
+hu error why
+echo "diagnosis: $why"
+
+# --- Extend a description at runtime -------------------------------------
+
+echo ""
+echo "--- Extending a description without editing it ---"
+hu load "examples/hu/cdiesis.hu" cds
+hu parse "$cds" "Dictionary<string, int>;" t
+echo "generics before extending: $LAST_HU_STATUS"   # expected: 1
+
+hu extend "$cds" "examples/hu/cdiesis_generics.hu"
+hu parse "$cds" "Dictionary<string, int>;" t
+echo "generics after extending:  $LAST_HU_STATUS"   # expected: 0
+hu tree "$t"
+
+# A single sentence works too, with no file involved at all.
+hu rule "$cds" "A $declaration CAN BE $comment IF HAS '//'"
+hu fields "$cds" cds_fields
+echo "fields now: $cds_fields"
+
+# --- Clean up -------------------------------------------------------------
+
+echo ""
+# Trees are released by hand, like heap blocks - `hu status` is how you notice
+# that you forgot one.
+hu free "$tree"
+hu free "$t"
+hu unload "$g"
+hu unload "$cds"
+hu status
+
+echo "=== done ==="

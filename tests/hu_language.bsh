@@ -1,0 +1,260 @@
+# The `hu` builtin: .hu grammars, the region recogniser, and the BSH bridge.
+#
+# .hu describes the syntax of some other language and recognises text against
+# that description. Nothing here touches BSH's own syntax, which is the point,
+# so the checks are about what the recogniser builds and - just as much - about
+# what it refuses to build silently.
+import tests.lib.assert
+
+assert_start "hu: grammar description and recognition"
+
+# --- loading a description ------------------------------------------------
+
+hu load "examples/hu/c_prototype.hu" g
+assert_eq "$LAST_HU_STATUS" "0" "a .hu file loads"
+assert_eq "$g" "CPrototype" "the grammar takes the name from \$root IS"
+
+hu fields "$g" fields
+assert_contains "$fields" "prototype" "fields named in the description exist"
+assert_contains "$fields" "parameters" "nested fields exist too"
+
+# A path that is not a file is refused rather than read as an empty grammar.
+hu load "examples" bad
+assert_eq "$LAST_HU_STATUS" "1" "a directory is not a grammar"
+
+# --- the worked example ---------------------------------------------------
+
+hu parse "$g" "int add(int a, int b);" tree
+assert_eq "$LAST_HU_STATUS" "0" "the anchor input parses"
+
+hu kind "$tree" root_kind
+assert_eq "$root_kind" "root" "the tree is rooted at the root field"
+
+hu node "$tree" "prototype/returnType" n
+hu text "$n" v
+assert_eq "$v" "int" "ordered child 1 is the return type"
+
+hu node "$tree" "prototype/name" n
+hu text "$n" v
+assert_eq "$v" "add" "ordered child 2 is the name"
+
+hu node "$tree" "prototype/parameters" params
+hu count "$params" pcount
+assert_eq "$pcount" "2" "SEPARATED BY splits the parameter list"
+
+hu node "$params" "parameter/type" n
+hu text "$n" v
+assert_eq "$v" "int" "the first parameter's type"
+hu node "$params" "parameter/argument" n
+hu text "$n" v
+assert_eq "$v" "a" "the first parameter's name"
+
+hu child "$params" 1 second
+hu node "$second" "argument" n
+hu text "$n" v
+assert_eq "$v" "b" "the second parameter is reached by index"
+
+# --- XML, which is the shape the original design asks for -----------------
+
+hu xml "$tree" doc
+assert_contains "$doc" "<returnType>int</returnType>" "XML carries leaf text"
+assert_contains "$doc" "<argument>b</argument>" "XML carries nested leaves"
+assert_contains "$doc" "</parameters>" "XML closes its containers"
+
+# --- binding a node into shell variables ----------------------------------
+
+hu node "$tree" "prototype" proto
+hu bind "$proto" pr
+assert_eq "$pr_KIND" "prototype" "bind publishes the node's field name"
+assert_eq "$pr_COUNT" "3" "bind publishes the child count"
+hu text "$pr_name" bound_name
+assert_eq "$bound_name" "add" "bind reaches a child by field name"
+hu kind "$pr[2]" bound_kind
+assert_eq "$bound_kind" "parameters" "bind reaches a child by index"
+
+# --- a numbered list is a sequence; a bulleted list is a choice -----------
+
+hu define ordered "$root IS \"Ordered\"
+A $root HAS:
+1. The $first, that IS an #identifier
+2. The $second, that IS a #number" og
+
+hu parse "$og" "alpha 42" t
+assert_eq "$LAST_HU_STATUS" "0" "a numbered list matches in order"
+hu node "$t" "first" n
+hu text "$n" v
+assert_eq "$v" "alpha" "the first numbered part"
+
+hu parse "$og" "42 alpha" t
+assert_eq "$LAST_HU_STATUS" "1" "a numbered list rejects the wrong order"
+
+hu define choice "$root IS \"Choice\"
+A $root CAN BE:
+- A $number
+- An $identifier
+A $number IS a #number
+An $identifier IS an #identifier" cg
+
+hu parse "$cg" "42" t
+assert_eq "$LAST_HU_STATUS" "0" "a bulleted list accepts one alternative"
+hu child "$t" 0 c
+hu kind "$c" k
+assert_eq "$k" "number" "and picks the matching one"
+
+hu parse "$cg" "alpha" t
+assert_eq "$LAST_HU_STATUS" "0" "a bulleted list accepts the other alternative"
+hu child "$t" 0 c
+hu kind "$c" k
+assert_eq "$k" "identifier" "order of bulleted items does not fix the answer"
+
+# --- IF HAS guards, and the backtracking behind them ----------------------
+
+hu load "examples/hu/bsh_statement.hu" bg
+hu parse "$bg" "echo hello world" t
+hu node "$t" "statement/call/command" n
+hu text "$n" v
+assert_eq "$v" "echo" "no '=' present, so the call alternative is taken"
+
+hu parse "$bg" "count = 5" t
+hu node "$t" "statement/assignment/target" n
+hu text "$n" v
+assert_eq "$v" "count" "'=' present, so the assignment alternative is taken"
+
+# That target is bounded by #assign, a constant the description defines itself.
+hu node "$t" "statement/assignment/value" n
+hu text "$n" v
+assert_eq "$v" "5" "a script-defined constant works as a terminator"
+
+# A guard is a hint, not a decision: when the alternative it admits turns out
+# not to match, the recogniser must rewind and try the next one.
+hu define back "$root IS \"Back\"
+A $root CAN BE:
+- A $pair IF HAS ':'
+- A $plain
+A $pair HAS:
+1. The $key that ENDS WITH ':'
+2. The $val that IS a #number
+A $plain IS a #word" pg
+
+hu parse "$pg" "abc:12" t
+hu child "$t" 0 c
+hu kind "$c" k
+assert_eq "$k" "pair" "the guarded alternative is taken when it matches"
+
+hu parse "$pg" "hello" t
+hu child "$t" 0 c
+hu kind "$c" k
+assert_eq "$k" "plain" "an unfired guard falls through to the next alternative"
+
+# --- literals honour word boundaries --------------------------------------
+
+# Without a boundary rule the guard 'if' would fire inside "notify" forever.
+hu define bound "$root IS \"Bound\"
+A $root CAN BE:
+- A $conditional IF HAS 'if'
+- A $call
+A $conditional HAS:
+1. The $ifWord that IS 'if'
+2. The $rest
+A $call IS a #word" wg
+
+hu parse "$wg" "notify" t
+hu child "$t" 0 c
+hu kind "$c" k
+assert_eq "$k" "call" "a guard literal does not match inside a longer word"
+
+# --- separators respect quotes and nesting --------------------------------
+
+hu define quoted "$root IS \"Quoted\"
+$root CAN HAVE ONE OR MORE $item SEPARATED BY ','" qg
+
+hu parse "$qg" "'a,b', c" t
+hu count "$t" n
+assert_eq "$n" "2" "a separator inside quotes does not split"
+
+hu parse "$qg" "f(a,b), c" t
+hu count "$t" n
+assert_eq "$n" "2" "a separator inside brackets does not split"
+
+# --- nothing is dropped in silence ----------------------------------------
+
+hu define strict "$root IS \"Strict\"
+A $root HAS:
+1. The $a, that IS an #identifier
+2. The $b, that IS an #identifier" sg
+
+hu parse "$sg" "one two three" t
+assert_eq "$LAST_HU_STATUS" "1" "input left over after the last part is an error"
+
+# --- a failed parse says what it was waiting for --------------------------
+
+hu parse "$pg" "abc:xyz" t
+assert_eq "$LAST_HU_STATUS" "1" "a parse that cannot succeed fails"
+hu error msg
+assert_contains "$msg" "expected" "the diagnostic says what was expected"
+assert_contains "$msg" "line 1" "the diagnostic locates itself"
+
+# --- real-time extension --------------------------------------------------
+
+hu rule "$g" "A $parameter CAN HAVE ONE $qualifier"
+assert_eq "$LAST_HU_STATUS" "0" "a single sentence applies to a live grammar"
+hu fields "$g" fields
+assert_contains "$fields" "qualifier" "the new field is there"
+
+hu load "examples/hu/cdiesis.hu" cds
+hu parse "$cds" "namespace Demo;" t
+hu node "$t" "declaration/namespace/namespaceName" n
+hu text "$n" v
+assert_eq "$v" "Demo" "the base grammar recognises a declaration"
+
+hu parse "$cds" "Dictionary<string, int>;" t
+assert_eq "$LAST_HU_STATUS" "1" "the base grammar does not know generics yet"
+
+hu extend "$cds" "examples/hu/cdiesis_generics.hu"
+assert_eq "$LAST_HU_STATUS" "0" "an extension script applies"
+hu list loaded
+assert_contains "$loaded" "CDiesis" "the extended grammar keeps its name"
+
+hu parse "$cds" "Dictionary<string, int>;" t
+assert_eq "$LAST_HU_STATUS" "0" "the extension added a construct"
+hu node "$t" "declaration/genericClass/typeArguments" targs
+hu count "$targs" n
+assert_eq "$n" "2" "and the construct recognises its parts"
+
+hu parse "$cds" "namespace Demo;" t
+assert_eq "$LAST_HU_STATUS" "0" "extending did not break what the base did"
+
+# --- fields can drive BSH functions ---------------------------------------
+
+$SEEN = ""
+
+# $(NAME) writes the outer variable; a plain $NAME = would make a local one.
+function hu_test_note (handle text) {
+    $(SEEN) = "$SEEN|$text"
+}
+
+hu on "$g" parameter hu_test_note
+hu parse "$g" "int add(int a, int b);" walked
+hu walk "$walked"
+assert_eq "$SEEN" "|int a|int b" "hu walk calls a BSH function per matching node"
+
+# --- handles cannot outlive their tree ------------------------------------
+
+hu free "$walked"
+hu text "$walked" gone
+assert_eq "$LAST_HU_STATUS" "1" "a handle used after hu free is refused"
+
+hu text "hu#0.999999" gone
+assert_eq "$LAST_HU_STATUS" "1" "a fabricated handle is refused"
+
+hu text "not-a-handle" gone
+assert_eq "$LAST_HU_STATUS" "1" "a handle that is not one at all is refused"
+
+# --- unloading ------------------------------------------------------------
+
+hu unload "$cds"
+assert_eq "$LAST_HU_STATUS" "0" "a grammar unloads"
+hu fields "$cds" gone
+assert_eq "$LAST_HU_STATUS" "1" "and is gone afterwards"
+
+assert_summary

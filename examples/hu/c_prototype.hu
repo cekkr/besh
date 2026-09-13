@@ -1,0 +1,19 @@
+/// c_prototype.hu - The shape of a C function prototype.
+///
+/// This is the form framework/c_compiler.bsh deals in when it compiles a
+/// native library at runtime, which is why it is the worked example: the
+/// description is of syntax this project already emits and reads.
+
+$root IS "CPrototype"
+$root CAN HAVE ONE OR MORE $prototype
+
+A $prototype ENDS WITH ';'
+A $prototype HAS:
+1. The $returnType, that IS a #word
+2. The $name of the function, that IS an #identifier
+3. The $parameters that ARE INSIDE '(', ')'
+
+$parameters CAN HAVE ONE OR MORE $parameter SEPARATED BY ','
+A $parameter HAS:
+1. The $type, that IS a #word
+2. The $argument, that IS an #identifier

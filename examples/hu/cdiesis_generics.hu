@@ -1,0 +1,24 @@
+/// cdiesis_generics.hu - An extension of cdiesis.hu.
+///
+/// The original design document proposes extending a language by describing
+/// the extension separately, rather than by editing the base description. This
+/// file is that: applied with `hu extend`, it adds a generic type argument
+/// list to the base grammar and overrides one of its constants.
+///
+///   hu load   "examples/hu/cdiesis.hu" g
+///   hu extend "$g" "examples/hu/cdiesis_generics.hu"
+///
+/// The base grammar keeps its name, so a caller already holding it keeps
+/// working - which is what makes this an extension rather than a replacement.
+
+/// Override a constant the base grammar defined: a name may now be dotted.
+#word IS #identifier
+
+/// A new field, and a new alternative that reaches it.
+A $declaration CAN BE $genericClass IF HAS '<'
+
+A $genericClass HAS:
+1. The $className, that IS a #word
+2. The $typeArguments that ARE INSIDE '<', '>'
+
+$typeArguments CAN HAVE ONE OR MORE $typeArgument SEPARATED BY ','

@@ -71,7 +71,7 @@ if [ "$DO_BUILD" -eq 1 ]; then
     fi
     # shellcheck disable=SC2086
     if ! cc -Wall -Wextra -fno-common -g -I"$SRC_DIR" -I"$FAYASM_SRC" \
-            "$SRC_DIR"/bsh.c "$SRC_DIR"/besh_mem.c "$SRC_DIR"/besh_wasm.c "$SRC_DIR"/besh_jit.c $fayasm_objects \
+            "$SRC_DIR"/bsh.c "$SRC_DIR"/besh_mem.c "$SRC_DIR"/besh_wasm.c "$SRC_DIR"/besh_jit.c "$SRC_DIR"/besh_hu.c $fayasm_objects \
             -o "$BSH_BIN" 2> /tmp/bsh_build_errors.txt; then
         printf '   BUILD FAILED\n'
         cat /tmp/bsh_build_errors.txt
