@@ -19,8 +19,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* besh_core.h includes this header after Token and UserFunction exist. */
-struct UserFunction;
+#include "bsh.h"
 
 typedef enum {
     BESH_MODE_OFF = 0,   /* interpreter only                                   */
@@ -42,7 +41,7 @@ void            besh_jit_set_mode(BeshCompileMode mode);
 
 /* Runs `func`'s body as bytecode if it can. The caller has already created the
  * function scope and bound the parameters. */
-BeshRunStatus besh_jit_run_function(struct UserFunction* func);
+BeshRunStatus besh_jit_run_function(UserFunction* func);
 
 /* Drops every cached module. Called when `defoperator`, `defkeyword` or a
  * redefinition changes how source would be parsed or resolved. */

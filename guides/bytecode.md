@@ -1,7 +1,7 @@
 # The B[e]SH bytecode path
 
 B[e]SH executes BSH function bodies in one of two ways. The line-oriented
-interpreter in [`bsh.c`](../bsh.c) is the reference implementation and always
+interpreter in [`src/bsh.c`](../src/bsh.c) is the reference implementation and always
 available. The bytecode path parses a function body once, lowers it to a
 WebAssembly module, and executes that module with the pinned
 [Fayasm](../thirds/fayasm/) runtime linked into the same process.
@@ -142,7 +142,7 @@ recognise at all takes the same route. This is why every B[e]SH command and
 every syntax form keeps working inside a compiled function.
 
 The list of interpreter built-ins lives in `is_interpreter_builtin` in
-[`besh_jit.c`](../besh_jit.c) and must stay in step with the dispatch chain in
+[`src/besh_jit.c`](../src/besh_jit.c) and must stay in step with the dispatch chain in
 `process_line`.
 
 ### Unwinding
@@ -178,7 +178,7 @@ being executed cannot be freed underneath itself.
 
 ## The heap
 
-[`besh_mem.h`](../besh_mem.h) owns one contiguous byte array that is both the
+[`src/besh_mem.h`](../src/besh_mem.h) owns one contiguous byte array that is both the
 BSH heap and the WebAssembly linear memory. A pointer is a byte offset into it;
 `0` is null. `BSH_HEAP_BYTES` sets the initial size (default 4 MiB); the heap
 grows on demand, but never while compiled code is running — that would move the

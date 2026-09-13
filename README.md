@@ -775,7 +775,7 @@ cDiesis registers no keyword and no operator with the C parser.
 cDiesis (Italian for the sharp sign: *do diesis* = C♯) is a statically typed,
 class-based language with methods, single inheritance, virtual dispatch, generics
 and a small standard library — written **entirely in BSH**. None of it lives in
-`bsh.c`.
+`src/bsh.c`.
 
 It exists as the adversarial test of the compiler's founding assumption: that
 B[e]SH's runtime-enlarged language bottoms out in a small primitive set rather
@@ -1098,12 +1098,13 @@ operator-heavy framework code, and a cDiesis unit. Numbers are in
 ## Repository layout
 
 ```
-bsh.c                    core: tokenizer, operator registry, evaluator, dispatcher,
-                         scopes, blocks, modules, processes, dynamic libraries
-besh_core.h              shared declarations across the translation units
-besh_mem.{h,c}           the linear heap == the WebAssembly memory; the `mem` built-in
-besh_wasm.{h,c}          a WebAssembly binary writer; knows nothing about BSH
-besh_jit.{h,c}           IR, tier decision, emission, the `besh.v1` imports,
+src/                     all C sources
+  bsh.c                  the monolithic core: tokenizer, operator registry, evaluator,
+                         dispatcher, scopes, blocks, modules, processes, dynamic libraries
+  bsh.h                  the slice of the core the optional modules may reach
+  besh_mem.{h,c}         optional: the linear heap == the WebAssembly memory; `mem`
+  besh_wasm.{h,c}        optional: a WebAssembly binary writer; knows nothing about BSH
+  besh_jit.{h,c}         optional: IR, tier decision, emission, the `besh.v1` imports,
                          the Fayasm runtime pool, `bytecode`
 .bshrc                   startup: this file defines the language
 framework/               BSH modules — operators, number/string/type, mem/strlib/list,

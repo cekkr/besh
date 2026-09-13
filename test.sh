@@ -40,6 +40,7 @@ done
 
 # --- Build ---------------------------------------------------------------
 
+SRC_DIR="$REPO_DIR/src"
 FAYASM_SRC="$REPO_DIR/thirds/fayasm/src"
 
 if [ "$DO_BUILD" -eq 1 ]; then
@@ -69,8 +70,8 @@ if [ "$DO_BUILD" -eq 1 ]; then
         exit 1
     fi
     # shellcheck disable=SC2086
-    if ! cc -Wall -Wextra -fno-common -g -I"$REPO_DIR" -I"$FAYASM_SRC" \
-            bsh.c besh_mem.c besh_wasm.c besh_jit.c $fayasm_objects \
+    if ! cc -Wall -Wextra -fno-common -g -I"$SRC_DIR" -I"$FAYASM_SRC" \
+            "$SRC_DIR"/bsh.c "$SRC_DIR"/besh_mem.c "$SRC_DIR"/besh_wasm.c "$SRC_DIR"/besh_jit.c $fayasm_objects \
             -o "$BSH_BIN" 2> /tmp/bsh_build_errors.txt; then
         printf '   BUILD FAILED\n'
         cat /tmp/bsh_build_errors.txt

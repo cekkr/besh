@@ -3,7 +3,7 @@ echo "--- Start of Enhanced Example Script ---"
 
 # Assume number.bsh and string.bsh are loaded.
 
-# --- Using number.bsh with enhanced bsh.c tokenizer ---
+# --- Using number.bsh with enhanced src/bsh.c tokenizer ---
 echo ""
 echo "--- Testing Numeric Features (Enhanced Tokenizer) ---"
 

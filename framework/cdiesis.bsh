@@ -2,7 +2,7 @@
 #
 # cDiesis ("C sharp", read the Italian way: do diesis = C#) is a C#-shaped
 # language implemented entirely as a B[e]SH framework. Nothing about it lives in
-# bsh.c: classes, static types, methods, generics-by-erasure and its standard
+# src/bsh.c: classes, static types, methods, generics-by-erasure and its standard
 # library are all lowered onto the shell's primitives - string variables,
 # name mangling, function calls, if/while - by BSH code in framework/cdiesis/.
 #

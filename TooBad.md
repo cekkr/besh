@@ -9,11 +9,11 @@
   reach the bytecode path's kernel tier. The older frameworks (`number.bsh`,
   `string.bsh`, `type.bsh`, `core_operators.bsh`) still use the convention, and
   changing them means changing every caller and the operator dispatcher in
-  `bsh.c` at the same time.
+  `src/bsh.c` at the same time.
 
 - The compiled path duplicates decisions the interpreter makes. `if` and
   `while` read their conditions differently from each other, and both differ
-  from the expression parser; `compile_one` in `besh_jit.c` reimplements all
+  from the expression parser; `compile_one` in `src/besh_jit.c` reimplements all
   three, and `is_interpreter_builtin` restates the dispatch chain in
   `process_line`. Only `tests/bytecode_differential.bsh` keeps them in step. The
   real fix is for the interpreter to execute the same IR, which is Phase 1 work

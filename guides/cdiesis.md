@@ -8,7 +8,7 @@ remain intentional research boundaries, not production-support claims.
 
 cDiesis (Italian for the sharp sign: *do diesis* = C♯) is a statically typed,
 class-based language with methods, single inheritance, virtual dispatch,
-generics and a small standard library. None of it lives in [`bsh.c`](../bsh.c).
+generics and a small standard library. None of it lives in [`src/bsh.c`](../src/bsh.c).
 It is a **language framework**: BSH code that can be imported, activated,
 deactivated and replaced at runtime, that owns its own notation end to end, and
 that reduces every construct it accepts to a fixed, tiny set of primitive
@@ -54,12 +54,12 @@ Ownership boundaries, mirroring the ones ROADMAP.md sets for the compiler:
 
 | Layer | Owns |
 | --- | --- |
-| [`bsh.c`](../bsh.c) | tokenizing BSH, scopes, string variables, functions, process/library boundaries |
+| [`src/bsh.c`](../src/bsh.c) | tokenizing BSH, scopes, string variables, functions, process/library boundaries |
 | [`framework/lang.bsh`](../framework/lang.bsh) | framework lifecycle, cross-language calls, argument vector, exports |
 | [`framework/cdiesis.bsh`](../framework/cdiesis.bsh) + `framework/cdiesis/` | cDiesis notation, type system, object model, lowering, execution |
 | [`framework/core_operators.bsh`](../framework/core_operators.bsh), [`number.bsh`](../framework/number.bsh), [`string.bsh`](../framework/string.bsh) | the arithmetic/string primitives both languages share |
 
-cDiesis never calls `bsh.c` internals and never registers a keyword or operator
+cDiesis never calls `src/bsh.c` internals and never registers a keyword or operator
 with the C parser. That restraint is what makes it unloadable.
 
 ## The primitive op set
@@ -274,7 +274,7 @@ cDiesis keeps working.
 
 ## Required core capabilities
 
-These are the things `bsh.c` must provide before any of the above can run. Each
+These are the things `src/bsh.c` must provide before any of the above can run. Each
 was checked against the current source; none is a hypothetical nicety.
 
 | Id | Capability | Current state |

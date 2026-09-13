@@ -5,7 +5,7 @@
 # disk, 'process' to run the compiler with preserved argument boundaries, and
 # 'loadlib' to bring the result into the process.
 #
-# The C ABI a compiled library must follow is fixed by bsh.c:
+# The C ABI a compiled library must follow is fixed by src/bsh.c:
 #   int func_name(int argc, char* argv[], char* output_buffer, int buffer_size)
 # and results come back through $LAST_LIB_CALL_STATUS / $LAST_LIB_CALL_OUTPUT.
 #

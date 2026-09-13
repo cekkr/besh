@@ -11,6 +11,7 @@
 set -e
 
 REPO_DIR=$(cd "$(dirname "$0")" && pwd)
+SRC_DIR="$REPO_DIR/src"
 FAYASM_SRC="$REPO_DIR/thirds/fayasm/src"
 
 if [ ! -f "$FAYASM_SRC/fa_runtime.c" ]; then
@@ -18,8 +19,8 @@ if [ ! -f "$FAYASM_SRC/fa_runtime.c" ]; then
     exit 1
 fi
 
-gcc -fno-common -g -I"$REPO_DIR" -I"$FAYASM_SRC" \
-    "$REPO_DIR/bsh.c" "$REPO_DIR/besh_mem.c" "$REPO_DIR/besh_wasm.c" "$REPO_DIR/besh_jit.c" \
+gcc -fno-common -g -I"$SRC_DIR" -I"$FAYASM_SRC" \
+    "$SRC_DIR/bsh.c" "$SRC_DIR/besh_mem.c" "$SRC_DIR/besh_wasm.c" "$SRC_DIR/besh_jit.c" \
     "$FAYASM_SRC"/*.c \
     -o "$REPO_DIR/bsh"
 

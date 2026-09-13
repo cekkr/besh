@@ -8,7 +8,7 @@
 # Everything here is a plain integer. A pointer is the byte offset of a payload
 # inside the heap, and 0 means null.
 #
-# Layout of a vector (see besh_mem.h):
+# Layout of a vector (see src/besh_mem.h):
 #
 #     +0   u32 len    elements in use
 #     +4   u32 cap    elements the payload can hold

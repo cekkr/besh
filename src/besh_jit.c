@@ -41,7 +41,9 @@
  * interpreter, which costs three instructions instead of a host call.
  */
 
-#include "besh_core.h"
+#include "bsh.h"
+#include "besh_jit.h"
+#include "besh_mem.h"
 #include "besh_wasm.h"
 
 #include <ctype.h>

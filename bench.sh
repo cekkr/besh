@@ -78,6 +78,7 @@ esac
 # Benchmarks are built without -g: debug symbols are what compile.sh and
 # test.sh want, but they are not what anyone should be timing.
 
+SRC_DIR="$REPO_DIR/src"
 FAYASM_SRC="$REPO_DIR/thirds/fayasm/src"
 
 if [ "$DO_BUILD" -eq 1 ]; then
@@ -100,8 +101,8 @@ if [ "$DO_BUILD" -eq 1 ]; then
         fayasm_objects="$fayasm_objects $object"
     done
     # shellcheck disable=SC2086
-    if ! cc -O2 -fno-common -I"$REPO_DIR" -I"$FAYASM_SRC" \
-            bsh.c besh_mem.c besh_wasm.c besh_jit.c $fayasm_objects \
+    if ! cc -O2 -fno-common -I"$SRC_DIR" -I"$FAYASM_SRC" \
+            "$SRC_DIR"/bsh.c "$SRC_DIR"/besh_mem.c "$SRC_DIR"/besh_wasm.c "$SRC_DIR"/besh_jit.c $fayasm_objects \
             -o "$BSH_BIN" 2>> /tmp/bsh_bench_build.txt; then
         printf '   BUILD FAILED\n'
         cat /tmp/bsh_bench_build.txt

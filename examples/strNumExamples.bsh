@@ -166,7 +166,7 @@ echo "  Character at index 11 of '$final_str': '$char_res'" # Expected: '!'
 string_char_at_index "$final_str" "100" char_res # Out of bounds
 echo "  Character at index 100 of '$final_str': '$char_res'" # Expected: '' (empty string)
 
-# Direct Character Access (syntax $string[index] - requires bsh.c modification)
+# Direct Character Access (syntax $string[index] - requires src/bsh.c modification)
 echo ""
 echo "Direct Character Access (syntax \$string[index]):"
 $my_name_str = "BSHShell"

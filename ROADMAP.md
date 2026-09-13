@@ -116,7 +116,7 @@ single measurements had supported:
 
 ## Phase 1 — Define a Stable BSH Intermediate Representation
 
-**Status: Done for the supported subset.** [`besh_jit.c`](besh_jit.c) parses a
+**Status: Done for the supported subset.** [`src/besh_jit.c`](src/besh_jit.c) parses a
 function body once, at first call, into the `IRExpr`/`IRStmt` forms: literals,
 variable references, interpolation, array indexing, resolved binary/unary
 operators, calls, assignment, `if`/`else`, `while`, `return`, `echo`, `prim`,
@@ -168,8 +168,8 @@ B[e]SH values remain strings even when a value can be interpreted as an integer 
 
 ## Phase 3 — Emit and Execute the First Compiled Functions
 
-**Status: Done.** [`besh_wasm.c`](besh_wasm.c) emits the type, import, function,
-export and code sections; [`besh_jit.c`](besh_jit.c) loads the bytes with
+**Status: Done.** [`src/besh_wasm.c`](src/besh_wasm.c) emits the type, import, function,
+export and code sections; [`src/besh_jit.c`](src/besh_jit.c) loads the bytes with
 Fayasm, binds the imports and the shared memory, and runs the exported entry.
 Control flow lowers to structured WebAssembly, unsupported statements fall back
 through the `raw` import, and `off`/`auto`/`force` are implemented. Not done:

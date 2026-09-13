@@ -37,9 +37,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Width of one BSH value buffer. besh_core.h defines INPUT_BUFFER_SIZE from
- * this so that the `mem` argument vector below cannot drift from it. */
-#define BESH_ARG_SIZE       16384
+#include "bsh.h"
+
+/* Width of one BSH value buffer. The core owns the number; taking it from
+ * INPUT_BUFFER_SIZE is what keeps the `mem` argument vector below from
+ * drifting away from the buffers the shell actually hands over. */
+#define BESH_ARG_SIZE       INPUT_BUFFER_SIZE
 
 #define BESH_MEM_HDR        8u    /* bytes of block header before a payload */
 #define BESH_MEM_ALIGN      8u
